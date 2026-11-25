@@ -9,11 +9,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -32,6 +34,8 @@ var (
 	sboxRuntime     sandbox.Backend
 	sboxRuntimeName string
 	sboxStateDir    string
+	// sboxLocal keeps system disks as image files in the state directory instead of Bowl disks.
+	sboxLocal bool
 )
 
 const (
@@ -91,6 +95,9 @@ func newSandboxCmd() *cobra.Command {
 				return usageExitErr(err, false)
 			}
 			sboxRuntime, sboxRuntimeName, sboxStateDir = backend, name, stateDir
+			if sboxLocal = sboxLocal || os.Getenv("BOWL_SANDBOX_STORAGE") == "local"; sboxLocal && name != runtimeMicroVM {
+				return usageExitErr(errors.New("--local works only with the microvm runtime"), false)
+			}
 			return nil
 		},
 		Args: func(cmd *cobra.Command, posArgs []string) error {
@@ -128,6 +135,8 @@ func newSandboxCmd() *cobra.Command {
 		newSandboxMoveCmd(),
 	)
 	cmd.PersistentFlags().StringVar(&runtimeFlag, "runtime", "", "Sandbox runtime: microvm, container or docker (default: $BOWL_SANDBOX_RUNTIME, else microvm when /dev/kvm exists, else docker)")
+	cmd.PersistentFlags().BoolVar(&sboxLocal, "local", false, "Keep system disks as image files in the state directory instead of Bowl disks (microvm only; no fork, diff, merge or move). "+
+		"Put --state-dir on a reflink filesystem (XFS, btrfs), or every create writes a full copy of the template to disk. Also $BOWL_SANDBOX_STORAGE=local")
 	cmd.PersistentFlags().StringVar(&stateDir, "state-dir", "", "MicroVM state directory holding vmlinux and bowl-sandbox-guest (default /var/lib/bowl-sandbox)")
 	return cmd
 }
@@ -149,6 +158,9 @@ func sboxCreate(o *sboxCreateOpts) (string, error) {
 	}
 	if sboxBootsFromDisk() && o.From == "" && o.Template == "" {
 		return "", usageExitErr(fmt.Errorf("the %s runtime boots from the disk, so --template <name> or --from <disk> is required", sboxRuntimeName), false)
+	}
+	if sboxLocal {
+		return sboxCreateLocal(o)
 	}
 	if sboxRuntimeName != runtimeMicroVM {
 		if _, err := exec.LookPath("docker"); err != nil {
@@ -204,6 +216,34 @@ func sboxCreate(o *sboxCreateOpts) (string, error) {
 		}
 	}
 	return diskID, nil
+}
+
+// sboxCreateLocal starts a microVM on a copy of a local template image; no storage node is involved.
+func sboxCreateLocal(o *sboxCreateOpts) (string, error) {
+	if o.Template == "" {
+		return "", usageExitErr(errors.New("--local needs --template <name>"), false)
+	}
+	vm := &sandbox.MicroVM{StateDir: sboxStateDir}
+	image := filepath.Join(vm.LocalTemplateDir(o.Template), sandbox.BlockImage)
+	if _, err := os.Stat(image); err != nil {
+		return "", runtimeExitErr(fmt.Errorf("local template %q not found; create it with: bowl-sandbox --local template create <image>", o.Template))
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return "", runtimeExitErr(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	spec := &sandbox.CreateSpec{ID: id.String(), Image: o.Template, LocalImage: image, CPUs: o.CPUs, MemoryMiB: o.MemoryMiB}
+	if err = sboxRuntime.Create(ctx, spec); err != nil {
+		return "", runtimeExitErr(err)
+	}
+	if o.Timeout > 0 {
+		if err = sboxSetDeadline(spec.ID, o.Timeout); err != nil {
+			return spec.ID, runtimeExitErr(fmt.Errorf("sandbox %s is up but the timeout was not set: %w", spec.ID, err))
+		}
+	}
+	return spec.ID, nil
 }
 
 func newSandboxCreateCmd() *cobra.Command {
@@ -603,16 +643,19 @@ func newSandboxKillCmd() *cobra.Command {
 }
 
 func sboxKillOne(ctx context.Context, id string, keepDisk bool, endpoint, token string, stdout io.Writer) error {
-	if endpoint == "" {
+	info, infoErr := sboxRuntime.Info(ctx, id)
+	if endpoint == "" && infoErr == nil {
 		// The disk must be deleted on the storage node the sandbox was created against.
-		if info, err := sboxRuntime.Info(ctx, id); err == nil {
-			endpoint = info.Endpoint
-		}
+		endpoint = info.Endpoint
 	}
 	if err := sboxRuntime.Remove(ctx, id); err != nil {
 		return err
 	}
 	sboxClearDeadline(id)
+	if info.Local {
+		fmt.Fprintf(stdout, "Removed sandbox %s\n", id)
+		return nil
+	}
 	if keepDisk {
 		fmt.Fprintf(stdout, "Removed the container of sandbox %s; disk kept\n", id)
 		return nil

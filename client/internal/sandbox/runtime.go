@@ -103,7 +103,9 @@ type Info struct {
 	// CPUs 和 MemoryMiB 是创建时定的规格;0 表示没有限制或不知道。
 	CPUs, MemoryMiB int
 	// Block 为真时系统盘是块设备镜像(见 BlockImage),盘里只有这一个文件,diff 和 merge 看不到里面。
-	Block  bool
+	Block bool
+	// Local 为真时系统盘是本机镜像文件,没有对应的 Bowl 盘。
+	Local  bool
 	Mounts []Mount
 }
 
@@ -129,6 +131,8 @@ type CreateSpec struct {
 	Arch string
 	// CPUs 和 MemoryMiB 是规格上限,0 表示用后端的默认值。
 	CPUs, MemoryMiB int
+	// LocalImage 不为空时系统盘从这个本机镜像文件复制而来,不挂 Bowl 盘(只有 microvm 支持)。
+	LocalImage string
 	// SandboxEndpoint 是沙箱内访问 StorageService 用的地址。为空时由 HostEndpoint 推出
 	// （回环地址改写成 host.docker.internal）。算力和存储在同一内网时填内网地址。
 	SandboxEndpoint string

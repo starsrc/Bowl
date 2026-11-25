@@ -69,6 +69,11 @@ func (m *MicroVM) GuestAgentFile() string {
 	return ""
 }
 
+// LocalTemplateDir 是本机模板 name 的目录,里面是一个 BlockImage。
+func (m *MicroVM) LocalTemplateDir(name string) string {
+	return filepath.Join(m.stateDir(), "templates", strings.NewReplacer("/", "_", ":", "_").Replace(name))
+}
+
 // BuildBlockImage 在 diskRoot(一块挂在本机的模板盘)里做一个 sizeBytes 大小的 ext4 镜像
 // BlockImage,把容器镜像解进去,再放好执行代理和 resolv.conf。需要 Linux 的 mkfs.ext4 和 loop 设备。
 func (m *MicroVM) BuildBlockImage(ctx context.Context, image, arch, diskRoot string, sizeBytes int64, errOut io.Writer) error {

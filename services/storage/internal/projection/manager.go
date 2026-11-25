@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/google/uuid"
@@ -45,9 +46,19 @@ type ManagerOptions struct {
 	DisableStartupReconcile bool
 }
 
-type diskSlot struct {
+const (
+	diskSlotStripes   = 1024
+	diskSlotCacheLine = 64
+)
+
+type diskSlotCore struct {
 	opMu   sync.RWMutex
 	openMu sync.Mutex
+}
+
+type diskSlot struct {
+	diskSlotCore
+	_ [(diskSlotCacheLine - unsafe.Sizeof(diskSlotCore{})%diskSlotCacheLine) % diskSlotCacheLine]byte
 }
 
 type diskEntry struct {
@@ -73,8 +84,7 @@ type ControlManager struct {
 	disableGC         bool
 	opTimeout         time.Duration
 
-	slotsMu sync.Mutex
-	slots   map[uuid.UUID]*diskSlot
+	slots [diskSlotStripes]diskSlot
 
 	poolMu sync.RWMutex
 	closed bool
@@ -157,7 +167,6 @@ func NewControlManager(opts ManagerOptions) (*ControlManager, error) {
 		gcInterval:        gcInterval,
 		disableGC:         opts.DisableGC,
 		opTimeout:         opTimeout,
-		slots:             make(map[uuid.UUID]*diskSlot),
 		disks:             make(map[uuid.UUID]*diskEntry),
 		bgCtx:             bgCtx,
 		bgCancel:          bgCancel,
@@ -251,15 +260,21 @@ func diskExistsOnFS(dir string) bool {
 	return err == nil && info.IsDir()
 }
 
-func (m *ControlManager) getSlot(diskID uuid.UUID) *diskSlot {
-	m.slotsMu.Lock()
-	slot, ok := m.slots[diskID]
-	if !ok {
-		slot = &diskSlot{}
-		m.slots[diskID] = slot
+func diskSlotIndex(diskID uuid.UUID) uint64 {
+	const (
+		offset64 uint64 = 14695981039346656037
+		prime64  uint64 = 1099511628211
+	)
+	h := offset64
+	for _, b := range diskID {
+		h ^= uint64(b)
+		h *= prime64
 	}
-	m.slotsMu.Unlock()
-	return slot
+	return h & (diskSlotStripes - 1)
+}
+
+func (m *ControlManager) getSlot(diskID uuid.UUID) *diskSlot {
+	return &m.slots[diskSlotIndex(diskID)]
 }
 
 func (m *ControlManager) lockDisk(diskID uuid.UUID) func() {

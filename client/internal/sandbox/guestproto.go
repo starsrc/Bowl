@@ -34,6 +34,8 @@ type execRequest struct {
 	TTY  bool   `json:"tty,omitempty"`
 	Rows uint16 `json:"rows,omitempty"`
 	Cols uint16 `json:"cols,omitempty"`
+	// Reset 不为空时不执行命令:代理按它重设网卡地址、时钟和随机数种子(见 guestReset)。
+	Reset *guestReset `json:"reset,omitempty"`
 }
 
 func writeFrame(w io.Writer, typ byte, p []byte) error {

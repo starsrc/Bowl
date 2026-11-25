@@ -47,6 +47,7 @@ func newSandboxTemplateCmd() *cobra.Command {
 func newTemplateCreateCmd() *cobra.Command {
 	var name, size, binary, endpoint, token string
 	var block bool
+	var prewarm string
 	cmd := &cobra.Command{
 		Use:   "create <image>",
 		Short: "Turn a container image (e.g. ubuntu:24.04) into a template disk; needs a local Docker",
@@ -65,7 +66,7 @@ func newTemplateCreateCmd() *cobra.Command {
 				return usageExitErr(errors.New("--block templates boot only on the microvm runtime"), false)
 			}
 			if sboxLocal {
-				return createLocalTemplate(cmd, image, name, int64(maxBytes)) //nolint:gosec // a disk size
+				return createLocalTemplate(cmd, image, name, int64(maxBytes), prewarm) //nolint:gosec // a disk size
 			}
 			// microvm mounts the disk on this host with the host's bowl; the Docker runtimes inject a
 			// Linux client into a helper container and build one when --binary is empty.
@@ -104,6 +105,8 @@ func newTemplateCreateCmd() *cobra.Command {
 	flags.StringVar(&size, "size", "4GiB", "Capacity of the template disk; sandboxes forked from it get the same")
 	flags.BoolVar(&block, "block", false, "Store the system as an ext4 block-device image on the disk (microvm only); "+
 		"faster for many small files, but diff and merge see one image file")
+	flags.StringVar(&prewarm, "prewarm", "", "With --local: run this shell command in the template VM before its snapshot is taken, "+
+		"so every sandbox starts with its effects in memory (e.g. a warm page cache)")
 	flags.StringVar(&binary, "binary", "", "Linux bowl client that mounts the disk: on this host for microvm (default: bowl in PATH), "+
 		"inside a helper container otherwise (default: build one)")
 	addSandboxStorageFlags(cmd, &endpoint, &token)
@@ -111,7 +114,7 @@ func newTemplateCreateCmd() *cobra.Command {
 }
 
 // createLocalTemplate builds the template as an ext4 image in the state directory.
-func createLocalTemplate(cmd *cobra.Command, image, name string, sizeBytes int64) error {
+func createLocalTemplate(cmd *cobra.Command, image, name string, sizeBytes int64, prewarm string) error {
 	vm := &sandbox.MicroVM{StateDir: sboxStateDir}
 	dir := vm.LocalTemplateDir(name)
 	if _, err := os.Stat(dir); err == nil {
@@ -124,6 +127,14 @@ func createLocalTemplate(cmd *cobra.Command, image, name string, sizeBytes int64
 	if err := vm.BuildBlockImage(context.Background(), image, runtime.GOARCH, dir, sizeBytes, cmd.ErrOrStderr()); err != nil {
 		_ = os.RemoveAll(dir)
 		return runtimeExitErr(err)
+	}
+	// A snapshot of a booted VM lets create restore instead of booting. Without it the template still works.
+	var warm []string
+	if prewarm != "" {
+		warm = []string{"sh", "-c", prewarm}
+	}
+	if err := vm.SnapshotTemplate(context.Background(), dir, warm); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: no snapshot, sandboxes from this template will boot normally: %v\n", err)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Local template %s is ready in %s\n  Use:   bowl-sandbox --local create --template %s\n",
 		name, time.Since(start).Round(time.Millisecond), name)

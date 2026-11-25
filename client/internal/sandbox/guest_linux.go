@@ -80,13 +80,21 @@ func serveExec(conn *os.File) {
 		return
 	}
 	var req execRequest
-	if err = json.Unmarshal(p, &req); err != nil || len(req.Argv) == 0 {
+	if err = json.Unmarshal(p, &req); err != nil || (len(req.Argv) == 0 && req.Reset == nil) {
 		return
 	}
 
 	var mu sync.Mutex
 	stdout := frameWriter{mu: &mu, w: conn, typ: frameStdout}
 	stderr := frameWriter{mu: &mu, w: conn, typ: frameStderr}
+	if req.Reset != nil {
+		code := 0
+		if err = applyReset(req.Reset); err != nil {
+			code = 1
+		}
+		finishExec(&mu, conn, stderr, code, err)
+		return
+	}
 
 	cmd := exec.Command(req.Argv[0], req.Argv[1:]...) //nolint:gosec // 执行调用方给的命令就是这个代理的用途
 	cmd.Dir = req.Cwd

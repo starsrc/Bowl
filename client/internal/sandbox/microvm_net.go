@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"fmt"
@@ -155,24 +156,24 @@ func (m *MicroVM) setPaused(ctx context.Context, id string, paused bool) error {
 			m.guestSync(ctx, id) // 暂停后紧接着的 fork 要看到虚机页缓存里的写入
 		}
 	}
-	if err := m.vmAPI(ctx, id, action); err != nil {
+	if err := m.vmAPI(ctx, id, action, nil); err != nil {
 		return err
 	}
 	st.Paused = paused
 	return m.saveState(&st)
 }
 
-// vmAPI 调 cloud-hypervisor 的 REST 接口(unix 套接字上的 HTTP),只用不带请求体的动作。
-func (m *MicroVM) vmAPI(ctx context.Context, id, action string) error {
+// vmAPI 调 cloud-hypervisor 的 REST 接口(unix 套接字上的 HTTP)。body 是 JSON 请求体,没有时传 nil。
+func (m *MicroVM) vmAPI(ctx context.Context, id, action string, body []byte) error {
 	sock := filepath.Join(m.dir(id), "api.sock")
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 60 * time.Second,
 		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", sock)
 		}},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://localhost/api/v1/"+action, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://localhost/api/v1/"+action, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

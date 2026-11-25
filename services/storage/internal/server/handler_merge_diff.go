@@ -133,13 +133,18 @@ func (s *Server) DiffBranches(ctx context.Context, req *connect.Request[storagev
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	res, err := s.manager.Diff(ctx, diskID, engine.DiffOptions{
-		SourceBranch:  req.Msg.SourceBranch,
-		TargetBranch:  req.Msg.TargetBranch,
-		PathPrefix:    req.Msg.PathPrefix,
-		ConflictsOnly: req.Msg.ConflictsOnly,
-		PageSize:      req.Msg.PageSize,
-		PageToken:     req.Msg.PageToken,
+	var res *engine.DiffResult
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var dErr error
+		res, dErr = ds.Diff(ctx, engine.DiffOptions{
+			SourceBranch:  req.Msg.SourceBranch,
+			TargetBranch:  req.Msg.TargetBranch,
+			PathPrefix:    req.Msg.PathPrefix,
+			ConflictsOnly: req.Msg.ConflictsOnly,
+			PageSize:      req.Msg.PageSize,
+			PageToken:     req.Msg.PageToken,
+		})
+		return dErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
@@ -152,13 +157,18 @@ func (s *Server) DiffCommits(ctx context.Context, req *connect.Request[storagev1
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	res, err := s.manager.DiffCommits(ctx, diskID, engine.DiffCommitsOptions{
-		BaseCommitID:   req.Msg.BaseCommitId,
-		SourceCommitID: req.Msg.SourceCommitId,
-		PathPrefix:     req.Msg.PathPrefix,
-		ConflictsOnly:  req.Msg.ConflictsOnly,
-		PageSize:       req.Msg.PageSize,
-		PageToken:      req.Msg.PageToken,
+	var res *engine.DiffResult
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var dErr error
+		res, dErr = ds.DiffCommits(ctx, engine.DiffCommitsOptions{
+			BaseCommitID:   req.Msg.BaseCommitId,
+			SourceCommitID: req.Msg.SourceCommitId,
+			PathPrefix:     req.Msg.PathPrefix,
+			ConflictsOnly:  req.Msg.ConflictsOnly,
+			PageSize:       req.Msg.PageSize,
+			PageToken:      req.Msg.PageToken,
+		})
+		return dErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
@@ -171,11 +181,16 @@ func (s *Server) DiffWork(ctx context.Context, req *connect.Request[storagev1.Di
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	res, err := s.manager.DiffWork(ctx, diskID, req.Msg.Branch, engine.DiffWorkOptions{
-		PathPrefix:    req.Msg.PathPrefix,
-		ConflictsOnly: req.Msg.ConflictsOnly,
-		PageSize:      req.Msg.PageSize,
-		PageToken:     req.Msg.PageToken,
+	var res *engine.DiffResult
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var dErr error
+		res, dErr = ds.DiffWork(ctx, req.Msg.Branch, engine.DiffWorkOptions{
+			PathPrefix:    req.Msg.PathPrefix,
+			ConflictsOnly: req.Msg.ConflictsOnly,
+			PageSize:      req.Msg.PageSize,
+			PageToken:     req.Msg.PageToken,
+		})
+		return dErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
@@ -191,7 +206,12 @@ func (s *Server) ReadCommitNode(ctx context.Context, req *connect.Request[storag
 	if req.Msg.Size > maxReadWriteSize {
 		return nil, toConnectError(engine.ErrInvalid)
 	}
-	res, err := s.manager.ReadCommitNode(ctx, diskID, req.Msg.CommitId, req.Msg.Ino, int64(req.Msg.Offset), int(req.Msg.Size))
+	var res engine.CommitNodeResult
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var rErr error
+		res, rErr = ds.ReadCommitNode(ctx, req.Msg.CommitId, req.Msg.Ino, int64(req.Msg.Offset), int(req.Msg.Size))
+		return rErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -245,18 +265,11 @@ func (s *Server) MergeBranch(ctx context.Context, req *connect.Request[storagev1
 		UpToDate:    res.UpToDate,
 		WriterEpoch: res.WriterEpoch,
 	}
-	if !req.Msg.DryRun {
-		_ = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
-			if br, brErr := ds.GetBranch(req.Msg.TargetBranch); brErr == nil {
-				resp.Branch = toProtoBranchFromEngine(diskID, br)
-			}
-			if res.CommitID != 0 {
-				if cmt, cmtErr := ds.GetCommit(res.CommitID); cmtErr == nil {
-					resp.Commit = toProtoCommitFromEngine(diskID, cmt)
-				}
-			}
-			return nil
-		})
+	if res.Branch != nil {
+		resp.Branch = toProtoBranch(*res.Branch)
+	}
+	if res.Commit != nil {
+		resp.Commit = toProtoCommit(*res.Commit)
 	}
 	return connect.NewResponse(resp), nil
 }

@@ -54,7 +54,7 @@ func TestProvideControlManager_WiresGCIntervalFromMetaConfig(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, periodicMgr.Close(context.Background())) })
 	require.Equal(t, 15*time.Millisecond, periodicMgr.gcInterval)
-	require.False(t, periodicMgr.disableGC)
+	require.Equal(t, GCModePeriodic, periodicMgr.gcMode)
 
 	zeroPeriodicMgr, err := ProvideControlManager(ControlManagerParams{
 		Store: NewMemStore(),
@@ -66,7 +66,7 @@ func TestProvideControlManager_WiresGCIntervalFromMetaConfig(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, zeroPeriodicMgr.Close(context.Background())) })
 	require.Zero(t, zeroPeriodicMgr.gcInterval)
-	require.False(t, zeroPeriodicMgr.disableGC)
+	require.Equal(t, GCModeWakeOnly, zeroPeriodicMgr.gcMode)
 
 	disk, err := periodicMgr.CreateDisk(ctx, "gc-wired", 4*1024*1024)
 	require.NoError(t, err)
@@ -108,10 +108,10 @@ func TestStorageMetricsCollector_ExportsEngineMetricsWithoutDiskIDLabels(t *test
 	disk, err := mgr.CreateDisk(ctx, "metrics-disk", 4*1024*1024)
 	require.NoError(t, err)
 
-	mount, err := mgr.MountBranch(ctx, disk.DiskID, engine.DefaultBranchName, false, false)
+	mountRes, err := mgr.MountBranch(ctx, disk.DiskID, engine.DefaultBranchName, false, false)
 	require.NoError(t, err)
 
-	epochCtx := engine.WithWriterEpoch(ctx, mount.WriterEpoch)
+	epochCtx := engine.WithWriterEpoch(ctx, mountRes.Mount.WriterEpoch)
 	require.NoError(t, mgr.WithDisk(ctx, disk.DiskID, func(ds *engine.DiskStore) error {
 		f, cErr := ds.Create(epochCtx, engine.DefaultBranchName, engine.RootIno, "payload.bin", 0o644, 0, 0)
 		if cErr != nil {

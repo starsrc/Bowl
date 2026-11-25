@@ -1,4 +1,4 @@
-package projection_test
+package projection
 
 import (
 	"cmp"
@@ -11,8 +11,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
-
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 const defaultProjectionTestDSN = "postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable"
@@ -73,8 +71,8 @@ func setupProjectionTestDB(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Cleanup(isoPool.Close)
 	require.NoError(t, isoPool.Ping(ctx))
 
-	require.NoError(t, projection.EnsureSchema(ctx, isoPool))
-	require.NoError(t, projection.EnsureSchema(ctx, isoPool))
+	require.NoError(t, EnsureSchema(ctx, isoPool))
+	require.NoError(t, EnsureSchema(ctx, isoPool))
 
 	return isoPool, ctx
 }

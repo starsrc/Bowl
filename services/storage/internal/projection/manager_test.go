@@ -1,4 +1,4 @@
-package projection_test
+package projection
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/starsrc/bowl/services/storage/internal/engine"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 type fakeClock struct {
@@ -38,25 +37,32 @@ func (c *fakeClock) Advance(d time.Duration) time.Time {
 	return c.now
 }
 
-func writeFileOnBranch(t *testing.T, ctx context.Context, mgr *projection.ControlManager, diskID uuid.UUID, branch, name string, payload []byte) uint64 {
+func writeFileOnBranch(t *testing.T, ctx context.Context, mgr *ControlManager, diskID uuid.UUID, branch, name string, payload []byte) uint64 {
 	t.Helper()
-	ds, err := mgr.Disk(ctx, diskID)
-	require.NoError(t, err)
-	ino, err := ds.Create(ctx, branch, engine.RootIno, name, 0o644, 0, 0)
-	require.NoError(t, err)
-	n, err := ds.Write(ctx, branch, ino.Ino, 0, payload)
-	require.NoError(t, err)
-	require.Len(t, payload, n)
-	return ino.Ino
+	var inoNum uint64
+	require.NoError(t, mgr.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		ino, err := ds.Create(ctx, branch, engine.RootIno, name, 0o644, 0, 0)
+		if err != nil {
+			return err
+		}
+		n, err := ds.Write(ctx, branch, ino.Ino, 0, payload)
+		if err != nil {
+			return err
+		}
+		require.Len(t, payload, n)
+		inoNum = ino.Ino
+		return nil
+	}))
+	return inoNum
 }
 
 func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := projection.NewMemStore()
+	store := NewMemStore()
 	clk := newFakeClock(time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC))
 
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
+	mgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		Now:                     clk.Now,
@@ -73,7 +79,7 @@ func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.
 	require.Equal(t, "alpha", diskRec.Name)
 	require.Equal(t, uint64(64<<20), diskRec.MaxBytes)
 	require.Equal(t, engine.DefaultBranchName, diskRec.DefaultBranch)
-	require.True(t, mgr.IsOpen(diskRec.DiskID))
+	require.True(t, mgr.isOpen(diskRec.DiskID))
 
 	newName := "alpha-renamed"
 	newMax := uint64(128 << 20)
@@ -85,12 +91,12 @@ func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.
 	ino := writeFileOnBranch(t, ctx, mgr, diskRec.DiskID, "main", "hello.txt", []byte("hello world"))
 	cmt1, err := mgr.Commit(ctx, diskRec.DiskID, "main", "first commit")
 	require.NoError(t, err)
-	require.Equal(t, projection.CommitKindManual, cmt1.Kind)
+	require.Equal(t, CommitKindManual, cmt1.Kind)
 	require.Equal(t, "first commit", cmt1.Message)
 
 	forkCmt, featBranch, err := mgr.ForkBranch(ctx, diskRec.DiskID, "main", "feat", "fork feat")
 	require.NoError(t, err)
-	require.Equal(t, projection.CommitKindFork, forkCmt.Kind)
+	require.Equal(t, CommitKindFork, forkCmt.Kind)
 	require.Equal(t, "feat", featBranch.Name)
 	require.Equal(t, forkCmt.CommitID, featBranch.HeadCommitID)
 
@@ -98,13 +104,14 @@ func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.
 	_, err = mgr.Commit(ctx, diskRec.DiskID, "feat", "feat commit")
 	require.NoError(t, err)
 
-	mnt, err := mgr.MountBranch(ctx, diskRec.DiskID, "main", true, false)
+	mntRes, err := mgr.MountBranch(ctx, diskRec.DiskID, "main", true, false)
 	require.NoError(t, err)
+	mnt := mntRes.Mount
 	require.True(t, mnt.ReadOnly)
 
 	require.NoError(t, mgr.Close(ctx))
 
-	coldMgr, err := projection.NewControlManager(projection.ManagerOptions{
+	coldMgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		Now:                     clk.Now,
@@ -117,10 +124,10 @@ func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.
 	require.NoError(t, err)
 	defer func() { require.NoError(t, coldMgr.Close(ctx)) }()
 
-	require.False(t, coldMgr.IsOpen(diskRec.DiskID))
-	opensBefore := coldMgr.OpenCount()
+	require.False(t, coldMgr.isOpen(diskRec.DiskID))
+	opensBefore := coldMgr.openDiskCount()
 
-	listPage, err := coldMgr.ListDisks(ctx, projection.ListDisksQuery{})
+	listPage, err := coldMgr.ListDisks(ctx, ListDisksQuery{})
 	require.NoError(t, err)
 	require.Len(t, listPage.Disks, 1)
 	require.Equal(t, diskRec.DiskID, listPage.Disks[0].DiskID)
@@ -137,7 +144,7 @@ func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.
 	require.Equal(t, "feat", branches[0].Name)
 	require.Equal(t, "main", branches[1].Name)
 
-	commitsPage, err := coldMgr.ListCommits(ctx, projection.ListCommitsQuery{DiskID: diskRec.DiskID})
+	commitsPage, err := coldMgr.ListCommits(ctx, ListCommitsQuery{DiskID: diskRec.DiskID})
 	require.NoError(t, err)
 	require.Len(t, commitsPage.Commits, 4)
 
@@ -146,41 +153,57 @@ func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.
 	require.Len(t, mounts, 1)
 	require.Equal(t, mnt.MountID, mounts[0].MountID)
 
-	require.Equal(t, opensBefore, coldMgr.OpenCount())
-	require.False(t, coldMgr.IsOpen(diskRec.DiskID))
+	require.Equal(t, opensBefore, coldMgr.openDiskCount())
+	require.False(t, coldMgr.isOpen(diskRec.DiskID))
 
 	var pgReadCalls atomic.Int64
-	store.SetHooks(projection.MemStoreHooks{
+	store.SetHooks(MemStoreHooks{
 		BeforeRead: func(context.Context, string) error {
 			pgReadCalls.Add(1)
-			return projection.ErrUnavailable
+			return ErrUnavailable
 		},
 		BeforeWrite: func(context.Context, string, uuid.UUID) error {
-			return projection.ErrUnavailable
+			return ErrUnavailable
 		},
 	})
 
-	diffRes, err := coldMgr.Diff(ctx, diskRec.DiskID, engine.DiffOptions{
-		SourceBranch: "feat",
-		TargetBranch: "main",
-	})
-	require.NoError(t, err)
+	var diffRes *engine.DiffResult
+	require.NoError(t, coldMgr.WithDisk(ctx, diskRec.DiskID, func(ds *engine.DiskStore) error {
+		var dErr error
+		diffRes, dErr = ds.Diff(ctx, engine.DiffOptions{
+			SourceBranch: "feat",
+			TargetBranch: "main",
+		})
+		return dErr
+	}))
 	require.Equal(t, uint64(1), diffRes.Summary.Added)
 
-	diffCmtRes, err := coldMgr.DiffCommits(ctx, diskRec.DiskID, engine.DiffCommitsOptions{
-		BaseCommitID:   1,
-		SourceCommitID: cmt1.CommitID,
-	})
-	require.NoError(t, err)
+	var diffCmtRes *engine.DiffResult
+	require.NoError(t, coldMgr.WithDisk(ctx, diskRec.DiskID, func(ds *engine.DiskStore) error {
+		var dErr error
+		diffCmtRes, dErr = ds.DiffCommits(ctx, engine.DiffCommitsOptions{
+			BaseCommitID:   1,
+			SourceCommitID: cmt1.CommitID,
+		})
+		return dErr
+	}))
 	require.Equal(t, uint64(1), diffCmtRes.Summary.Added)
 
 	writeFileOnBranch(t, ctx, coldMgr, diskRec.DiskID, "main", "work.txt", []byte("uncommitted"))
-	diffWorkRes, err := coldMgr.DiffWork(ctx, diskRec.DiskID, "main", engine.DiffWorkOptions{})
-	require.NoError(t, err)
+	var diffWorkRes *engine.DiffResult
+	require.NoError(t, coldMgr.WithDisk(ctx, diskRec.DiskID, func(ds *engine.DiskStore) error {
+		var dErr error
+		diffWorkRes, dErr = ds.DiffWork(ctx, "main", engine.DiffWorkOptions{})
+		return dErr
+	}))
 	require.Equal(t, uint64(1), diffWorkRes.Summary.Added)
 
-	nodeRes, err := coldMgr.ReadCommitNode(ctx, diskRec.DiskID, cmt1.CommitID, ino, 0, 64)
-	require.NoError(t, err)
+	var nodeRes engine.CommitNodeResult
+	require.NoError(t, coldMgr.WithDisk(ctx, diskRec.DiskID, func(ds *engine.DiskStore) error {
+		var rErr error
+		nodeRes, rErr = ds.ReadCommitNode(ctx, cmt1.CommitID, ino, 0, 64)
+		return rErr
+	}))
 	require.Equal(t, engine.ModeRegular|0o644, nodeRes.Mode)
 	require.Equal(t, uint64(len("hello world")), nodeRes.FileSize)
 	require.Equal(t, []byte("hello world"), nodeRes.Data)
@@ -192,7 +215,7 @@ func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.
 	require.Greater(t, cmt2.CommitID, cmt1.CommitID)
 
 	require.Zero(t, pgReadCalls.Load())
-	require.True(t, coldMgr.IsOpen(diskRec.DiskID))
+	require.True(t, coldMgr.isOpen(diskRec.DiskID))
 }
 
 func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBatchFlush(t *testing.T) {
@@ -200,8 +223,8 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 	root := t.TempDir()
 	clk := newFakeClock(time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC))
 
-	seedStore := projection.NewMemStore()
-	seedMgr, err := projection.NewControlManager(projection.ManagerOptions{
+	seedStore := NewMemStore()
+	seedMgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   seedStore,
 		Now:                     clk.Now,
@@ -220,8 +243,9 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 	require.NoError(t, err)
 	_, _, err = seedMgr.ForkBranch(ctx, d1.DiskID, "main", "dev", "fork dev")
 	require.NoError(t, err)
-	activeMnt, err := seedMgr.MountBranch(ctx, d1.DiskID, "main", false, false)
+	activeMntRes, err := seedMgr.MountBranch(ctx, d1.DiskID, "main", false, false)
 	require.NoError(t, err)
+	activeMnt := activeMntRes.Mount
 
 	d2, err := seedMgr.CreateDisk(ctx, "disk-two", 64<<20)
 	require.NoError(t, err)
@@ -230,9 +254,9 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 	require.NoError(t, os.WriteFile(filepath.Join(root, "disks", "not-a-uuid.tmp"), []byte("ignore"), 0o600))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "disks", "temp-dir"), 0o755))
 
-	freshStore := projection.NewMemStore()
+	freshStore := NewMemStore()
 	orphanID := uuid.New()
-	require.NoError(t, freshStore.UpsertDisk(ctx, projection.DiskRecord{
+	require.NoError(t, freshStore.UpsertDisk(ctx, DiskRecord{
 		DiskID:        orphanID,
 		Name:          "orphan",
 		DefaultBranch: "main",
@@ -241,7 +265,7 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 		UpdatedAt:     clk.Now(),
 	}, nil, nil))
 
-	freshStore.SetHooks(projection.MemStoreHooks{
+	freshStore.SetHooks(MemStoreHooks{
 		BeforeWrite: func(hookCtx context.Context, op string, _ uuid.UUID) error {
 			if op == "ReplaceDiskSnapshot" {
 				select {
@@ -255,7 +279,7 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 	})
 
 	startAt := time.Now()
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
+	mgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:       root,
 		Store:             freshStore,
 		Now:               clk.Now,
@@ -270,16 +294,16 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	require.NoError(t, mgr.WaitStartupReconcile(waitCtx))
+	require.NoError(t, mgr.waitStartupReconcile(waitCtx))
 
-	require.False(t, mgr.IsOpen(d1.DiskID))
-	require.False(t, mgr.IsOpen(d2.DiskID))
+	require.False(t, mgr.isOpen(d1.DiskID))
+	require.False(t, mgr.isOpen(d2.DiskID))
 
-	rebuiltPage, err := freshStore.ListDisks(ctx, projection.ListDisksQuery{})
+	rebuiltPage, err := freshStore.ListDisks(ctx, ListDisksQuery{})
 	require.NoError(t, err)
 	require.Len(t, rebuiltPage.Disks, 2)
 	_, err = freshStore.GetDisk(ctx, orphanID)
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
 
 	rebuiltD1, err := freshStore.GetDisk(ctx, d1.DiskID)
 	require.NoError(t, err)
@@ -299,10 +323,10 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 	var blockWrites chan struct{}
 	var blockMu sync.Mutex
 	var renewSyncWrites atomic.Int64
-	freshStore.SetHooks(projection.MemStoreHooks{
+	freshStore.SetHooks(MemStoreHooks{
 		BeforeWrite: func(hookCtx context.Context, op string, _ uuid.UUID) error {
 			if failWrites.Load() {
-				return projection.ErrUnavailable
+				return ErrUnavailable
 			}
 			blockMu.Lock()
 			ch := blockWrites
@@ -325,15 +349,15 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 	_, err = mgr.Commit(ctx, d1.DiskID, "dev", "dirty commit 1")
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return mgr.Queue().IsDirty(d1.DiskID)
+		return mgr.queue.isDirty(d1.DiskID)
 	}, 2*time.Second, 10*time.Millisecond)
 
 	failWrites.Store(false)
 	require.Eventually(t, func() bool {
-		if mgr.Queue().IsDirty(d1.DiskID) {
+		if mgr.queue.isDirty(d1.DiskID) {
 			return false
 		}
-		p, lErr := freshStore.ListCommits(ctx, projection.ListCommitsQuery{DiskID: d1.DiskID})
+		p, lErr := freshStore.ListCommits(ctx, ListCommitsQuery{DiskID: d1.DiskID})
 		return lErr == nil && len(p.Commits) == 4
 	}, 3*time.Second, 15*time.Millisecond)
 
@@ -346,7 +370,7 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 		_, err = mgr.Commit(ctx, d2.DiskID, "main", "burst commit")
 		require.NoError(t, err)
 	}
-	require.True(t, mgr.Queue().IsDirty(d2.DiskID))
+	require.True(t, mgr.queue.isDirty(d2.DiskID))
 
 	blockMu.Lock()
 	blockWrites = nil
@@ -354,10 +378,10 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 	close(unblock)
 
 	require.Eventually(t, func() bool {
-		if mgr.Queue().IsDirty(d2.DiskID) {
+		if mgr.queue.isDirty(d2.DiskID) {
 			return false
 		}
-		p, lErr := freshStore.ListCommits(ctx, projection.ListCommitsQuery{DiskID: d2.DiskID})
+		p, lErr := freshStore.ListCommits(ctx, ListCommitsQuery{DiskID: d2.DiskID})
 		return lErr == nil && len(p.Commits) == 6
 	}, 3*time.Second, 15*time.Millisecond)
 
@@ -386,7 +410,7 @@ func TestStep17_Reconciler_StartupRebuildEmptyPGDirtyRetryOrphanPruneAndUsageBat
 func TestStep18_ControlManager_ReadAfterWriteBarrierAndZeroWaitColdRead(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := projection.NewMemStore()
+	store := NewMemStore()
 	clk := newFakeClock(time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC))
 
 	var writeDelay atomic.Int64
@@ -396,7 +420,7 @@ func TestStep18_ControlManager_ReadAfterWriteBarrierAndZeroWaitColdRead(t *testi
 	var slowDiskID uuid.UUID
 	var slowDelay time.Duration
 
-	store.SetHooks(projection.MemStoreHooks{
+	store.SetHooks(MemStoreHooks{
 		BeforeWrite: func(hookCtx context.Context, _ string, diskID uuid.UUID) error {
 			d := time.Duration(writeDelay.Load())
 			slowDiskMu.RLock()
@@ -415,7 +439,7 @@ func TestStep18_ControlManager_ReadAfterWriteBarrierAndZeroWaitColdRead(t *testi
 		},
 	})
 
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
+	mgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		Now:                     clk.Now,
@@ -434,7 +458,7 @@ func TestStep18_ControlManager_ReadAfterWriteBarrierAndZeroWaitColdRead(t *testi
 	require.NoError(t, err)
 	require.Equal(t, diskA.DiskID, gotA.DiskID)
 
-	page, err := mgr.ListDisks(ctx, projection.ListDisksQuery{})
+	page, err := mgr.ListDisks(ctx, ListDisksQuery{})
 	require.NoError(t, err)
 	require.Len(t, page.Disks, 1)
 	require.Equal(t, diskA.DiskID, page.Disks[0].DiskID)
@@ -451,7 +475,7 @@ func TestStep18_ControlManager_ReadAfterWriteBarrierAndZeroWaitColdRead(t *testi
 
 	cmt, err := mgr.Commit(ctx, diskA.DiskID, "feature", "feature work")
 	require.NoError(t, err)
-	commitsPage, err := mgr.ListCommits(ctx, projection.ListCommitsQuery{DiskID: diskA.DiskID})
+	commitsPage, err := mgr.ListCommits(ctx, ListCommitsQuery{DiskID: diskA.DiskID})
 	require.NoError(t, err)
 	require.NotEmpty(t, commitsPage.Commits)
 	require.Equal(t, cmt.CommitID, commitsPage.Commits[0].CommitID)
@@ -475,7 +499,7 @@ func TestStep18_ControlManager_ReadAfterWriteBarrierAndZeroWaitColdRead(t *testi
 	require.Equal(t, diskB.DiskID, gotB.DiskID)
 	_, err = mgr.ListBranches(ctx, diskB.DiskID)
 	require.NoError(t, err)
-	_, err = mgr.ListCommits(ctx, projection.ListCommitsQuery{DiskID: diskB.DiskID})
+	_, err = mgr.ListCommits(ctx, ListCommitsQuery{DiskID: diskB.DiskID})
 	require.NoError(t, err)
 	_, err = mgr.ListMounts(ctx, diskB.DiskID, "")
 	require.NoError(t, err)
@@ -486,12 +510,12 @@ func TestStep18_ControlManager_ReadAfterWriteBarrierAndZeroWaitColdRead(t *testi
 	slowDiskMu.Unlock()
 
 	require.NoError(t, mgr.DeleteDisk(ctx, diskA.DiskID))
-	opensBefore := mgr.OpenCount()
+	opensBefore := mgr.openDiskCount()
 	_, err = mgr.GetDisk(ctx, diskA.DiskID)
-	require.ErrorIs(t, err, projection.ErrNotFound)
-	require.Equal(t, opensBefore, mgr.OpenCount())
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Equal(t, opensBefore, mgr.openDiskCount())
 
-	pageAfterDel, err := mgr.ListDisks(ctx, projection.ListDisksQuery{})
+	pageAfterDel, err := mgr.ListDisks(ctx, ListDisksQuery{})
 	require.NoError(t, err)
 	require.Len(t, pageAfterDel.Disks, 1)
 	require.Equal(t, diskB.DiskID, pageAfterDel.Disks[0].DiskID)
@@ -500,10 +524,10 @@ func TestStep18_ControlManager_ReadAfterWriteBarrierAndZeroWaitColdRead(t *testi
 func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailFast(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := projection.NewMemStore()
+	store := NewMemStore()
 	clk := newFakeClock(time.Date(2026, 5, 4, 8, 0, 0, 0, time.UTC))
 
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
+	mgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		Now:                     clk.Now,
@@ -542,17 +566,20 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 	require.False(t, mergeRes.FastForward)
 	c6ID := mergeRes.CommitID
 
-	expiredMnt, err := mgr.MountBranch(ctx, diskRec.DiskID, "dev", true, false)
+	expiredMntRes, err := mgr.MountBranch(ctx, diskRec.DiskID, "dev", true, false)
 	require.NoError(t, err)
+	expiredMnt := expiredMntRes.Mount
 	clk.Advance(40 * time.Second)
-	activeMainMnt, err := mgr.MountBranch(ctx, diskRec.DiskID, "main", true, false)
+	activeMainMntRes, err := mgr.MountBranch(ctx, diskRec.DiskID, "main", true, false)
 	require.NoError(t, err)
-	activeDevMnt, err := mgr.MountBranch(ctx, diskRec.DiskID, "dev", false, false)
+	activeMainMnt := activeMainMntRes.Mount
+	activeDevMntRes, err := mgr.MountBranch(ctx, diskRec.DiskID, "dev", false, false)
 	require.NoError(t, err)
+	activeDevMnt := activeDevMntRes.Mount
 
 	require.NoError(t, mgr.Close(ctx))
 
-	coldMgr, err := projection.NewControlManager(projection.ManagerOptions{
+	coldMgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		Now:                     clk.Now,
@@ -565,25 +592,25 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 	require.NoError(t, err)
 	defer func() { require.NoError(t, coldMgr.Close(ctx)) }()
 
-	store.SetHooks(projection.MemStoreHooks{
+	store.SetHooks(MemStoreHooks{
 		BeforeRead: func(context.Context, string) error {
-			return projection.ErrUnavailable
+			return ErrUnavailable
 		},
 	})
 
-	opensBeforeList := coldMgr.OpenCount()
-	_, err = coldMgr.ListDisks(ctx, projection.ListDisksQuery{})
-	require.ErrorIs(t, err, projection.ErrUnavailable)
-	require.Equal(t, opensBeforeList, coldMgr.OpenCount())
-	require.False(t, coldMgr.IsOpen(diskRec.DiskID))
+	opensBeforeList := coldMgr.openDiskCount()
+	_, err = coldMgr.ListDisks(ctx, ListDisksQuery{})
+	require.ErrorIs(t, err, ErrUnavailable)
+	require.Equal(t, opensBeforeList, coldMgr.openDiskCount())
+	require.False(t, coldMgr.isOpen(diskRec.DiskID))
 
 	gotDisk, err := coldMgr.GetDisk(ctx, diskRec.DiskID)
 	require.NoError(t, err)
 	require.Equal(t, "resilient", gotDisk.Name)
-	require.False(t, coldMgr.IsOpen(diskRec.DiskID))
+	require.False(t, coldMgr.isOpen(diskRec.DiskID))
 
 	_, err = coldMgr.GetDisk(ctx, uuid.New())
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
 
 	branches, err := coldMgr.ListBranches(ctx, diskRec.DiskID)
 	require.NoError(t, err)
@@ -594,7 +621,7 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 	var seenAll []uint64
 	token := ""
 	for {
-		p, lErr := coldMgr.ListCommits(ctx, projection.ListCommitsQuery{
+		p, lErr := coldMgr.ListCommits(ctx, ListCommitsQuery{
 			DiskID:    diskRec.DiskID,
 			PageSize:  2,
 			PageToken: token,
@@ -610,9 +637,9 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 	}
 	require.Equal(t, []uint64{c6ID, c5.CommitID, c4.CommitID, c3.CommitID, c2.CommitID, 1}, seenAll)
 
-	manualPage, err := coldMgr.ListCommits(ctx, projection.ListCommitsQuery{
+	manualPage, err := coldMgr.ListCommits(ctx, ListCommitsQuery{
 		DiskID:   diskRec.DiskID,
-		Kind:     projection.CommitKindManual,
+		Kind:     CommitKindManual,
 		PageSize: 2,
 	})
 	require.NoError(t, err)
@@ -621,9 +648,9 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 	require.Equal(t, c4.CommitID, manualPage.Commits[1].CommitID)
 	require.NotEmpty(t, manualPage.NextPageToken)
 
-	manualPage2, err := coldMgr.ListCommits(ctx, projection.ListCommitsQuery{
+	manualPage2, err := coldMgr.ListCommits(ctx, ListCommitsQuery{
 		DiskID:    diskRec.DiskID,
-		Kind:      projection.CommitKindManual,
+		Kind:      CommitKindManual,
 		PageSize:  2,
 		PageToken: manualPage.NextPageToken,
 	})
@@ -648,7 +675,7 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 	require.Equal(t, activeMainMnt.MountID, mainMounts[0].MountID)
 
 	releaseBlock := make(chan struct{})
-	store.SetHooks(projection.MemStoreHooks{
+	store.SetHooks(MemStoreHooks{
 		BeforeWrite: func(hookCtx context.Context, _ string, _ uuid.UUID) error {
 			select {
 			case <-releaseBlock:
@@ -662,7 +689,7 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 	c7, err := coldMgr.Commit(ctx, diskRec.DiskID, "main", "barrier timeout commit")
 	require.NoError(t, err)
 
-	timeoutCommits, err := coldMgr.ListCommits(ctx, projection.ListCommitsQuery{
+	timeoutCommits, err := coldMgr.ListCommits(ctx, ListCommitsQuery{
 		DiskID:   diskRec.DiskID,
 		PageSize: 1,
 	})
@@ -672,25 +699,25 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 
 	_, err = coldMgr.CreateDisk(ctx, "blocked-catalog", 16<<20)
 	require.NoError(t, err)
-	_, err = coldMgr.ListDisks(ctx, projection.ListDisksQuery{})
-	require.ErrorIs(t, err, projection.ErrUnavailable)
+	_, err = coldMgr.ListDisks(ctx, ListDisksQuery{})
+	require.ErrorIs(t, err, ErrUnavailable)
 
 	close(releaseBlock)
 
-	store.SetHooks(projection.MemStoreHooks{
+	store.SetHooks(MemStoreHooks{
 		BeforeWrite: func(context.Context, string, uuid.UUID) error {
-			return projection.ErrUnavailable
+			return ErrUnavailable
 		},
 	})
 	c8, err := coldMgr.Commit(ctx, diskRec.DiskID, "main", "dirty fallback commit")
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return coldMgr.Queue().IsDirty(diskRec.DiskID)
+		return coldMgr.queue.isDirty(diskRec.DiskID)
 	}, 2*time.Second, 10*time.Millisecond)
 
-	store.SetHooks(projection.MemStoreHooks{})
+	store.SetHooks(MemStoreHooks{})
 
-	dirtyCommits, err := coldMgr.ListCommits(ctx, projection.ListCommitsQuery{
+	dirtyCommits, err := coldMgr.ListCommits(ctx, ListCommitsQuery{
 		DiskID:   diskRec.DiskID,
 		PageSize: 1,
 	})
@@ -702,10 +729,10 @@ func TestStep19_ControlManager_PGOutageAndDirtyFallbackToPebbleAndListDisksFailF
 func TestStep20_ControlManager_DeleteDiskAndBranchMountGatesAndIdleEviction(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := projection.NewMemStore()
+	store := NewMemStore()
 	clk := newFakeClock(time.Date(2026, 5, 5, 14, 0, 0, 0, time.UTC))
 
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
+	mgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		Now:                     clk.Now,
@@ -722,8 +749,9 @@ func TestStep20_ControlManager_DeleteDiskAndBranchMountGatesAndIdleEviction(t *t
 	diskA, err := mgr.CreateDisk(ctx, "gated-a", 64<<20)
 	require.NoError(t, err)
 
-	mainRW, err := mgr.MountBranch(ctx, diskA.DiskID, "main", false, false)
+	mainRWRes, err := mgr.MountBranch(ctx, diskA.DiskID, "main", false, false)
 	require.NoError(t, err)
+	mainRW := mainRWRes.Mount
 
 	writeFileOnBranch(t, ctx, mgr, diskA.DiskID, "main", "f1.txt", []byte("one"))
 	cmt1, err := mgr.Commit(ctx, diskA.DiskID, "main", "commit while mounted")
@@ -736,8 +764,9 @@ func TestStep20_ControlManager_DeleteDiskAndBranchMountGatesAndIdleEviction(t *t
 	_, err = mgr.Commit(ctx, diskA.DiskID, "feat", "feat commit")
 	require.NoError(t, err)
 
-	featRO, err := mgr.MountBranch(ctx, diskA.DiskID, "feat", true, false)
+	featRORes, err := mgr.MountBranch(ctx, diskA.DiskID, "feat", true, false)
 	require.NoError(t, err)
+	featRO := featRORes.Mount
 
 	err = mgr.DeleteDisk(ctx, diskA.DiskID)
 	require.ErrorIs(t, err, engine.ErrDiskMounted)
@@ -778,8 +807,9 @@ func TestStep20_ControlManager_DeleteDiskAndBranchMountGatesAndIdleEviction(t *t
 
 	require.NoError(t, mgr.DeleteBranch(ctx, diskA.DiskID, "feat"))
 
-	tempMnt, err := mgr.MountBranch(ctx, diskA.DiskID, "main", true, false)
+	tempMntRes, err := mgr.MountBranch(ctx, diskA.DiskID, "main", true, false)
 	require.NoError(t, err)
+	tempMnt := tempMntRes.Mount
 	require.NotEqual(t, uuid.Nil, tempMnt.MountID)
 	err = mgr.DeleteDisk(ctx, diskA.DiskID)
 	require.ErrorIs(t, err, engine.ErrDiskMounted)
@@ -789,21 +819,22 @@ func TestStep20_ControlManager_DeleteDiskAndBranchMountGatesAndIdleEviction(t *t
 
 	pinnedDisk, err := mgr.CreateDisk(ctx, "pinned", 64<<20)
 	require.NoError(t, err)
-	pinnedMnt, err := mgr.MountBranch(ctx, pinnedDisk.DiskID, "main", false, false)
+	pinnedMntRes, err := mgr.MountBranch(ctx, pinnedDisk.DiskID, "main", false, false)
 	require.NoError(t, err)
+	pinnedMnt := pinnedMntRes.Mount
 
 	idleDisk, err := mgr.CreateDisk(ctx, "idle-evict", 64<<20)
 	require.NoError(t, err)
 	writeFileOnBranch(t, ctx, mgr, idleDisk.DiskID, "main", "payload.bin", make([]byte, 16384))
-	require.True(t, mgr.IsOpen(pinnedDisk.DiskID))
-	require.True(t, mgr.IsOpen(idleDisk.DiskID))
+	require.True(t, mgr.isOpen(pinnedDisk.DiskID))
+	require.True(t, mgr.isOpen(idleDisk.DiskID))
 
 	clk.Advance(1 * time.Second)
 
 	require.Eventually(t, func() bool {
-		return !mgr.IsOpen(idleDisk.DiskID)
+		return !mgr.isOpen(idleDisk.DiskID)
 	}, 2*time.Second, 10*time.Millisecond)
-	require.True(t, mgr.IsOpen(pinnedDisk.DiskID))
+	require.True(t, mgr.isOpen(pinnedDisk.DiskID))
 
 	evictedRec, err := store.GetDisk(ctx, idleDisk.DiskID)
 	require.NoError(t, err)
@@ -812,17 +843,17 @@ func TestStep20_ControlManager_DeleteDiskAndBranchMountGatesAndIdleEviction(t *t
 	require.NoError(t, mgr.UnmountBranch(ctx, pinnedDisk.DiskID, pinnedMnt.MountID))
 	clk.Advance(1 * time.Second)
 	require.Eventually(t, func() bool {
-		return !mgr.IsOpen(pinnedDisk.DiskID)
+		return !mgr.isOpen(pinnedDisk.DiskID)
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestStep15_19_PGIntegration_ControlManagerLifecycleAndRebuild(t *testing.T) {
 	pool, ctx := setupProjectionTestDB(t)
 	root := t.TempDir()
-	pgStore := projection.NewPGStore(pool)
+	pgStore := NewPGStore(pool)
 	clk := newFakeClock(time.Date(2026, 5, 6, 16, 0, 0, 0, time.UTC))
 
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
+	mgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   pgStore,
 		Now:                     clk.Now,
@@ -852,10 +883,12 @@ func TestStep15_19_PGIntegration_ControlManagerLifecycleAndRebuild(t *testing.T)
 	c4, err := mgr.Commit(ctx, d1.DiskID, "feat", "commit b")
 	require.NoError(t, err)
 
-	mnt1, err := mgr.MountBranch(ctx, d1.DiskID, "main", false, false)
+	mnt1Res, err := mgr.MountBranch(ctx, d1.DiskID, "main", false, false)
 	require.NoError(t, err)
-	mnt2, err := mgr.MountBranch(ctx, d1.DiskID, "main", false, true)
+	mnt1 := mnt1Res.Mount
+	mnt2Res, err := mgr.MountBranch(ctx, d1.DiskID, "main", false, true)
 	require.NoError(t, err)
+	mnt2 := mnt2Res.Mount
 	require.Greater(t, mnt2.WriterEpoch, mnt1.WriterEpoch)
 
 	mounts, err := mgr.ListMounts(ctx, d1.DiskID, "main")
@@ -895,19 +928,20 @@ func TestStep15_19_PGIntegration_ControlManagerLifecycleAndRebuild(t *testing.T)
 
 	require.NoError(t, mgr.DeleteBranch(ctx, d1.DiskID, "feat"))
 
-	activeRO, err := mgr.MountBranch(ctx, d1.DiskID, "main", true, false)
+	activeRORes, err := mgr.MountBranch(ctx, d1.DiskID, "main", true, false)
 	require.NoError(t, err)
+	activeRO := activeRORes.Mount
 
 	require.NoError(t, mgr.Close(ctx))
 
 	_, err = pool.Exec(ctx, "TRUNCATE disks CASCADE")
 	require.NoError(t, err)
 
-	emptyPage, err := pgStore.ListDisks(ctx, projection.ListDisksQuery{})
+	emptyPage, err := pgStore.ListDisks(ctx, ListDisksQuery{})
 	require.NoError(t, err)
 	require.Empty(t, emptyPage.Disks)
 
-	mgr2, err := projection.NewControlManager(projection.ManagerOptions{
+	mgr2, err := NewControlManager(ManagerOptions{
 		StorageRoot:       root,
 		Store:             pgStore,
 		Now:               clk.Now,
@@ -919,8 +953,8 @@ func TestStep15_19_PGIntegration_ControlManagerLifecycleAndRebuild(t *testing.T)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr2.Close(ctx)) }()
 
-	require.NoError(t, mgr2.WaitStartupReconcile(ctx))
-	require.False(t, mgr2.IsOpen(d1.DiskID))
+	require.NoError(t, mgr2.waitStartupReconcile(ctx))
+	require.False(t, mgr2.isOpen(d1.DiskID))
 
 	gotDisk, err := mgr2.GetDisk(ctx, d1.DiskID)
 	require.NoError(t, err)
@@ -932,7 +966,7 @@ func TestStep15_19_PGIntegration_ControlManagerLifecycleAndRebuild(t *testing.T)
 	require.Len(t, rebuiltBranches, 1)
 	require.Equal(t, "main", rebuiltBranches[0].Name)
 
-	rebuiltCommits, err := mgr2.ListCommits(ctx, projection.ListCommitsQuery{DiskID: d1.DiskID})
+	rebuiltCommits, err := mgr2.ListCommits(ctx, ListCommitsQuery{DiskID: d1.DiskID})
 	require.NoError(t, err)
 	require.Len(t, rebuiltCommits.Commits, 3)
 
@@ -965,13 +999,13 @@ func totalPackFileBytes(t *testing.T, storageRoot string, diskID uuid.UUID) uint
 func TestStep28_ControlManager_ResidentDiskRunsBackgroundGCAndColdReadDoesNot(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := projection.NewMemStore()
+	store := NewMemStore()
 
-	seedMgr, err := projection.NewControlManager(projection.ManagerOptions{
+	seedMgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 
@@ -986,7 +1020,7 @@ func TestStep28_ControlManager_ResidentDiskRunsBackgroundGCAndColdReadDoesNot(t 
 	deadPackBytesBefore := totalPackFileBytes(t, root, disk.DiskID)
 	require.GreaterOrEqual(t, deadPackBytesBefore, uint64(64*1024))
 
-	coldMgr, err := projection.NewControlManager(projection.ManagerOptions{
+	coldMgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		GCInterval:              15 * time.Millisecond,
@@ -995,28 +1029,28 @@ func TestStep28_ControlManager_ResidentDiskRunsBackgroundGCAndColdReadDoesNot(t 
 	require.NoError(t, err)
 	defer func() { require.NoError(t, coldMgr.Close(ctx)) }()
 
-	require.NoError(t, coldMgr.ReconcileDisk(ctx, disk.DiskID))
-	require.False(t, coldMgr.IsOpen(disk.DiskID))
+	require.NoError(t, coldMgr.reconcileDisk(ctx, disk.DiskID, false, false))
+	require.False(t, coldMgr.isOpen(disk.DiskID))
 	require.Equal(t, deadPackBytesBefore, totalPackFileBytes(t, root, disk.DiskID))
 
-	store.SetHooks(projection.MemStoreHooks{
+	store.SetHooks(MemStoreHooks{
 		BeforeRead: func(context.Context, string) error {
-			return projection.ErrUnavailable
+			return ErrUnavailable
 		},
 	})
 	gotFallback, err := coldMgr.GetDisk(ctx, disk.DiskID)
 	require.NoError(t, err)
 	require.Zero(t, gotFallback.UsedBytes)
-	require.False(t, coldMgr.IsOpen(disk.DiskID))
+	require.False(t, coldMgr.isOpen(disk.DiskID))
 	require.Equal(t, deadPackBytesBefore, totalPackFileBytes(t, root, disk.DiskID))
 
-	store.SetHooks(projection.MemStoreHooks{})
+	store.SetHooks(MemStoreHooks{})
 
 	require.NoError(t, coldMgr.WithDisk(ctx, disk.DiskID, func(ds *engine.DiskStore) error {
 		require.GreaterOrEqual(t, ds.PackPhysicalBytes(), uint64(64*1024))
 		return nil
 	}))
-	require.True(t, coldMgr.IsOpen(disk.DiskID))
+	require.True(t, coldMgr.isOpen(disk.DiskID))
 
 	require.Eventually(t, func() bool {
 		var phys uint64
@@ -1030,11 +1064,11 @@ func TestStep28_ControlManager_ResidentDiskRunsBackgroundGCAndColdReadDoesNot(t 
 	}, 3*time.Second, 15*time.Millisecond)
 
 	wakeRoot := t.TempDir()
-	wakeStore := projection.NewMemStore()
-	wakeMgr, err := projection.NewControlManager(projection.ManagerOptions{
+	wakeStore := NewMemStore()
+	wakeMgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             wakeRoot,
 		Store:                   wakeStore,
-		DisablePeriodicGC:       true,
+		GCMode:                  GCModeWakeOnly,
 		DisableStartupReconcile: true,
 	})
 	require.NoError(t, err)
@@ -1066,16 +1100,16 @@ func TestStep28_ControlManager_ResidentDiskRunsBackgroundGCAndColdReadDoesNot(t 
 func TestStep30_ControlManager_InstantUsedBytesOnUnlinkResetDeleteBranchCommitPruneAndZeroColdWakeup(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := projection.NewMemStore()
+	store := NewMemStore()
 
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
+	mgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		SyncWriteTimeout:        500 * time.Millisecond,
 		FlushInterval:           10 * time.Minute,
 		ReconcileInterval:       10 * time.Minute,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 
@@ -1088,7 +1122,7 @@ func TestStep30_ControlManager_InstantUsedBytesOnUnlinkResetDeleteBranchCommitPr
 		require.NoError(t, gErr)
 		require.Equal(t, want, got.UsedBytes)
 
-		page, lErr := mgr.ListDisks(ctx, projection.ListDisksQuery{})
+		page, lErr := mgr.ListDisks(ctx, ListDisksQuery{})
 		require.NoError(t, lErr)
 		require.Len(t, page.Disks, 1)
 		require.Equal(t, want, page.Disks[0].UsedBytes)
@@ -1160,26 +1194,26 @@ func TestStep30_ControlManager_InstantUsedBytesOnUnlinkResetDeleteBranchCommitPr
 
 	require.NoError(t, mgr.Close(ctx))
 
-	coldMgr, err := projection.NewControlManager(projection.ManagerOptions{
+	coldMgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:             root,
 		Store:                   store,
 		SyncWriteTimeout:        500 * time.Millisecond,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, coldMgr.Close(ctx)) }()
 
-	opensBefore := coldMgr.OpenCount()
+	opensBefore := coldMgr.openDiskCount()
 	coldGot, err := coldMgr.GetDisk(ctx, disk.DiskID)
 	require.NoError(t, err)
 	require.Equal(t, uint64(64*1024), coldGot.UsedBytes)
 
-	coldList, err := coldMgr.ListDisks(ctx, projection.ListDisksQuery{})
+	coldList, err := coldMgr.ListDisks(ctx, ListDisksQuery{})
 	require.NoError(t, err)
 	require.Len(t, coldList.Disks, 1)
 	require.Equal(t, uint64(64*1024), coldList.Disks[0].UsedBytes)
 
-	require.Equal(t, opensBefore, coldMgr.OpenCount())
-	require.False(t, coldMgr.IsOpen(disk.DiskID))
+	require.Equal(t, opensBefore, coldMgr.openDiskCount())
+	require.False(t, coldMgr.isOpen(disk.DiskID))
 }

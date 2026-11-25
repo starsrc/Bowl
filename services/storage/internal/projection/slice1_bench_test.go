@@ -99,7 +99,7 @@ func BenchmarkWithDisk_ParallelMultiDisk(b *testing.B) {
 			ReconcileInterval:       time.Hour,
 			ActorIdleTTL:            tc.ttl,
 			DisableStartupReconcile: true,
-			DisableGC:               true,
+			GCMode:                  GCModeDisabled,
 		})
 		if err != nil {
 			b.Fatalf("NewControlManager: %v", err)
@@ -154,7 +154,7 @@ func BenchmarkWithDisk_SingleHotDisk(b *testing.B) {
 			ReconcileInterval:       time.Hour,
 			ActorIdleTTL:            tc.ttl,
 			DisableStartupReconcile: true,
-			DisableGC:               true,
+			GCMode:                  GCModeDisabled,
 		})
 		if err != nil {
 			b.Fatalf("NewControlManager: %v", err)
@@ -198,7 +198,7 @@ func BenchmarkPoolScan(b *testing.B) {
 				ReconcileInterval:       time.Hour,
 				ActorIdleTTL:            30 * time.Second,
 				DisableStartupReconcile: true,
-				DisableGC:               true,
+				GCMode:                  GCModeDisabled,
 			})
 			if err != nil {
 				b.Fatalf("NewControlManager: %v", err)
@@ -211,10 +211,11 @@ func BenchmarkPoolScan(b *testing.B) {
 				if cErr != nil {
 					b.Fatalf("CreateDisk: %v", cErr)
 				}
-				baseDS, dErr := mgr.Disk(ctx, base.DiskID)
-				if dErr != nil {
-					b.Fatalf("Disk: %v", dErr)
+				baseEntry := lookupOpenEntry(mgr.getSlot(base.DiskID), base.DiskID)
+				if baseEntry == nil {
+					b.Fatalf("expected base disk to be open")
 				}
+				baseDS := baseEntry.store
 				if openDisks > 1 {
 					syntheticIDs = make([]uuid.UUID, openDisks-1)
 					for i := range syntheticIDs {
@@ -232,7 +233,7 @@ func BenchmarkPoolScan(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for b.Loop() {
-					if evicted := mgr.EvictIdleDisks(ctx); evicted != 0 {
+					if evicted := mgr.evictIdleDisks(ctx); evicted != 0 {
 						b.Fatalf("expected 0 evicted, got %d", evicted)
 					}
 				}
@@ -270,7 +271,7 @@ func BenchmarkColdFallback_CollidingHotDisk(b *testing.B) {
 		FlushInterval:           time.Hour,
 		ReconcileInterval:       time.Hour,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	if err != nil {
 		b.Fatalf("NewControlManager: %v", err)

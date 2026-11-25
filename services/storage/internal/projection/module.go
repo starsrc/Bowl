@@ -56,21 +56,23 @@ func ProvideControlManager(params ControlManagerParams) (*ControlManager, error)
 	}
 	storageRoot := config.DefaultDataDir
 	actorIdleTTL := config.DefaultActorIdleTTL
+	gcMode := GCModePeriodic
 	gcInterval := config.DefaultGCInterval
-	disablePeriodicGC := false
 	if cfg != nil {
 		storageRoot = cfg.DataDir()
 		actorIdleTTL = cfg.ActorIdleTTL()
 		gcInterval = cfg.GCInterval()
-		disablePeriodicGC = gcInterval == 0
+		if gcInterval == 0 {
+			gcMode = GCModeWakeOnly
+		}
 	}
 
 	mgr, err := NewControlManager(ManagerOptions{
-		StorageRoot:       storageRoot,
-		Store:             params.Store,
-		ActorIdleTTL:      actorIdleTTL,
-		GCInterval:        gcInterval,
-		DisablePeriodicGC: disablePeriodicGC,
+		StorageRoot:  storageRoot,
+		Store:        params.Store,
+		ActorIdleTTL: actorIdleTTL,
+		GCMode:       gcMode,
+		GCInterval:   gcInterval,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize control manager: %w", err)

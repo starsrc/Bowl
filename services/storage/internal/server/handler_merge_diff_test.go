@@ -2,13 +2,17 @@ package server
 
 import (
 	"context"
+	"net/http/httptest"
 	"testing"
 
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
+	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 func extractConflictReport(t *testing.T, err error) *storagev1.MergeConflictReport {
@@ -369,4 +373,166 @@ func TestHandlerMergeBranch_FFNoFFConflictsAndGuards(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.Equal(t, []byte("conflict-edit"), readResolved.Msg.GetData())
+}
+
+func TestHandlerDiffAndReadCommitNode_Step8_DirectWithDiskOnColdDisk(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := projection.NewMemStore()
+
+	seedMgr, err := projection.NewControlManager(projection.ManagerOptions{
+		StorageRoot:             root,
+		Store:                   store,
+		DisableStartupReconcile: true,
+	})
+	require.NoError(t, err)
+	seedSrv, err := New(Params{
+		Config:  config.ServerConfig{},
+		Manager: seedMgr,
+	})
+	require.NoError(t, err)
+	seedTS := httptest.NewServer(seedSrv.Handler())
+	seedClient := storagev1connect.NewStorageServiceClient(seedTS.Client(), seedTS.URL)
+
+	created, err := seedClient.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+		Name:     "cold-diff-disk",
+		MaxBytes: 8 * 1024 * 1024,
+	}))
+	require.NoError(t, err)
+	diskID := created.Msg.GetDisk().GetDiskId()
+	mainBranch := defaultBranch()
+
+	mountResp, err := seedClient.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{
+		DiskId: diskID,
+		Branch: mainBranch,
+	}))
+	require.NoError(t, err)
+	epoch := mountResp.Msg.GetEpoch()
+
+	fResp, err := seedClient.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Branch:    mainBranch,
+		ParentIno: engine.RootIno,
+		Name:      []byte("a.txt"),
+		Mode:      0o644,
+		Epoch:     epoch,
+	}))
+	require.NoError(t, err)
+	fileIno := fResp.Msg.GetInode().GetIno()
+	_, err = seedClient.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: mainBranch,
+		Ino:    fileIno,
+		Data:   []byte("alpha-data"),
+		Epoch:  epoch,
+	}))
+	require.NoError(t, err)
+
+	c1, err := seedClient.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  mainBranch,
+		Message: "c1",
+	}))
+	require.NoError(t, err)
+	c1ID := c1.Msg.GetCommit().GetCommitId()
+
+	_, err = seedClient.ForkBranch(ctx, connect.NewRequest(&storagev1.ForkBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: mainBranch,
+		NewBranch:    "feat",
+		Message:      "fork feat",
+	}))
+	require.NoError(t, err)
+
+	featMount, err := seedClient.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{
+		DiskId: diskID,
+		Branch: "feat",
+	}))
+	require.NoError(t, err)
+	featFile, err := seedClient.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Branch:    "feat",
+		ParentIno: engine.RootIno,
+		Name:      []byte("b.txt"),
+		Mode:      0o644,
+		Epoch:     featMount.Msg.GetEpoch(),
+	}))
+	require.NoError(t, err)
+	_, err = seedClient.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: "feat",
+		Ino:    featFile.Msg.GetInode().GetIno(),
+		Data:   []byte("beta-data"),
+		Epoch:  featMount.Msg.GetEpoch(),
+	}))
+	require.NoError(t, err)
+	_, err = seedClient.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  "feat",
+		Message: "feat commit",
+	}))
+	require.NoError(t, err)
+
+	_, err = seedClient.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Branch:    mainBranch,
+		ParentIno: engine.RootIno,
+		Name:      []byte("work.txt"),
+		Mode:      0o644,
+		Epoch:     epoch,
+	}))
+	require.NoError(t, err)
+
+	seedTS.Close()
+	require.NoError(t, seedMgr.Close(ctx))
+
+	coldMgr, err := projection.NewControlManager(projection.ManagerOptions{
+		StorageRoot:             root,
+		Store:                   store,
+		DisableStartupReconcile: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, coldMgr.Close(context.Background())) })
+
+	coldSrv, err := New(Params{
+		Config:  config.ServerConfig{},
+		Manager: coldMgr,
+	})
+	require.NoError(t, err)
+	coldTS := httptest.NewServer(coldSrv.Handler())
+	t.Cleanup(coldTS.Close)
+	coldClient := storagev1connect.NewStorageServiceClient(coldTS.Client(), coldTS.URL)
+
+	brDiff, err := coldClient.DiffBranches(ctx, connect.NewRequest(&storagev1.DiffBranchesRequest{
+		DiskId:       diskID,
+		SourceBranch: "feat",
+		TargetBranch: mainBranch,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), brDiff.Msg.GetSummary().GetAdded())
+
+	cmtDiff, err := coldClient.DiffCommits(ctx, connect.NewRequest(&storagev1.DiffCommitsRequest{
+		DiskId:         diskID,
+		BaseCommitId:   1,
+		SourceCommitId: c1ID,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), cmtDiff.Msg.GetSummary().GetAdded())
+
+	workDiff, err := coldClient.DiffWork(ctx, connect.NewRequest(&storagev1.DiffWorkRequest{
+		DiskId: diskID,
+		Branch: mainBranch,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), workDiff.Msg.GetSummary().GetAdded())
+
+	nodeResp, err := coldClient.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
+		DiskId:   diskID,
+		CommitId: c1ID,
+		Ino:      fileIno,
+		Size:     64,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, []byte("alpha-data"), nodeResp.Msg.GetData())
+	require.True(t, nodeResp.Msg.GetEof())
 }

@@ -50,7 +50,7 @@ func TestWithDisk_GivenHotOpenDisk_WhenInvoked_ThenZeroAllocs(t *testing.T) {
 		FlushInterval:           time.Hour,
 		ReconcileInterval:       time.Hour,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -78,7 +78,7 @@ func TestWithDiskReadOnly_GivenCollidingColdFallback_WhenHotDiskRuns_ThenDoesNot
 		FlushInterval:           time.Hour,
 		ReconcileInterval:       time.Hour,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -90,8 +90,8 @@ func TestWithDiskReadOnly_GivenCollidingColdFallback_WhenHotDiskRuns_ThenDoesNot
 	seedColdDisk(t, root, diskB, "hot-b")
 
 	require.NoError(t, mgr.WithDisk(ctx, diskB, func(*engine.DiskStore) error { return nil }))
-	require.False(t, mgr.IsOpen(diskA))
-	require.True(t, mgr.IsOpen(diskB))
+	require.False(t, mgr.isOpen(diskA))
+	require.True(t, mgr.isOpen(diskB))
 
 	coldEntered := make(chan struct{})
 	allowColdExit := make(chan struct{})
@@ -130,8 +130,8 @@ func TestWithDiskReadOnly_GivenCollidingColdFallback_WhenHotDiskRuns_ThenDoesNot
 
 	close(allowColdExit)
 	require.NoError(t, <-coldErrCh)
-	require.False(t, mgr.IsOpen(diskA))
-	require.True(t, mgr.IsOpen(diskB))
+	require.False(t, mgr.isOpen(diskA))
+	require.True(t, mgr.isOpen(diskB))
 }
 
 func TestEvictIdleDisks_GivenStalledPG_WhenEvictingIdleDisk_ThenBoundsFlushBySyncWriteTimeoutAndMarksDirty(t *testing.T) {
@@ -148,9 +148,8 @@ func TestEvictIdleDisks_GivenStalledPG_WhenEvictingIdleDisk_ThenBoundsFlushBySyn
 		FlushInterval:           time.Hour,
 		ReconcileInterval:       time.Hour,
 		ActorIdleTTL:            20 * time.Millisecond,
-		OpTimeout:               5 * time.Second,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -180,13 +179,13 @@ func TestEvictIdleDisks_GivenStalledPG_WhenEvictingIdleDisk_ThenBoundsFlushBySyn
 	defer cancel()
 
 	start := time.Now()
-	evicted := mgr.EvictIdleDisks(opCtx)
+	evicted := mgr.evictIdleDisks(opCtx)
 	elapsed := time.Since(start)
 
 	require.Equal(t, 1, evicted)
 	require.Less(t, elapsed, 400*time.Millisecond, "tryEvictIdleDisk must bound flush by syncWriteTimeout instead of waiting for opTimeout")
-	require.False(t, mgr.IsOpen(disk.DiskID))
-	require.True(t, mgr.Queue().IsDirty(disk.DiskID))
+	require.False(t, mgr.isOpen(disk.DiskID))
+	require.True(t, mgr.queue.isDirty(disk.DiskID))
 }
 
 func TestLastUsedNano_GivenActorIdleTTLDisabled_WhenHotWithDiskRuns_ThenZeroClockReads(t *testing.T) {
@@ -201,7 +200,7 @@ func TestLastUsedNano_GivenActorIdleTTLDisabled_WhenHotWithDiskRuns_ThenZeroCloc
 		ReconcileInterval:       time.Hour,
 		ActorIdleTTL:            0,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -230,7 +229,7 @@ func TestLastUsedNano_GivenActorIdleTTLEnabled_WhenHotWithDiskRuns_ThenExitOnlyA
 		ReconcileInterval:       time.Hour,
 		ActorIdleTTL:            idleTTL,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -244,8 +243,8 @@ func TestLastUsedNano_GivenActorIdleTTLEnabled_WhenHotWithDiskRuns_ThenExitOnlyA
 	require.Equal(t, int64(1), clk.calls.Load(), "WithDisk must read clock only once on exit when actorIdleTTL > 0")
 
 	clk.Advance(760 * time.Millisecond)
-	require.Equal(t, 1, mgr.EvictIdleDisks(ctx), "throttled touch (< actorIdleTTL/8) must not extend lastUsedNano")
-	require.False(t, mgr.IsOpen(diskA.DiskID))
+	require.Equal(t, 1, mgr.evictIdleDisks(ctx), "throttled touch (< actorIdleTTL/8) must not extend lastUsedNano")
+	require.False(t, mgr.isOpen(diskA.DiskID))
 
 	diskB, err := mgr.CreateDisk(ctx, "throttled-ttl-b", 16<<20)
 	require.NoError(t, err)
@@ -256,15 +255,15 @@ func TestLastUsedNano_GivenActorIdleTTLEnabled_WhenHotWithDiskRuns_ThenExitOnlyA
 	require.Equal(t, int64(1), clk.calls.Load(), "WithDisk must read clock only once on exit when actorIdleTTL > 0")
 
 	clk.Advance(750 * time.Millisecond)
-	require.Zero(t, mgr.EvictIdleDisks(ctx), "unthrottled touch (>= actorIdleTTL/8) must update lastUsedNano on exit")
-	require.True(t, mgr.IsOpen(diskB.DiskID))
+	require.Zero(t, mgr.evictIdleDisks(ctx), "unthrottled touch (>= actorIdleTTL/8) must update lastUsedNano on exit")
+	require.True(t, mgr.isOpen(diskB.DiskID))
 
 	require.NoError(t, mgr.WithDisk(ctx, diskB.DiskID, func(*engine.DiskStore) error {
 		clk.Advance(2 * time.Second)
 		return nil
 	}))
-	require.Zero(t, mgr.EvictIdleDisks(ctx), "long RPC exit touch must prevent immediate eviction")
-	require.True(t, mgr.IsOpen(diskB.DiskID))
+	require.Zero(t, mgr.evictIdleDisks(ctx), "long RPC exit touch must prevent immediate eviction")
+	require.True(t, mgr.isOpen(diskB.DiskID))
 }
 
 func TestStorageMetricsCollector_GivenConcurrentDeleteEvictAndClose_WhenCollecting_ThenRaceFree(t *testing.T) {
@@ -277,7 +276,7 @@ func TestStorageMetricsCollector_GivenConcurrentDeleteEvictAndClose_WhenCollecti
 		ReconcileInterval:       time.Hour,
 		ActorIdleTTL:            15 * time.Millisecond,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 
@@ -320,7 +319,7 @@ func TestStorageMetricsCollector_GivenConcurrentDeleteEvictAndClose_WhenCollecti
 			if i%2 == 0 {
 				_ = mgr.DeleteDisk(ctx, d.DiskID)
 			} else {
-				mgr.EvictIdleDisks(ctx)
+				mgr.evictIdleDisks(ctx)
 			}
 		}
 	})
@@ -360,8 +359,8 @@ func TestQueue_GivenConcurrentRecordAndClose_WhenClosed_ThenRaceFreeAndNoPostClo
 		},
 	})
 
-	q := NewQueue(store, QueueConfig{
-		FlushInterval: 5 * time.Millisecond,
+	q := newQueue(store, queueConfig{
+		flushInterval: 5 * time.Millisecond,
 	})
 
 	stop := make(chan struct{})
@@ -377,22 +376,22 @@ func TestQueue_GivenConcurrentRecordAndClose_WhenClosed_ThenRaceFreeAndNoPostClo
 					return
 				default:
 					n++
-					q.RecordUsage(diskID, n)
-					q.RecordMountRenew(diskID, mountID, time.Now().Add(time.Minute))
+					q.recordUsage(diskID, n)
+					q.recordMountRenew(diskID, mountID, time.Now().Add(time.Minute))
 				}
 			}
 		})
 	}
 
 	time.Sleep(25 * time.Millisecond)
-	require.NoError(t, q.Close(ctx))
+	require.NoError(t, q.close(ctx))
 	closedFlag.Store(true)
 	close(stop)
 	wg.Wait()
 
-	q.RecordUsage(uuid.New(), 999)
-	q.RecordMountRenew(uuid.New(), uuid.New(), time.Now().Add(time.Minute))
-	q.FlushBatches(ctx)
+	q.recordUsage(uuid.New(), 999)
+	q.recordMountRenew(uuid.New(), uuid.New(), time.Now().Add(time.Minute))
+	q.flushBatches(ctx)
 
 	require.Zero(t, afterCloseWrites.Load(), "closed Queue must reject post-close RecordUsage and RecordMountRenew writes")
 }
@@ -407,7 +406,7 @@ func TestWithTempDisk_GivenCloseError_WhenReadSucceedsOrFails_ThenPropagatesCorr
 		FlushInterval:           time.Hour,
 		ReconcileInterval:       time.Hour,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -437,7 +436,7 @@ func TestWithTempDisk_GivenCloseError_WhenReadSucceedsOrFails_ThenPropagatesCorr
 	err = mgr.DeleteDisk(ctx, diskID)
 	require.ErrorIs(t, err, sentinelCloseErr)
 
-	err = mgr.ReconcileDisk(ctx, diskID)
+	err = mgr.reconcileDisk(ctx, diskID, false, false)
 	require.ErrorIs(t, err, sentinelCloseErr)
 }
 
@@ -451,7 +450,7 @@ func TestClose_GivenConcurrentWithDiskAndLifecycleOps_WhenClosing_ThenDrainsAllS
 		ReconcileInterval:       time.Hour,
 		ActorIdleTTL:            30 * time.Second,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 
@@ -493,7 +492,7 @@ func TestClose_GivenConcurrentWithDiskAndLifecycleOps_WhenClosing_ThenDrainsAllS
 	wg.Wait()
 
 	for _, id := range disks {
-		require.False(t, mgr.IsOpen(id))
+		require.False(t, mgr.isOpen(id))
 		require.ErrorIs(t, mgr.WithDisk(ctx, id, func(*engine.DiskStore) error { return nil }), engine.ErrClosed)
 	}
 }
@@ -507,7 +506,7 @@ func TestPanicSafety_GivenCallbackPanicInWithDiskOrColdReadOnly_WhenRecovered_Th
 		FlushInterval:           time.Hour,
 		ReconcileInterval:       time.Hour,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -539,7 +538,7 @@ func TestPanicSafety_GivenCallbackPanicInWithDiskOrColdReadOnly_WhenRecovered_Th
 
 	coldID := uuid.New()
 	seedColdDisk(t, root, coldID, "panic-cold")
-	require.False(t, mgr.IsOpen(coldID))
+	require.False(t, mgr.isOpen(coldID))
 
 	func() {
 		defer func() {

@@ -1,4 +1,4 @@
-package projection_test
+package projection
 
 import (
 	"context"
@@ -13,11 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
-
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
-func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.Store) {
+func runStoreContractSuite(t *testing.T, ctx context.Context, store Store) {
 	t.Helper()
 
 	base := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
@@ -28,15 +26,15 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	missingID := uuid.MustParse("00000000-0000-0000-0000-0000000000ff")
 
 	_, err := store.GetDisk(ctx, missingID)
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
 	_, err = store.ListBranches(ctx, missingID)
-	require.ErrorIs(t, err, projection.ErrNotFound)
-	_, err = store.ListCommits(ctx, projection.ListCommitsQuery{DiskID: missingID})
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = store.ListCommits(ctx, ListCommitsQuery{DiskID: missingID})
+	require.ErrorIs(t, err, ErrNotFound)
 	_, err = store.ListMounts(ctx, missingID, "", base)
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
 
-	diskA := projection.DiskRecord{
+	diskA := DiskRecord{
 		DiskID:        idA,
 		Name:          "alpha",
 		DefaultBranch: "main",
@@ -45,7 +43,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 		CreatedAt:     base,
 		UpdatedAt:     base,
 	}
-	branchAMain := projection.BranchRecord{
+	branchAMain := BranchRecord{
 		DiskID:       idA,
 		Name:         "main",
 		HeadCommitID: 1,
@@ -53,17 +51,17 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 		CreatedAt:    base,
 		UpdatedAt:    base,
 	}
-	commitA1 := projection.CommitRecord{
+	commitA1 := CommitRecord{
 		DiskID:    idA,
 		CommitID:  1,
 		ParentID:  0,
-		Kind:      projection.CommitKindInit,
+		Kind:      CommitKindInit,
 		Message:   "init",
 		CreatedAt: base,
 	}
 	require.NoError(t, store.UpsertDisk(ctx, diskA, &branchAMain, &commitA1))
 
-	diskB := projection.DiskRecord{
+	diskB := DiskRecord{
 		DiskID:        idB,
 		Name:          "beta",
 		DefaultBranch: "main",
@@ -74,7 +72,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	}
 	require.NoError(t, store.UpsertDisk(ctx, diskB, nil, nil))
 
-	diskC := projection.DiskRecord{
+	diskC := DiskRecord{
 		DiskID:        idC,
 		Name:          "gamma",
 		DefaultBranch: "main",
@@ -89,14 +87,14 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.NoError(t, err)
 	require.Equal(t, diskA, gotA)
 
-	page1, err := store.ListDisks(ctx, projection.ListDisksQuery{PageSize: 2})
+	page1, err := store.ListDisks(ctx, ListDisksQuery{PageSize: 2})
 	require.NoError(t, err)
 	require.Len(t, page1.Disks, 2)
 	require.Equal(t, idC, page1.Disks[0].DiskID)
 	require.Equal(t, idB, page1.Disks[1].DiskID)
 	require.NotEmpty(t, page1.NextPageToken)
 
-	page2, err := store.ListDisks(ctx, projection.ListDisksQuery{PageSize: 2, PageToken: page1.NextPageToken})
+	page2, err := store.ListDisks(ctx, ListDisksQuery{PageSize: 2, PageToken: page1.NextPageToken})
 	require.NoError(t, err)
 	require.Len(t, page2.Disks, 1)
 	require.Equal(t, idA, page2.Disks[0].DiskID)
@@ -111,16 +109,16 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.Equal(t, "alpha-renamed", gotA.Name)
 	require.Equal(t, uint64(8*1024*1024), gotA.MaxBytes)
 
-	err = store.UpdateDisk(ctx, projection.DiskRecord{
+	err = store.UpdateDisk(ctx, DiskRecord{
 		DiskID:        missingID,
 		Name:          "ghost",
 		DefaultBranch: "main",
 		MaxBytes:      1024,
 		UpdatedAt:     base,
 	})
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
 
-	branchADev := projection.BranchRecord{
+	branchADev := BranchRecord{
 		DiskID:       idA,
 		Name:         "dev",
 		HeadCommitID: 2,
@@ -130,12 +128,12 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	}
 	branchAMain.HeadCommitID = 4
 	branchAMain.UpdatedAt = base.Add(4 * time.Second)
-	commits := []projection.CommitRecord{
-		{DiskID: idA, CommitID: 2, ParentID: 1, Kind: projection.CommitKindFork, Message: "fork dev", CreatedAt: base.Add(2 * time.Second)},
-		{DiskID: idA, CommitID: 3, ParentID: 2, Kind: projection.CommitKindManual, Message: "wip", CreatedAt: base.Add(3 * time.Second)},
-		{DiskID: idA, CommitID: 4, ParentID: 1, MergeParentID: 3, Kind: projection.CommitKindMerge, Message: "merge dev", CreatedAt: base.Add(4 * time.Second)},
+	commits := []CommitRecord{
+		{DiskID: idA, CommitID: 2, ParentID: 1, Kind: CommitKindFork, Message: "fork dev", CreatedAt: base.Add(2 * time.Second)},
+		{DiskID: idA, CommitID: 3, ParentID: 2, Kind: CommitKindManual, Message: "wip", CreatedAt: base.Add(3 * time.Second)},
+		{DiskID: idA, CommitID: 4, ParentID: 1, MergeParentID: 3, Kind: CommitKindMerge, Message: "merge dev", CreatedAt: base.Add(4 * time.Second)},
 	}
-	require.NoError(t, store.UpsertBranchAndCommit(ctx, []projection.BranchRecord{branchADev, branchAMain}, commits, nil))
+	require.NoError(t, store.UpsertBranchAndCommit(ctx, []BranchRecord{branchADev, branchAMain}, commits, nil))
 
 	branches, err := store.ListBranches(ctx, idA)
 	require.NoError(t, err)
@@ -144,21 +142,21 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.Equal(t, "main", branches[1].Name)
 	require.Equal(t, uint64(4), branches[1].HeadCommitID)
 
-	cPage1, err := store.ListCommits(ctx, projection.ListCommitsQuery{DiskID: idA, PageSize: 2})
+	cPage1, err := store.ListCommits(ctx, ListCommitsQuery{DiskID: idA, PageSize: 2})
 	require.NoError(t, err)
 	require.Len(t, cPage1.Commits, 2)
 	require.Equal(t, uint64(4), cPage1.Commits[0].CommitID)
 	require.Equal(t, uint64(3), cPage1.Commits[1].CommitID)
 	require.NotEmpty(t, cPage1.NextPageToken)
 
-	cPage2, err := store.ListCommits(ctx, projection.ListCommitsQuery{DiskID: idA, PageSize: 2, PageToken: cPage1.NextPageToken})
+	cPage2, err := store.ListCommits(ctx, ListCommitsQuery{DiskID: idA, PageSize: 2, PageToken: cPage1.NextPageToken})
 	require.NoError(t, err)
 	require.Len(t, cPage2.Commits, 2)
 	require.Equal(t, uint64(2), cPage2.Commits[0].CommitID)
 	require.Equal(t, uint64(1), cPage2.Commits[1].CommitID)
 	require.Empty(t, cPage2.NextPageToken)
 
-	cManual, err := store.ListCommits(ctx, projection.ListCommitsQuery{DiskID: idA, Kind: projection.CommitKindManual})
+	cManual, err := store.ListCommits(ctx, ListCommitsQuery{DiskID: idA, Kind: CommitKindManual})
 	require.NoError(t, err)
 	require.Len(t, cManual.Commits, 1)
 	require.Equal(t, uint64(3), cManual.Commits[0].CommitID)
@@ -168,7 +166,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	mount3 := uuid.MustParse("10000000-0000-0000-0000-000000000003")
 
 	branchAMain.WriterEpoch = 1
-	require.NoError(t, store.UpsertMount(ctx, projection.MountRecord{
+	require.NoError(t, store.UpsertMount(ctx, MountRecord{
 		DiskID:      idA,
 		MountID:     mount1,
 		BranchName:  "main",
@@ -177,7 +175,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 		MountedAt:   base,
 		ExpiresAt:   base.Add(30 * time.Second),
 	}, &branchAMain, nil))
-	require.NoError(t, store.UpsertMount(ctx, projection.MountRecord{
+	require.NoError(t, store.UpsertMount(ctx, MountRecord{
 		DiskID:      idA,
 		MountID:     mount2,
 		BranchName:  "dev",
@@ -186,7 +184,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 		MountedAt:   base,
 		ExpiresAt:   base.Add(5 * time.Second),
 	}, nil, nil))
-	require.NoError(t, store.UpsertMount(ctx, projection.MountRecord{
+	require.NoError(t, store.UpsertMount(ctx, MountRecord{
 		DiskID:      idA,
 		MountID:     mount3,
 		BranchName:  "main",
@@ -207,7 +205,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.Len(t, activeDev, 1)
 	require.Equal(t, mount2, activeDev[0].MountID)
 
-	require.NoError(t, store.BatchUpdateDiskUsage(ctx, []projection.DiskUsageUpdate{
+	require.NoError(t, store.BatchUpdateDiskUsage(ctx, []DiskUsageUpdate{
 		{DiskID: idA, UsedBytes: 99999},
 		{DiskID: idB, UsedBytes: 12345},
 		{DiskID: idA, UsedBytes: 111111},
@@ -219,7 +217,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.NoError(t, err)
 	require.Equal(t, uint64(12345), gotB.UsedBytes)
 
-	require.NoError(t, store.BatchRenewMounts(ctx, []projection.MountRenewUpdate{
+	require.NoError(t, store.BatchRenewMounts(ctx, []MountRenewUpdate{
 		{DiskID: idA, MountID: mount2, ExpiresAt: base.Add(120 * time.Second)},
 	}))
 	activeDev, err = store.ListMounts(ctx, idA, "dev", base.Add(10*time.Second))
@@ -232,7 +230,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.Equal(t, int64(1), pruned)
 
 	branchAMain.WriterEpoch = 2
-	require.NoError(t, store.DeleteMounts(ctx, idA, []uuid.UUID{mount3}, []projection.BranchRecord{branchAMain}))
+	require.NoError(t, store.DeleteMounts(ctx, idA, []uuid.UUID{mount3}, []BranchRecord{branchAMain}))
 	activeMain, err := store.ListMounts(ctx, idA, "main", base)
 	require.NoError(t, err)
 	require.Empty(t, activeMain)
@@ -245,7 +243,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.Equal(t, uint64(2), branches[0].WriterEpoch)
 
 	require.NoError(t, store.DeleteCommits(ctx, idA, []uint64{2, 3}))
-	remainingCommits, err := store.ListCommits(ctx, projection.ListCommitsQuery{DiskID: idA})
+	remainingCommits, err := store.ListCommits(ctx, ListCommitsQuery{DiskID: idA})
 	require.NoError(t, err)
 	require.Len(t, remainingCommits.Commits, 2)
 	require.Equal(t, uint64(4), remainingCommits.Commits[0].CommitID)
@@ -255,8 +253,8 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.NoError(t, err)
 	require.Equal(t, []uuid.UUID{idA, idB, idC}, allIDs)
 
-	require.NoError(t, store.ReplaceDiskSnapshot(ctx, projection.DiskSnapshot{
-		Disk: projection.DiskRecord{
+	require.NoError(t, store.ReplaceDiskSnapshot(ctx, DiskSnapshot{
+		Disk: DiskRecord{
 			DiskID:        idA,
 			Name:          "alpha-reconciled",
 			DefaultBranch: "main",
@@ -265,13 +263,13 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 			CreatedAt:     base,
 			UpdatedAt:     base.Add(5 * time.Minute),
 		},
-		Branches: []projection.BranchRecord{
+		Branches: []BranchRecord{
 			{DiskID: idA, Name: "main", HeadCommitID: 10, WriterEpoch: 5, CreatedAt: base, UpdatedAt: base.Add(5 * time.Minute)},
 		},
-		Commits: []projection.CommitRecord{
-			{DiskID: idA, CommitID: 10, ParentID: 0, Kind: projection.CommitKindInit, Message: "reconciled", CreatedAt: base.Add(5 * time.Minute)},
+		Commits: []CommitRecord{
+			{DiskID: idA, CommitID: 10, ParentID: 0, Kind: CommitKindInit, Message: "reconciled", CreatedAt: base.Add(5 * time.Minute)},
 		},
-		Mounts: []projection.MountRecord{
+		Mounts: []MountRecord{
 			{DiskID: idA, MountID: mount1, BranchName: "main", ReadOnly: false, WriterEpoch: 5, MountedAt: base.Add(5 * time.Minute), ExpiresAt: base.Add(10 * time.Minute)},
 		},
 	}))
@@ -284,7 +282,7 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.NoError(t, err)
 	require.Len(t, branches, 1)
 	require.Equal(t, uint64(10), branches[0].HeadCommitID)
-	remainingCommits, err = store.ListCommits(ctx, projection.ListCommitsQuery{DiskID: idA})
+	remainingCommits, err = store.ListCommits(ctx, ListCommitsQuery{DiskID: idA})
 	require.NoError(t, err)
 	require.Len(t, remainingCommits.Commits, 1)
 	require.Equal(t, uint64(10), remainingCommits.Commits[0].CommitID)
@@ -296,13 +294,13 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 	require.NoError(t, store.DeleteDisk(ctx, idA))
 	require.NoError(t, store.DeleteDisk(ctx, idA))
 	_, err = store.GetDisk(ctx, idA)
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
 	_, err = store.ListBranches(ctx, idA)
-	require.ErrorIs(t, err, projection.ErrNotFound)
-	_, err = store.ListCommits(ctx, projection.ListCommitsQuery{DiskID: idA})
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = store.ListCommits(ctx, ListCommitsQuery{DiskID: idA})
+	require.ErrorIs(t, err, ErrNotFound)
 	_, err = store.ListMounts(ctx, idA, "", base)
-	require.ErrorIs(t, err, projection.ErrNotFound)
+	require.ErrorIs(t, err, ErrNotFound)
 
 	allIDs, err = store.ListAllDiskIDs(ctx)
 	require.NoError(t, err)
@@ -310,13 +308,13 @@ func runStoreContractSuite(t *testing.T, ctx context.Context, store projection.S
 }
 
 func TestStep15_ProjectionStore_FourTablesCRUDPaginationAndCascadeDelete(t *testing.T) {
-	store := projection.NewMemStore()
+	store := NewMemStore()
 	runStoreContractSuite(t, context.Background(), store)
 }
 
 func TestStep15_PGStore_IsolatedSchemaFourTablesAndReconcile(t *testing.T) {
 	pool, ctx := setupProjectionTestDB(t)
-	store := projection.NewPGStore(pool)
+	store := NewPGStore(pool)
 	runStoreContractSuite(t, ctx, store)
 }
 
@@ -324,55 +322,55 @@ func TestProjectionStore_CursorAndUnavailableClassification(t *testing.T) {
 	now := time.Date(2026, 11, 24, 12, 34, 56, 789123000, time.UTC)
 	diskID := uuid.New()
 
-	tok := projection.EncodeDiskPageCursor(now, diskID)
-	gotTime, gotID, err := projection.DecodeDiskPageCursor(tok)
+	tok := EncodeDiskPageCursor(now, diskID)
+	gotTime, gotID, err := DecodeDiskPageCursor(tok)
 	require.NoError(t, err)
 	require.Equal(t, now.Truncate(time.Microsecond), gotTime)
 	require.Equal(t, diskID, gotID)
 
-	_, _, err = projection.DecodeDiskPageCursor("not-valid-base64!!!")
-	require.ErrorIs(t, err, projection.ErrInvalidArgument)
+	_, _, err = DecodeDiskPageCursor("not-valid-base64!!!")
+	require.ErrorIs(t, err, ErrInvalidArgument)
 
-	cTok := projection.EncodeCommitPageCursor(42)
-	gotCID, err := projection.DecodeCommitPageCursor(cTok)
+	cTok := EncodeCommitPageCursor(42)
+	gotCID, err := DecodeCommitPageCursor(cTok)
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), gotCID)
 
-	_, err = projection.DecodeCommitPageCursor("e30")
-	require.ErrorIs(t, err, projection.ErrInvalidArgument)
+	_, err = DecodeCommitPageCursor("e30")
+	require.ErrorIs(t, err, ErrInvalidArgument)
 
-	require.False(t, projection.IsUnavailable(nil))
-	require.False(t, projection.IsUnavailable(projection.ErrNotFound))
-	require.False(t, projection.IsUnavailable(projection.ErrInvalidArgument))
-	require.True(t, projection.IsUnavailable(projection.ErrUnavailable))
-	require.True(t, projection.IsUnavailable(fmt.Errorf("wrap: %w", projection.ErrUnavailable)))
-	require.True(t, projection.IsUnavailable(context.DeadlineExceeded))
-	require.True(t, projection.IsUnavailable(context.Canceled))
-	require.True(t, projection.IsUnavailable(io.EOF))
-	require.True(t, projection.IsUnavailable(syscall.ECONNREFUSED))
-	require.True(t, projection.IsUnavailable(&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}))
-	require.True(t, projection.IsUnavailable(&pgconn.PgError{Code: "57P01"}))
-	require.True(t, projection.IsUnavailable(&pgconn.PgError{Code: "08006"}))
-	require.False(t, projection.IsUnavailable(&pgconn.PgError{Code: "23505"}))
+	require.False(t, IsUnavailable(nil))
+	require.False(t, IsUnavailable(ErrNotFound))
+	require.False(t, IsUnavailable(ErrInvalidArgument))
+	require.True(t, IsUnavailable(ErrUnavailable))
+	require.True(t, IsUnavailable(fmt.Errorf("wrap: %w", ErrUnavailable)))
+	require.True(t, IsUnavailable(context.DeadlineExceeded))
+	require.True(t, IsUnavailable(context.Canceled))
+	require.True(t, IsUnavailable(io.EOF))
+	require.True(t, IsUnavailable(syscall.ECONNREFUSED))
+	require.True(t, IsUnavailable(&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}))
+	require.True(t, IsUnavailable(&pgconn.PgError{Code: "57P01"}))
+	require.True(t, IsUnavailable(&pgconn.PgError{Code: "08006"}))
+	require.False(t, IsUnavailable(&pgconn.PgError{Code: "23505"}))
 
 	ctx := context.Background()
-	require.ErrorIs(t, projection.EnsureSchema(ctx, nil), projection.ErrUnavailable)
-	nilPG := projection.NewPGStore(nil)
+	require.ErrorIs(t, EnsureSchema(ctx, nil), ErrUnavailable)
+	nilPG := NewPGStore(nil)
 	_, err = nilPG.GetDisk(ctx, diskID)
-	require.ErrorIs(t, err, projection.ErrUnavailable)
-	_, err = nilPG.ListDisks(ctx, projection.ListDisksQuery{})
-	require.ErrorIs(t, err, projection.ErrUnavailable)
+	require.ErrorIs(t, err, ErrUnavailable)
+	_, err = nilPG.ListDisks(ctx, ListDisksQuery{})
+	require.ErrorIs(t, err, ErrUnavailable)
 
-	mem := projection.NewMemStore()
+	mem := NewMemStore()
 	_, err = mem.GetDisk(ctx, uuid.Nil)
-	require.ErrorIs(t, err, projection.ErrInvalidArgument)
-	_, err = mem.ListDisks(ctx, projection.ListDisksQuery{PageSize: projection.MaxPageSize + 1})
-	require.ErrorIs(t, err, projection.ErrInvalidArgument)
-	_, err = mem.ListCommits(ctx, projection.ListCommitsQuery{DiskID: diskID, Kind: "bogus"})
-	require.ErrorIs(t, err, projection.ErrInvalidArgument)
-	require.ErrorIs(t, mem.UpsertDisk(ctx, projection.DiskRecord{DiskID: diskID, DefaultBranch: "main", MaxBytes: 0}, nil, nil), projection.ErrInvalidArgument)
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = mem.ListDisks(ctx, ListDisksQuery{PageSize: MaxPageSize + 1})
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = mem.ListCommits(ctx, ListCommitsQuery{DiskID: diskID, Kind: "bogus"})
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	require.ErrorIs(t, mem.UpsertDisk(ctx, DiskRecord{DiskID: diskID, DefaultBranch: "main", MaxBytes: 0}, nil, nil), ErrInvalidArgument)
 
-	require.NoError(t, mem.UpsertDisk(ctx, projection.DiskRecord{
+	require.NoError(t, mem.UpsertDisk(ctx, DiskRecord{
 		DiskID:        diskID,
 		Name:          "atomic-mount-del",
 		DefaultBranch: "main",
@@ -382,14 +380,14 @@ func TestProjectionStore_CursorAndUnavailableClassification(t *testing.T) {
 	}, nil, nil))
 	m1 := uuid.New()
 	m2 := uuid.New()
-	require.NoError(t, mem.UpsertMount(ctx, projection.MountRecord{
+	require.NoError(t, mem.UpsertMount(ctx, MountRecord{
 		DiskID:     diskID,
 		MountID:    m1,
 		BranchName: "main",
 		MountedAt:  now,
 		ExpiresAt:  now.Add(time.Hour),
 	}, nil, nil))
-	require.NoError(t, mem.UpsertMount(ctx, projection.MountRecord{
+	require.NoError(t, mem.UpsertMount(ctx, MountRecord{
 		DiskID:     diskID,
 		MountID:    m2,
 		BranchName: "main",
@@ -402,7 +400,7 @@ func TestProjectionStore_CursorAndUnavailableClassification(t *testing.T) {
 	require.Equal(t, m2, mounts[0].MountID)
 
 	require.NoError(t, mem.UpsertBranchAndCommit(ctx,
-		[]projection.BranchRecord{{DiskID: diskID, Name: "main", HeadCommitID: 1, CreatedAt: now, UpdatedAt: now}},
+		[]BranchRecord{{DiskID: diskID, Name: "main", HeadCommitID: 1, CreatedAt: now, UpdatedAt: now}},
 		nil,
 		[]uuid.UUID{m2},
 	))

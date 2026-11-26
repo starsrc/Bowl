@@ -21,63 +21,63 @@ const sampleMountInfo = `23 61 0:21 / /sys rw,nosuid,nodev,noexec,relatime share
 `
 
 func TestIsMountPoint_GivenMountedAndOctalEscapedPaths_ReturnsExpectedState(t *testing.T) {
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt, sampleMountInfo)
 
-	withMountInfoContent(t, sampleMountInfo)
-
-	mountedBar, err := IsMountPoint("/mnt/foo/bar/")
+	mountedBar, err := rt.isMountPoint("/mnt/foo/bar/")
 	require.NoError(t, err)
 	require.True(t, mountedBar)
 
-	mountedSpace, err := IsMountPoint("/mnt/my dir")
+	mountedSpace, err := rt.isMountPoint("/mnt/my dir")
 	require.NoError(t, err)
 	require.True(t, mountedSpace, "八进制转义的空格必须被还原")
 
-	unmounted, err := IsMountPoint("/mnt/unmounted")
+	unmounted, err := rt.isMountPoint("/mnt/unmounted")
 	require.NoError(t, err)
 	require.False(t, unmounted)
 }
 
 func TestIsMountPoint_GivenMalformedAndUnescapedLines_HandlesGracefully(t *testing.T) {
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt, "1 2 3\n\nnot-a-mountinfo-line\n100 30 0:50 / /mnt/no-separator rw\n101 30 0:51 / /mnt/keep\\999 rw - fuse.bowl bowl:disk rw\n")
 
-	withMountInfoContent(t, "1 2 3\n\nnot-a-mountinfo-line\n100 30 0:50 / /mnt/no-separator rw\n101 30 0:51 / /mnt/keep\\999 rw - fuse.bowl bowl:disk rw\n")
-
-	noSep, err := IsMountPoint("/mnt/no-separator")
+	noSep, err := rt.isMountPoint("/mnt/no-separator")
 	require.NoError(t, err)
 	require.True(t, noSep)
 
-	keepInvalidEscape, err := IsMountPoint(`/mnt/keep\999`)
+	keepInvalidEscape, err := rt.isMountPoint(`/mnt/keep\999`)
 	require.NoError(t, err)
 	require.True(t, keepInvalidEscape, "非八进制转义必须原样保留")
 
-	absent, err := IsMountPoint("/1/2/3")
+	absent, err := rt.isMountPoint("/1/2/3")
 	require.NoError(t, err)
 	require.False(t, absent)
 }
 
 func TestIsMountPoint_GivenMissingMountInfoFile_ReturnsFalseWithoutError(t *testing.T) {
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
 
-	withMissingMountInfo(t)
-
-	mounted, err := IsMountPoint("/mnt/anything")
+	mounted, err := rt.isMountPoint("/mnt/anything")
 
 	require.NoError(t, err)
 	require.False(t, mounted)
 }
 
 func TestIsMountPoint_GivenUnreadableMountInfo_ReturnsError(t *testing.T) {
+	rt := defaultCLIRuntime()
+	setUnreadableMountInfo(t, rt)
 
-	withUnreadableMountInfo(t)
-
-	_, err := IsMountPoint("/mnt/anything")
+	_, err := rt.isMountPoint("/mnt/anything")
 
 	require.Error(t, err)
 }
 
 func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAndDistinguishesReadOnly(t *testing.T) {
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt, sampleMountInfo)
 
-	withMountInfoContent(t, sampleMountInfo)
-
-	info1, err := FindDiskMountpoint("0192A3B4-C5D6-7E8F-9012-3456789ABCD1")
+	info1, err := rt.findDiskMountpoint("0192A3B4-C5D6-7E8F-9012-3456789ABCD1")
 	require.NoError(t, err)
 	require.Equal(t, DiskMountInfo{
 		Mountpoint: "/mnt/my dir",
@@ -85,7 +85,7 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 		ReadOnly:   false,
 	}, info1)
 
-	info2, err := FindDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd2")
+	info2, err := rt.findDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd2")
 	require.NoError(t, err)
 	require.Equal(t, DiskMountInfo{
 		Mountpoint: "/mnt/foo/bar",
@@ -93,7 +93,7 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 		ReadOnly:   true,
 	}, info2)
 
-	info4, err := FindDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd4")
+	info4, err := rt.findDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd4")
 	require.NoError(t, err)
 	require.Equal(t, DiskMountInfo{
 		Mountpoint: "/mnt/remount-ro",
@@ -101,7 +101,7 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 		ReadOnly:   false,
 	}, info4)
 
-	info3, err := FindDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd3")
+	info3, err := rt.findDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd3")
 	require.NoError(t, err)
 	require.False(t, info3.Mounted)
 	require.Empty(t, info3.Mountpoint)
@@ -109,11 +109,11 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 }
 
 func TestIsMountPoint_GivenSymlinkedLeafAndParent_MatchesCanonicalMountinfo(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	realParent := t.TempDir()
 	realMP := filepath.Join(realParent, "real-mnt")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
-	canonMP := canonicalMountpoint(realMP)
+	canonMP := rt.canonicalMountpoint(realMP)
 
 	symMP := filepath.Join(t.TempDir(), "sym-mnt")
 	require.NoError(t, os.Symlink(realMP, symMP))
@@ -122,13 +122,13 @@ func TestIsMountPoint_GivenSymlinkedLeafAndParent_MatchesCanonicalMountinfo(t *t
 	require.NoError(t, os.Symlink(realParent, symParent))
 	viaSymParent := filepath.Join(symParent, "real-mnt")
 
-	withMountInfoContent(t, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	setMountInfoContent(t, rt, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	symMounted, err := IsMountPoint(symMP)
+	symMounted, err := rt.isMountPoint(symMP)
 	require.NoError(t, err)
 	require.True(t, symMounted, "leaf symlink to active mountpoint must match mountinfo")
 
-	parentSymMounted, err := IsMountPoint(viaSymParent)
+	parentSymMounted, err := rt.isMountPoint(viaSymParent)
 	require.NoError(t, err)
 	require.True(t, parentSymMounted, "mountpoint beneath symlinked parent must match mountinfo")
 }
@@ -151,21 +151,19 @@ type fakeFSNode struct {
 	err    error
 }
 
-func withMountInfoFSStub(t *testing.T, nodes map[string]fakeFSNode) *[]string {
+func setMountInfoFSStub(t *testing.T, rt *cliRuntime, nodes map[string]fakeFSNode) *[]string {
 	t.Helper()
-	return withMountInfoNoRootLstatStub(t, nil, nodes)
+	return setMountInfoNoRootLstatStub(t, rt, nil, nodes)
 }
 
-func withMountInfoNoRootLstatStub(t *testing.T, forbiddenRoots []string, nodes map[string]fakeFSNode) *[]string {
+func setMountInfoNoRootLstatStub(t *testing.T, rt *cliRuntime, forbiddenRoots []string, nodes map[string]fakeFSNode) *[]string {
 	t.Helper()
 	forbidden := make(map[string]struct{}, len(forbiddenRoots))
 	for _, r := range forbiddenRoots {
 		forbidden[filepath.Clean(r)] = struct{}{}
 	}
-	prevLstat := mountInfoLstat
-	prevReadlink := mountInfoReadlink
 	var lstatCalls []string
-	mountInfoLstat = func(path string) (os.FileInfo, error) {
+	rt.mountInfoLstat = func(path string) (os.FileInfo, error) {
 		cleanPath := filepath.Clean(path)
 		if _, banned := forbidden[cleanPath]; banned {
 			t.Errorf("unexpected mountInfoLstat call on active mount root %q", cleanPath)
@@ -181,7 +179,7 @@ func withMountInfoNoRootLstatStub(t *testing.T, forbiddenRoots []string, nodes m
 		}
 		return fakeFileInfo{name: filepath.Base(path), mode: node.mode}, nil
 	}
-	mountInfoReadlink = func(path string) (string, error) {
+	rt.mountInfoReadlink = func(path string) (string, error) {
 		node, ok := nodes[path]
 		if !ok {
 			return "", os.ErrNotExist
@@ -194,10 +192,6 @@ func withMountInfoNoRootLstatStub(t *testing.T, forbiddenRoots []string, nodes m
 		}
 		return node.target, nil
 	}
-	t.Cleanup(func() {
-		mountInfoLstat = prevLstat
-		mountInfoReadlink = prevReadlink
-	})
 	return &lstatCalls
 }
 
@@ -219,13 +213,13 @@ func buildSymlinkChainNodes(hops int, target string) map[string]fakeFSNode {
 }
 
 func TestResolveMountPoint_GivenDirectAndSyntheticMountedPaths_ReturnsZeroLstatCalls(t *testing.T) {
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /mnt/bowl-a rw - fuse.bowl bowl:"+testDiskID1+" rw\n101 30 0:51 / /data/mnt rw - fuse.bowl bowl:"+testDiskID2+" rw\n")
+	lstatCalls := setMountInfoFSStub(t, rt, map[string]fakeFSNode{})
 
-	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /mnt/bowl-a rw - fuse.bowl bowl:"+testDiskID1+" rw\n101 30 0:51 / /data/mnt rw - fuse.bowl bowl:"+testDiskID2+" rw\n")
-	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{})
-
-	resolvedSynthetic, mountedSynthetic, err := ResolveMountPoint("/mnt/bowl-a")
+	resolvedSynthetic, mountedSynthetic, err := rt.resolveMountPoint("/mnt/bowl-a")
 	require.NoError(t, err)
-	resolvedTrailSlash, mountedTrailSlash, err := ResolveMountPoint("/data/mnt/")
+	resolvedTrailSlash, mountedTrailSlash, err := rt.resolveMountPoint("/data/mnt/")
 	require.NoError(t, err)
 
 	require.True(t, mountedSynthetic)
@@ -236,14 +230,14 @@ func TestResolveMountPoint_GivenDirectAndSyntheticMountedPaths_ReturnsZeroLstatC
 }
 
 func TestResolveMountPoint_GivenLeafSymlinkToMountpoint_StopsBeforeLstatOnMountRoot(t *testing.T) {
-
-	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	lstatCalls := setMountInfoFSStub(t, rt, map[string]fakeFSNode{
 		"/tmp":     {mode: os.ModeDir | 0o755},
 		"/tmp/sym": {mode: os.ModeSymlink | 0o777, target: "/data/mnt"},
 	})
 
-	resolved, mounted, err := ResolveMountPoint("/tmp/sym")
+	resolved, mounted, err := rt.resolveMountPoint("/tmp/sym")
 
 	require.NoError(t, err)
 	require.True(t, mounted)
@@ -252,17 +246,17 @@ func TestResolveMountPoint_GivenLeafSymlinkToMountpoint_StopsBeforeLstatOnMountR
 }
 
 func TestResolveMountPoint_GivenSymlinkedParent_ResolvesCanonicalMountWithoutLstatOnMountRoot(t *testing.T) {
-
-	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n35 30 0:25 / /run rw - tmpfs tmpfs rw\n100 35 0:50 / /run/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n35 30 0:25 / /run rw - tmpfs tmpfs rw\n100 35 0:50 / /run/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	lstatCalls := setMountInfoFSStub(t, rt, map[string]fakeFSNode{
 		"/var":     {mode: os.ModeDir | 0o755},
 		"/var/run": {mode: os.ModeSymlink | 0o777, target: "/run"},
 		"/var/rel": {mode: os.ModeSymlink | 0o777, target: "../run"},
 	})
 
-	resolvedAbs, mountedAbs, err := ResolveMountPoint("/var/run/mnt")
+	resolvedAbs, mountedAbs, err := rt.resolveMountPoint("/var/run/mnt")
 	require.NoError(t, err)
-	resolvedRel, mountedRel, err := ResolveMountPoint("/var/rel/mnt")
+	resolvedRel, mountedRel, err := rt.resolveMountPoint("/var/rel/mnt")
 	require.NoError(t, err)
 
 	require.True(t, mountedAbs)
@@ -274,28 +268,31 @@ func TestResolveMountPoint_GivenSymlinkedParent_ResolvesCanonicalMountWithoutLst
 
 func TestResolveMountPoint_GivenHopLimitErrorsAndMissingMountInfo_HandlesCleanly(t *testing.T) {
 	t.Run("40SymlinkHopsSucceed", func(t *testing.T) {
-		withMountInfoContent(t, "100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-		withMountInfoFSStub(t, buildSymlinkChainNodes(40, "/data/mnt"))
+		rt := defaultCLIRuntime()
+		setMountInfoContent(t, rt, "100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setMountInfoFSStub(t, rt, buildSymlinkChainNodes(40, "/data/mnt"))
 
-		resolved, mounted, err := ResolveMountPoint("/tmp/hop-00")
+		resolved, mounted, err := rt.resolveMountPoint("/tmp/hop-00")
 		require.NoError(t, err)
 		require.True(t, mounted)
 		require.Equal(t, "/data/mnt", resolved)
 	})
 
 	t.Run("41SymlinkHopsExceedLimit", func(t *testing.T) {
-		withMountInfoContent(t, "100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-		withMountInfoFSStub(t, buildSymlinkChainNodes(41, "/data/mnt"))
+		rt := defaultCLIRuntime()
+		setMountInfoContent(t, rt, "100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setMountInfoFSStub(t, rt, buildSymlinkChainNodes(41, "/data/mnt"))
 
-		resolved, mounted, err := ResolveMountPoint("/tmp/hop-00")
+		resolved, mounted, err := rt.resolveMountPoint("/tmp/hop-00")
 		require.NoError(t, err)
 		require.False(t, mounted)
 		require.Equal(t, "/tmp/hop-40", resolved)
 	})
 
 	t.Run("SymlinkLoopAndLstatErrors", func(t *testing.T) {
-		withMountInfoContent(t, "100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-		withMountInfoFSStub(t, map[string]fakeFSNode{
+		rt := defaultCLIRuntime()
+		setMountInfoContent(t, rt, "100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setMountInfoFSStub(t, rt, map[string]fakeFSNode{
 			"/tmp":        {mode: os.ModeDir | 0o755},
 			"/tmp/loop-a": {mode: os.ModeSymlink | 0o777, target: "/tmp/loop-b"},
 			"/tmp/loop-b": {mode: os.ModeSymlink | 0o777, target: "/tmp/loop-a"},
@@ -304,26 +301,27 @@ func TestResolveMountPoint_GivenHopLimitErrorsAndMissingMountInfo_HandlesCleanly
 		})
 
 		for _, path := range []string{"/tmp/loop-a", "/tmp/notdir", "/tmp/eloop", "/tmp/missing"} {
-			_, mounted, err := ResolveMountPoint(path)
+			_, mounted, err := rt.resolveMountPoint(path)
 			require.NoError(t, err, "path=%s", path)
 			require.False(t, mounted, "path=%s", path)
 		}
 	})
 
 	t.Run("EmptyMountSetExpandsSymlinksUpTo40Hops", func(t *testing.T) {
-		withMissingMountInfo(t)
+		rt := defaultCLIRuntime()
+		setMissingMountInfo(t, rt)
 		nodes := buildSymlinkChainNodes(40, "/data/mnt")
 		nodes["/data"] = fakeFSNode{mode: os.ModeDir | 0o755}
 		nodes["/data/mnt"] = fakeFSNode{mode: os.ModeDir | 0o755}
-		withMountInfoFSStub(t, nodes)
+		setMountInfoFSStub(t, rt, nodes)
 
-		resolved, mounted, err := ResolveMountPoint("/tmp/hop-00")
+		resolved, mounted, err := rt.resolveMountPoint("/tmp/hop-00")
 		require.NoError(t, err)
 		require.False(t, mounted)
 		require.Equal(t, "/data/mnt", resolved)
 
-		withMountInfoFSStub(t, buildSymlinkChainNodes(41, "/data/mnt"))
-		resolvedOver, mountedOver, err := ResolveMountPoint("/tmp/hop-00")
+		setMountInfoFSStub(t, rt, buildSymlinkChainNodes(41, "/data/mnt"))
+		resolvedOver, mountedOver, err := rt.resolveMountPoint("/tmp/hop-00")
 		require.NoError(t, err)
 		require.False(t, mountedOver)
 		require.Equal(t, "/tmp/hop-40", resolvedOver)
@@ -331,34 +329,34 @@ func TestResolveMountPoint_GivenHopLimitErrorsAndMissingMountInfo_HandlesCleanly
 }
 
 func TestResolveMountPoint_GivenActiveMountRootsInPath_SkipsLstatOnMountRoots(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	const (
 		realWedgedMP = "/real-wedged"
 		realOkMP     = "/real-ok"
 	)
-	withMountInfoContent(t,
+	setMountInfoContent(t, rt,
 		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
 			"35 30 0:25 / /run rw - tmpfs tmpfs rw\n"+
 			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
 			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
 	)
-	lstatCalls := withMountInfoNoRootLstatStub(t, []string{"/", "/run", realWedgedMP, realOkMP}, map[string]fakeFSNode{
+	lstatCalls := setMountInfoNoRootLstatStub(t, rt, []string{"/", "/run", realWedgedMP, realOkMP}, map[string]fakeFSNode{
 		"/run/sym-ok": {mode: os.ModeSymlink | 0o777, target: realOkMP},
 		"/var":        {mode: os.ModeDir | 0o755},
 		"/var/sym":    {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
 	})
 
-	resolvedOk, mountedOk, err := ResolveMountPoint("/run/sym-ok")
+	resolvedOk, mountedOk, err := rt.resolveMountPoint("/run/sym-ok")
 	require.NoError(t, err)
 	require.True(t, mountedOk)
 	require.Equal(t, realOkMP, resolvedOk)
 
-	resolvedSub, mountedSub, err := ResolveMountPoint("/real-wedged/sub/leaf")
+	resolvedSub, mountedSub, err := rt.resolveMountPoint("/real-wedged/sub/leaf")
 	require.NoError(t, err)
 	require.False(t, mountedSub)
 	require.Equal(t, "/real-wedged/sub/leaf", resolvedSub)
 
-	resolvedWedged, mountedWedged, err := ResolveMountPoint("/var/sym")
+	resolvedWedged, mountedWedged, err := rt.resolveMountPoint("/var/sym")
 	require.NoError(t, err)
 	require.True(t, mountedWedged)
 	require.Equal(t, realWedgedMP, resolvedWedged)
@@ -387,13 +385,14 @@ func TestParseMountPointsFromReader_GivenFSTypeAndOctalEscapes_ParsesFSTypeAndSo
 
 func TestResolveMountPointInfo_GivenStackedMountsAndSymlinks_ReturnsTopmostMountWithoutRootLstat(t *testing.T) {
 	t.Run("NonBowlStackedOverBowl", func(t *testing.T) {
-		withMountInfoContent(t,
+		rt := defaultCLIRuntime()
+		setMountInfoContent(t, rt,
 			"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
 				"100 30 0:50 / /mnt/stacked rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
 				"101 100 0:51 / /mnt/stacked ro - tmpfs tmpfs ro\n",
 		)
 
-		info, mounted, err := ResolveMountPointInfo("/mnt/stacked")
+		info, mounted, err := rt.resolveMountPointInfo("/mnt/stacked")
 
 		require.NoError(t, err)
 		require.True(t, mounted)
@@ -407,13 +406,14 @@ func TestResolveMountPointInfo_GivenStackedMountsAndSymlinks_ReturnsTopmostMount
 	})
 
 	t.Run("BowlStackedOverNonBowl", func(t *testing.T) {
-		withMountInfoContent(t,
+		rt := defaultCLIRuntime()
+		setMountInfoContent(t, rt,
 			"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
 				"100 30 0:50 / /mnt/stacked ro - tmpfs tmpfs ro\n"+
 				"101 100 0:51 / /mnt/stacked rw - fuse.bowl bowl:"+testDiskID1+" rw\n",
 		)
 
-		info, mounted, err := ResolveMountPointInfo("/mnt/stacked")
+		info, mounted, err := rt.resolveMountPointInfo("/mnt/stacked")
 
 		require.NoError(t, err)
 		require.True(t, mounted)
@@ -427,44 +427,46 @@ func TestResolveMountPointInfo_GivenStackedMountsAndSymlinks_ReturnsTopmostMount
 	})
 
 	t.Run("IsBowlMatchesFSTypeOrBowlSourcePrefix", func(t *testing.T) {
-		withMountInfoContent(t,
+		rt := defaultCLIRuntime()
+		setMountInfoContent(t, rt,
 			"100 30 0:50 / /mnt/by-type rw - fuse.bowl custom-source rw\n"+
 				"101 30 0:51 / /mnt/by-source ro - fuse bowl:"+testDiskID1+" ro\n"+
 				"102 30 0:52 / /mnt/sshfs rw - fuse.sshfs user@host:/data rw\n",
 		)
 
-		byType, mountedType, err := ResolveMountPointInfo("/mnt/by-type")
+		byType, mountedType, err := rt.resolveMountPointInfo("/mnt/by-type")
 		require.NoError(t, err)
 		require.True(t, mountedType)
 		require.True(t, byType.IsBowl())
 
-		bySource, mountedSource, err := ResolveMountPointInfo("/mnt/by-source")
+		bySource, mountedSource, err := rt.resolveMountPointInfo("/mnt/by-source")
 		require.NoError(t, err)
 		require.True(t, mountedSource)
 		require.True(t, bySource.IsBowl())
 		require.True(t, bySource.ReadOnly)
 
-		sshfsInfo, mountedSSH, err := ResolveMountPointInfo("/mnt/sshfs")
+		sshfsInfo, mountedSSH, err := rt.resolveMountPointInfo("/mnt/sshfs")
 		require.NoError(t, err)
 		require.True(t, mountedSSH)
 		require.False(t, sshfsInfo.IsBowl())
 	})
 
 	t.Run("SymlinkedLeafAndParentResolveTopmostWithoutMountRootLstat", func(t *testing.T) {
-		withMountInfoContent(t,
+		rt := defaultCLIRuntime()
+		setMountInfoContent(t, rt,
 			"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
 				"35 30 0:25 / /run rw - tmpfs tmpfs rw\n"+
 				"100 35 0:50 / /run/stacked rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
 				"101 100 0:51 / /run/stacked rw - fuse.sshfs user@host:/srv rw\n",
 		)
-		lstatCalls := withMountInfoNoRootLstatStub(t, []string{"/", "/run", "/run/stacked"}, map[string]fakeFSNode{
+		lstatCalls := setMountInfoNoRootLstatStub(t, rt, []string{"/", "/run", "/run/stacked"}, map[string]fakeFSNode{
 			"/tmp":     {mode: os.ModeDir | 0o755},
 			"/tmp/sym": {mode: os.ModeSymlink | 0o777, target: "/run/stacked"},
 			"/var":     {mode: os.ModeDir | 0o755},
 			"/var/run": {mode: os.ModeSymlink | 0o777, target: "/run"},
 		})
 
-		leafInfo, leafMounted, err := ResolveMountPointInfo("/tmp/sym")
+		leafInfo, leafMounted, err := rt.resolveMountPointInfo("/tmp/sym")
 		require.NoError(t, err)
 		require.True(t, leafMounted)
 		require.Equal(t, MountPointInfo{
@@ -475,7 +477,7 @@ func TestResolveMountPointInfo_GivenStackedMountsAndSymlinks_ReturnsTopmostMount
 		}, leafInfo)
 		require.False(t, leafInfo.IsBowl())
 
-		parentInfo, parentMounted, err := ResolveMountPointInfo("/var/run/stacked")
+		parentInfo, parentMounted, err := rt.resolveMountPointInfo("/var/run/stacked")
 		require.NoError(t, err)
 		require.True(t, parentMounted)
 		require.Equal(t, leafInfo, parentInfo)
@@ -483,9 +485,10 @@ func TestResolveMountPointInfo_GivenStackedMountsAndSymlinks_ReturnsTopmostMount
 	})
 
 	t.Run("UnmountedReturnsZeroInfo", func(t *testing.T) {
-		withMountInfoContent(t, "100 30 0:50 / /mnt/bowl rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		rt := defaultCLIRuntime()
+		setMountInfoContent(t, rt, "100 30 0:50 / /mnt/bowl rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-		info, mounted, err := ResolveMountPointInfo("/mnt/not-mounted")
+		info, mounted, err := rt.resolveMountPointInfo("/mnt/not-mounted")
 
 		require.NoError(t, err)
 		require.False(t, mounted)
@@ -494,14 +497,15 @@ func TestResolveMountPointInfo_GivenStackedMountsAndSymlinks_ReturnsTopmostMount
 }
 
 func TestResolveMountPointAndIsMountPoint_GivenNonBowlMounts_RemainFilesystemAgnostic(t *testing.T) {
-	withMountInfoContent(t,
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt,
 		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
 			"40 30 0:30 / /mnt/tmp rw - tmpfs tmpfs rw\n"+
 			"41 30 0:31 / /mnt/ssh rw - fuse.sshfs user@host:/srv rw\n"+
 			"100 30 0:50 / /mnt/stacked rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
 			"101 100 0:51 / /mnt/stacked rw - tmpfs tmpfs rw\n",
 	)
-	withMountInfoFSStub(t, map[string]fakeFSNode{
+	setMountInfoFSStub(t, rt, map[string]fakeFSNode{
 		"/tmp":         {mode: os.ModeDir | 0o755},
 		"/tmp/sym-tmp": {mode: os.ModeSymlink | 0o777, target: "/mnt/tmp"},
 	})
@@ -517,12 +521,12 @@ func TestResolveMountPointAndIsMountPoint_GivenNonBowlMounts_RemainFilesystemAgn
 	}
 
 	for _, tc := range cases {
-		resolved, mounted, err := ResolveMountPoint(tc.input)
+		resolved, mounted, err := rt.resolveMountPoint(tc.input)
 		require.NoError(t, err, "input=%s", tc.input)
 		require.True(t, mounted, "input=%s", tc.input)
 		require.Equal(t, tc.want, resolved, "input=%s", tc.input)
 
-		isMounted, err := IsMountPoint(tc.input)
+		isMounted, err := rt.isMountPoint(tc.input)
 		require.NoError(t, err, "input=%s", tc.input)
 		require.True(t, isMounted, "input=%s", tc.input)
 	}

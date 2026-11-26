@@ -28,13 +28,14 @@ func TestCommit_GivenValidationErrors_ReturnsExit2(t *testing.T) {
 }
 
 func TestCommit_GivenCRUDAndPrune_HandlesQuietJSONAndFilters(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "commit-disk", 1<<30, 0)
 	storage.seedBranch(testDiskID1, "feat", 1, 0)
 	storage.pruneReclaimedCount = 3
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
-	code, qOut, errOut := runCLI("commit", "create", "-d", testDiskID1, "--branch", "feat", "-m", "checkpoint", "-q")
+	code, qOut, errOut := runCLIWithRuntime(rt, "commit", "create", "-d", testDiskID1, "--branch", "feat", "-m", "checkpoint", "-q")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	require.Equal(t, "2\n", qOut)
@@ -50,12 +51,12 @@ func TestCommit_GivenCRUDAndPrune_HandlesQuietJSONAndFilters(t *testing.T) {
 		CreatedAt: timestamppb.New(time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)),
 	})
 
-	code, listQuietOut, errOut := runCLI("commit", "ls", "-d", testDiskID1, "-q")
+	code, listQuietOut, errOut := runCLIWithRuntime(rt, "commit", "ls", "-d", testDiskID1, "-q")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	require.Equal(t, "5\n2\n1\n", listQuietOut)
 
-	code, filteredOut, errOut := runCLI("commit", "list", "-d", testDiskID1, "--kind", "init", "--json")
+	code, filteredOut, errOut := runCLIWithRuntime(rt, "commit", "list", "-d", testDiskID1, "--kind", "init", "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var listRes commitListJSON
@@ -64,13 +65,13 @@ func TestCommit_GivenCRUDAndPrune_HandlesQuietJSONAndFilters(t *testing.T) {
 	require.Equal(t, uint64(1), listRes.Commits[0].CommitID)
 	require.Equal(t, "init", listRes.Commits[0].Kind)
 
-	withDiskStdin(t, strings.NewReader("n\n"))
-	code, _, errOut = runCLI("commit", "rm", "5", "-d", testDiskID1)
+	setDiskStdin(rt, strings.NewReader("n\n"))
+	code, _, errOut = runCLIWithRuntime(rt, "commit", "rm", "5", "-d", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "Operation canceled")
 	require.Zero(t, storage.deleteCommitCalls)
 
-	code, delOut, errOut := runCLI("commit", "delete", "5", "-d", testDiskID1, "-y", "--json")
+	code, delOut, errOut := runCLIWithRuntime(rt, "commit", "delete", "5", "-d", testDiskID1, "-y", "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var delRes commitDeleteJSON
@@ -78,12 +79,12 @@ func TestCommit_GivenCRUDAndPrune_HandlesQuietJSONAndFilters(t *testing.T) {
 	require.Equal(t, uint64(5), delRes.CommitID)
 	require.True(t, delRes.Deleted)
 
-	code, pruneOut, errOut := runCLI("commit", "prune", "-d", testDiskID1, "-y")
+	code, pruneOut, errOut := runCLIWithRuntime(rt, "commit", "prune", "-d", testDiskID1, "-y")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	require.Contains(t, pruneOut, "Pruned 3 unreachable commit(s)")
 
-	code, pruneJSONOut, errOut := runCLI("commit", "prune", "-d", testDiskID1, "-y", "--json")
+	code, pruneJSONOut, errOut := runCLIWithRuntime(rt, "commit", "prune", "-d", testDiskID1, "-y", "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var pruneRes commitPruneJSON

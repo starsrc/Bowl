@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
 type syncBuffer struct {
@@ -66,25 +68,8 @@ func withCleanOTelAndLogger(t *testing.T) {
 	})
 }
 
-func withServeFUSEStub(t *testing.T, fn func(context.Context, *fusefs.RawFS, *fusefs.Config, string, func()) error) {
-	t.Helper()
-	prev := serveFUSE
-	serveFUSE = fn
-	t.Cleanup(func() { serveFUSE = prev })
-}
-
-func withSpawnDaemonStub(t *testing.T, fn func([]string, io.Writer) int) {
-	t.Helper()
-	prev := spawnDaemon
-	spawnDaemon = fn
-	t.Cleanup(func() { spawnDaemon = prev })
-}
-
-func withStageDirTmpfsStub(t *testing.T, isTmpfs bool) {
-	t.Helper()
-	prev := stageDirIsTmpfs
-	stageDirIsTmpfs = func(*fusefs.StageDirSession) bool { return isTmpfs }
-	t.Cleanup(func() { stageDirIsTmpfs = prev })
+func setStageDirTmpfsStub(rt *cliRuntime, isTmpfs bool) {
+	rt.stageDirIsTmpfs = func(*fusefs.StageDirSession) bool { return isTmpfs }
 }
 
 func withCleanDefaultStageDir(t *testing.T) {
@@ -95,53 +80,23 @@ func withCleanDefaultStageDir(t *testing.T) {
 	}
 }
 
-func withMountRenewIntervalStub(t *testing.T, interval time.Duration) {
-	t.Helper()
-	prev := mountRenewIntervalFn
-	mountRenewIntervalFn = func(uint32) time.Duration { return interval }
-	t.Cleanup(func() { mountRenewIntervalFn = prev })
+func setMountRenewIntervalStub(rt *cliRuntime, interval time.Duration) {
+	rt.mountRenewIntervalFn = func(uint32) time.Duration { return interval }
 }
 
-func withMountRenewRetryIntervalStub(t *testing.T, interval time.Duration) {
-	t.Helper()
-	prev := mountRenewRetryIntervalFn
-	mountRenewRetryIntervalFn = func(time.Duration) time.Duration { return interval }
-	t.Cleanup(func() { mountRenewRetryIntervalFn = prev })
+func setMountRenewRetryIntervalStub(rt *cliRuntime, interval time.Duration) {
+	rt.mountRenewRetryIntervalFn = func(time.Duration) time.Duration { return interval }
 }
 
-func withMountNowStub(t *testing.T, fn func() time.Time) {
-	t.Helper()
-	prev := mountNowFn
-	mountNowFn = fn
-	t.Cleanup(func() { mountNowFn = prev })
+func setReadinessPipeStub(rt *cliRuntime, w *os.File) {
+	rt.readinessPipeFile = func() *os.File { return w }
 }
 
-func withChdirStub(t *testing.T, fn func(string) error) {
+func stubMountServeFUSE(t *testing.T, rt *cliRuntime, wantMP string) *capturedMountServe {
 	t.Helper()
-	prev := chdirFn
-	chdirFn = fn
-	t.Cleanup(func() { chdirFn = prev })
-}
-
-func withReadinessPipeStub(t *testing.T, w *os.File) {
-	t.Helper()
-	prev := readinessPipeFile
-	readinessPipeFile = func() *os.File { return w }
-	t.Cleanup(func() { readinessPipeFile = prev })
-}
-
-func withRedirectDaemonStdioStub(t *testing.T, fn func(*os.File)) {
-	t.Helper()
-	prev := redirectDaemonStdio
-	redirectDaemonStdio = fn
-	t.Cleanup(func() { redirectDaemonStdio = prev })
-}
-
-func stubMountServeFUSE(t *testing.T, wantMP string) *capturedMountServe {
-	t.Helper()
-	wantCanon := canonicalMountpoint(wantMP)
+	wantCanon := rt.canonicalMountpoint(wantMP)
 	res := &capturedMountServe{}
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, gotMP string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, gotMP string, ready func()) error {
 		res.cfg = *cfg
 		require.Equal(t, wantCanon, gotMP, "scene=serveFUSE_mountpoint want=%s got=%s", wantCanon, gotMP)
 		if cfg.StageSession != nil {
@@ -149,13 +104,13 @@ func stubMountServeFUSE(t *testing.T, wantMP string) *capturedMountServe {
 			res.instDirAlive = statErr == nil
 		}
 		ready()
-		res.metaInReady, res.metaFoundNow = findMountMeta(wantCanon)
+		res.metaInReady, res.metaFoundNow = rt.findMountMeta(wantCanon)
 		return nil
-	})
+	}
 	return res
 }
 
-func runCLIWithDeadline(t *testing.T, deadline time.Duration, args ...string) (code int, stdout, stderr string) {
+func runCLIWithDeadline(t *testing.T, rt *cliRuntime, deadline time.Duration, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	type cliResult struct {
 		code   int
@@ -164,7 +119,7 @@ func runCLIWithDeadline(t *testing.T, deadline time.Duration, args ...string) (c
 	}
 	ch := make(chan cliResult, 1)
 	go func() {
-		c, out, errOut := runCLI(args...)
+		c, out, errOut := runCLIWithRuntime(rt, args...)
 		ch <- cliResult{code: c, stdout: out, stderr: errOut}
 	}()
 	select {
@@ -212,7 +167,6 @@ func TestMount_Help_GivenHelpFlag_PrintsUpdatedUsageWithoutLegacyRO(t *testing.T
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-
 			code, out, errOut := runCLI("mount", tc.flag)
 
 			require.Equal(t, 0, code, "scene=mount_help flag=%s want=0 got=%d stderr=%s", tc.flag, code, errOut)
@@ -283,7 +237,8 @@ func TestMount_Validation_GivenInvalidFlagsOrArgs_Exits2(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, out, errOut := runCLIWithDeadline(t, 2*time.Second, tc.args...)
+			rt := defaultCLIRuntime()
+			code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, tc.args...)
 			require.Equal(t, 2, code, "scene=%s args=%v want=2 got=%d stderr=%s", tc.name, tc.args, code, errOut)
 			require.Empty(t, out)
 			require.Contains(t, errOut, tc.wantSubstr, "scene=%s", tc.name)
@@ -309,8 +264,9 @@ func TestMount_Validation_GivenInvalidEnvVars_Exits2(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			rt := defaultCLIRuntime()
 			t.Setenv(tc.envKey, tc.envVal)
-			code, out, errOut := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp)
+			code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, "mount", testDiskID1, mp)
 			require.Equal(t, 2, code, "scene=%s env=%s=%q want=2 got=%d stderr=%s", tc.name, tc.envKey, tc.envVal, code, errOut)
 			require.Empty(t, out)
 			require.Contains(t, errOut, tc.wantSubstr, "scene=%s", tc.name)
@@ -346,7 +302,8 @@ func TestMount_Validation_GivenStageDirPathViolations_Exits2(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, out, errOut := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, tc.mountpoint, "--stage-dir", tc.stageDir)
+			rt := defaultCLIRuntime()
+			code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, "mount", testDiskID1, tc.mountpoint, "--stage-dir", tc.stageDir)
 			require.Equal(t, 2, code, "scene=%s want=2 got=%d stderr=%s", tc.name, code, errOut)
 			require.Empty(t, out)
 			require.Contains(t, errOut, tc.wantSubstr, "scene=%s", tc.name)
@@ -355,13 +312,13 @@ func TestMount_Validation_GivenStageDirPathViolations_Exits2(t *testing.T) {
 }
 
 func TestMount_Validation_GivenRelativeDotInsideMountpoint_Exits2(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
 	subDir := filepath.Join(mp, "nested")
 	require.NoError(t, os.MkdirAll(subDir, 0o755))
 	t.Chdir(subDir)
 
-	code, out, errOut := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--stage-dir", ".")
+	code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, "mount", testDiskID1, mp, "--stage-dir", ".")
 
 	require.Equal(t, 2, code, "scene=relative_dot_in_mountpoint want=2 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
@@ -369,7 +326,7 @@ func TestMount_Validation_GivenRelativeDotInsideMountpoint_Exits2(t *testing.T) 
 }
 
 func TestMount_Validation_GivenStageDirSymlinkLoop_Exits2(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
 	loopDir := t.TempDir()
 	loopA := filepath.Join(loopDir, "loop-a")
@@ -377,7 +334,7 @@ func TestMount_Validation_GivenStageDirSymlinkLoop_Exits2(t *testing.T) {
 	require.NoError(t, os.Symlink(loopB, loopA))
 	require.NoError(t, os.Symlink(loopA, loopB))
 
-	code, out, errOut := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--stage-dir", loopA)
+	code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, "mount", testDiskID1, mp, "--stage-dir", loopA)
 
 	require.Equal(t, 2, code, "scene=stage_dir_symlink_loop want=2 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
@@ -422,14 +379,14 @@ func TestMount_Validation_GivenLogFileWithForegroundOrEmpty_Exits2(t *testing.T)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-
+			rt := defaultCLIRuntime()
 			spawnCalled := false
-			withSpawnDaemonStub(t, func([]string, io.Writer) int {
+			rt.spawnDaemon = func([]string, io.Writer) int {
 				spawnCalled = true
 				return 0
-			})
+			}
 
-			code, out, errOut := runCLIWithDeadline(t, 2*time.Second, tc.args...)
+			code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, tc.args...)
 
 			require.False(t, spawnCalled, "scene=%s want=no_daemon_spawn", tc.name)
 			require.Equal(t, 2, code, "scene=%s args=%v want=2 got=%d stderr=%s", tc.name, tc.args, code, errOut)
@@ -537,17 +494,17 @@ func TestMount_Validation_GivenLogFilePathViolations_Exits2(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-
+			rt := defaultCLIRuntime()
 			spawnCalled := false
-			withSpawnDaemonStub(t, func([]string, io.Writer) int {
+			rt.spawnDaemon = func([]string, io.Writer) int {
 				spawnCalled = true
 				return 0
-			})
+			}
 			args := []string{"mount", testDiskID1, tc.mountpoint}
 			args = append(args, tc.extraArgs...)
 			args = append(args, "--log-file", tc.logFile)
 
-			code, out, errOut := runCLIWithDeadline(t, 2*time.Second, args...)
+			code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, args...)
 
 			require.False(t, spawnCalled, "scene=%s want=no_daemon_spawn", tc.name)
 			require.Equal(t, 2, code, "scene=%s want=2 got=%d stderr=%s", tc.name, code, errOut)
@@ -558,18 +515,18 @@ func TestMount_Validation_GivenLogFilePathViolations_Exits2(t *testing.T) {
 }
 
 func TestMount_Validation_GivenRelativeLogFileInsideMountpoint_Exits2(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
 	subDir := filepath.Join(mp, "nested")
 	require.NoError(t, os.MkdirAll(subDir, 0o755))
 	t.Chdir(subDir)
 	spawnCalled := false
-	withSpawnDaemonStub(t, func([]string, io.Writer) int {
+	rt.spawnDaemon = func([]string, io.Writer) int {
 		spawnCalled = true
 		return 0
-	})
+	}
 
-	code, out, errOut := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--log-file", "bowl.log")
+	code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, "mount", testDiskID1, mp, "--log-file", "bowl.log")
 
 	require.False(t, spawnCalled)
 	require.Equal(t, 2, code, "scene=relative_log_in_mountpoint want=2 got=%d stderr=%s", code, errOut)
@@ -581,7 +538,6 @@ func TestMount_BackgroundDaemon_GivenValidLogFile_PassesRawArgsVerbatimAndDefers
 	mp := t.TempDir()
 	workDir := t.TempDir()
 	t.Chdir(workDir)
-	withMissingMountInfo(t)
 
 	existingLog := filepath.Join(t.TempDir(), "existing.log")
 	require.NoError(t, os.WriteFile(existingLog, []byte("prior\n"), 0o600))
@@ -610,13 +566,15 @@ func TestMount_BackgroundDaemon_GivenValidLogFile_PassesRawArgsVerbatimAndDefers
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			rt := defaultCLIRuntime()
+			setMissingMountInfo(t, rt)
 			var spawnedArgs []string
-			withSpawnDaemonStub(t, func(args []string, _ io.Writer) int {
+			rt.spawnDaemon = func(args []string, _ io.Writer) int {
 				spawnedArgs = append([]string(nil), args...)
 				return 0
-			})
+			}
 
-			code, _, errOut := runCLI(tc.args...)
+			code, _, errOut := runCLIWithRuntime(rt, tc.args...)
 			require.Equal(t, 0, code, "scene=%s want=0 got=%d stderr=%s", tc.name, code, errOut)
 			require.Empty(t, errOut)
 			require.Equal(t, tc.wantArgs, spawnedArgs)
@@ -626,11 +584,11 @@ func TestMount_BackgroundDaemon_GivenValidLogFile_PassesRawArgsVerbatimAndDefers
 }
 
 func TestMount_AlreadyMounted_GivenActiveMountInfo_ReturnsExit1(t *testing.T) {
+	rt := defaultCLIRuntime()
+	mp := rt.canonicalMountpoint(t.TempDir())
+	setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	mp := canonicalMountpoint(t.TempDir())
-	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-
-	code, out, errOut := runCLI("mount", testDiskID1, mp, "-f")
+	code, out, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f")
 
 	require.Equal(t, 1, code, "scene=already_mounted want=1 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
@@ -638,23 +596,23 @@ func TestMount_AlreadyMounted_GivenActiveMountInfo_ReturnsExit1(t *testing.T) {
 }
 
 func TestMount_DefaultConfig_GivenNoModeOrStageFlags_UsesStaged512MiBAndDefaultStageDir(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
 	withCleanDefaultStageDir(t)
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
 	t.Setenv("BOWL_MOUNT_MODE", "")
 	t.Setenv("BOWL_STAGE_SIZE", "")
 	t.Setenv("BOWL_STAGE_DIR", "")
 
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "default-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	captured := stubMountServeFUSE(t, mp)
+	setMountStorageFake(rt, storage)
+	captured := stubMountServeFUSE(t, rt, mp)
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=default_mount want=0 got=%d stderr=%s", code, errOut)
 	require.Equal(t, fusefs.MountModeStaged, captured.cfg.Mode)
@@ -666,23 +624,23 @@ func TestMount_DefaultConfig_GivenNoModeOrStageFlags_UsesStaged512MiBAndDefaultS
 }
 
 func TestMount_WhitespaceEnvFallbacks_GivenBlankStageEnvs_UsesDefaults(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
 	withCleanDefaultStageDir(t)
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
 	t.Setenv("BOWL_MOUNT_MODE", "   ")
 	t.Setenv("BOWL_STAGE_SIZE", "   ")
 	t.Setenv("BOWL_STAGE_DIR", "   ")
 
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "blank-env-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	captured := stubMountServeFUSE(t, mp)
+	setMountStorageFake(rt, storage)
+	captured := stubMountServeFUSE(t, rt, mp)
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=whitespace_env_defaults want=0 got=%d stderr=%s", code, errOut)
 	require.Equal(t, fusefs.MountModeStaged, captured.cfg.Mode)
@@ -693,21 +651,21 @@ func TestMount_WhitespaceEnvFallbacks_GivenBlankStageEnvs_UsesDefaults(t *testin
 }
 
 func TestMount_ForegroundStaged_GivenExplicitFlags_AppliesStageConfigAndCleansInstanceDir(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
 	mp := t.TempDir()
 	stageDir := filepath.Join(t.TempDir(), "custom-stage")
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	t.Setenv("BOWL_TOKEN", "env-mount-tok")
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "mount-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	captured := stubMountServeFUSE(t, mp)
+	setMountStorageFake(rt, storage)
+	captured := stubMountServeFUSE(t, rt, mp)
 
-	code, out, errOut := runCLI(
+	code, out, errOut := runCLIWithRuntime(rt,
 		"mount", testDiskID1, mp,
 		"-f", "--mode=staged", "--stage-size", "16MiB", "--stage-dir", stageDir,
 		"--direct-io", "--allow-other", "--debug", "--stats-file",
@@ -736,7 +694,7 @@ func TestMount_ForegroundStaged_GivenExplicitFlags_AppliesStageConfigAndCleansIn
 	require.True(t, captured.metaFoundNow, "scene=ready_callback want=mountMeta_written got=false")
 	require.Equal(t, testDiskID1, captured.metaInReady.DiskID)
 	require.Equal(t, "off", captured.metaInReady.AdminAddr)
-	_, metaAfterExit := findMountMeta(mp)
+	_, metaAfterExit := rt.findMountMeta(mp)
 	require.False(t, metaAfterExit, "scene=after_exit want=mountMeta_removed got=true")
 	require.Contains(t, errOut, `"msg":"mount_ready"`)
 	require.Contains(t, errOut, `"msg":"unmount_complete"`)
@@ -744,19 +702,19 @@ func TestMount_ForegroundStaged_GivenExplicitFlags_AppliesStageConfigAndCleansIn
 }
 
 func TestMount_ForegroundStaged_GivenMinStageSize4MiB_Succeeds(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
 	mp := t.TempDir()
 	stageDir := filepath.Join(t.TempDir(), "min-stage")
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "min-stage-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	captured := stubMountServeFUSE(t, mp)
+	setMountStorageFake(rt, storage)
+	captured := stubMountServeFUSE(t, rt, mp)
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--stage-size", "4MiB", "--stage-dir", stageDir, "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--stage-size", "4MiB", "--stage-dir", stageDir, "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=min_stage_size_4MiB want=0 got=%d stderr=%s", code, errOut)
 	require.Equal(t, uint64(4_194_304), captured.cfg.StageSize)
@@ -764,9 +722,9 @@ func TestMount_ForegroundStaged_GivenMinStageSize4MiB_Succeeds(t *testing.T) {
 }
 
 func TestMount_ForegroundStaged_GivenEnvFallbacksAndTmpfsSeam_AppliesEnvAndLogsTmpfsWarning(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, true)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, true)
 	parent := t.TempDir()
 	mp := filepath.Join(parent, "mp")
 	require.NoError(t, os.MkdirAll(mp, 0o755))
@@ -775,14 +733,14 @@ func TestMount_ForegroundStaged_GivenEnvFallbacksAndTmpfsSeam_AppliesEnvAndLogsT
 	t.Setenv("BOWL_STAGE_SIZE", "32MiB")
 	t.Setenv("BOWL_STAGE_DIR", siblingStageDir)
 
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "staged-env-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	captured := stubMountServeFUSE(t, mp)
+	setMountStorageFake(rt, storage)
+	captured := stubMountServeFUSE(t, rt, mp)
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=env_staged_tmpfs_warn want=0 got=%d stderr=%s", code, errOut)
 	require.Equal(t, fusefs.MountModeStaged, captured.cfg.Mode)
@@ -797,9 +755,9 @@ func TestMount_ForegroundStaged_GivenEnvFallbacksAndTmpfsSeam_AppliesEnvAndLogsT
 }
 
 func TestMount_ForegroundRO_GivenCLIFlagAndAmbientStageEnv_IgnoresStageEnvAndSkipsSession(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, true)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, true)
 	unusedStageDir := filepath.Join(t.TempDir(), "should-not-exist-ro")
 	t.Setenv("BOWL_ADMIN_ADDR", "off")
 	t.Setenv("BOWL_LOG_LEVEL", "warn")
@@ -810,14 +768,14 @@ func TestMount_ForegroundRO_GivenCLIFlagAndAmbientStageEnv_IgnoresStageEnvAndSki
 	t.Setenv("BOWL_STAGE_DIR", unusedStageDir)
 
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "ro-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	captured := stubMountServeFUSE(t, mp)
+	setMountStorageFake(rt, storage)
+	captured := stubMountServeFUSE(t, rt, mp)
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode", "ro")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--mode", "ro")
 
 	require.Equal(t, 0, code, "scene=ro_ignores_stage_env want=0 got=%d stderr=%s", code, errOut)
 	require.Equal(t, fusefs.MountModeRO, captured.cfg.Mode)
@@ -831,23 +789,23 @@ func TestMount_ForegroundRO_GivenCLIFlagAndAmbientStageEnv_IgnoresStageEnvAndSki
 }
 
 func TestMount_ForegroundRO_GivenEnvModeWhitespaceMixedCase_EnablesReadOnly(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, true)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, true)
 	unusedStageDir := filepath.Join(t.TempDir(), "should-not-exist-env-ro")
 	t.Setenv("BOWL_MOUNT_MODE", " Ro ")
 	t.Setenv("BOWL_STAGE_SIZE", "invalid-ignored")
 	t.Setenv("BOWL_STAGE_DIR", unusedStageDir)
 
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "ro-env-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	captured := stubMountServeFUSE(t, mp)
+	setMountStorageFake(rt, storage)
+	captured := stubMountServeFUSE(t, rt, mp)
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=env_ro_mode want=0 got=%d stderr=%s", code, errOut)
 	require.Equal(t, fusefs.MountModeRO, captured.cfg.Mode)
@@ -857,35 +815,35 @@ func TestMount_ForegroundRO_GivenEnvModeWhitespaceMixedCase_EnablesReadOnly(t *t
 }
 
 func TestMount_ForegroundSync_GivenCLIFlagAndAmbientStageEnv_IgnoresStageEnvSkipsSessionAndMountsWritable(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, true)
-	withMountRenewIntervalStub(t, 15*time.Millisecond)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, true)
+	setMountRenewIntervalStub(rt, 15*time.Millisecond)
 	mp := t.TempDir()
 	nestedStageDir := filepath.Join(mp, "ambient-stage-inside-mp")
 	t.Setenv("BOWL_MOUNT_MODE", "ro")
 	t.Setenv("BOWL_STAGE_SIZE", "1MiB")
 	t.Setenv("BOWL_STAGE_DIR", nestedStageDir)
 
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "sync-disk", 1<<30, 0)
 	storage.mountLeaseTTL = 30
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	var captured fusefs.Config
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, gotMP string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, gotMP string, ready func()) error {
 		captured = *cfg
-		require.Equal(t, canonicalMountpoint(mp), gotMP)
+		require.Equal(t, rt.canonicalMountpoint(mp), gotMP)
 		ready()
 		require.Eventually(t, func() bool {
 			return len(storage.getRenewReqs()) >= 1
 		}, time.Second, 5*time.Millisecond, "scene=sync_renew want>=1_renew_req")
 		return nil
-	})
+	}
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode", "sync", "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--mode", "sync", "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=sync_ignores_stage_env want=0 got=%d stderr=%s", code, errOut)
 	require.Equal(t, fusefs.MountModeSync, captured.Mode)
@@ -901,39 +859,39 @@ func TestMount_ForegroundSync_GivenCLIFlagAndAmbientStageEnv_IgnoresStageEnvSkip
 }
 
 func TestMount_ForegroundSync_GivenEnvModeMixedCaseAndExplicitStageFlagsOrZeroEpoch_EnforcesSyncRules(t *testing.T) {
-
 	t.Setenv("BOWL_MOUNT_MODE", "  SyNc  ")
 	t.Setenv("BOWL_STAGE_SIZE", "bogus-ignored")
 	unusedStageDir := filepath.Join(t.TempDir(), "should-not-exist-env-sync")
 	t.Setenv("BOWL_STAGE_DIR", unusedStageDir)
 	mp := t.TempDir()
 
-	codeSize, _, errSize := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--stage-size", "8MiB")
+	rt := defaultCLIRuntime()
+	codeSize, _, errSize := runCLIWithDeadline(t, rt, 2*time.Second, "mount", testDiskID1, mp, "--stage-size", "8MiB")
 	require.Equal(t, 2, codeSize, "scene=env_sync_with_stage_size want=2 got=%d stderr=%s", codeSize, errSize)
 	require.Contains(t, errSize, "--stage-size cannot be set when --mode is sync")
 
-	codeDir, _, errDir := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--stage-dir", "/tmp/x")
+	codeDir, _, errDir := runCLIWithDeadline(t, rt, 2*time.Second, "mount", testDiskID1, mp, "--stage-dir", "/tmp/x")
 	require.Equal(t, 2, codeDir, "scene=env_sync_with_stage_dir want=2 got=%d stderr=%s", codeDir, errDir)
 	require.Contains(t, errDir, "--stage-dir cannot be set when --mode is sync")
 
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	faultyStorage := newFakeStorage()
 	seedFaultyMountStorage(false, true)(faultyStorage)
-	withMountStorageFake(t, faultyStorage)
+	setMountStorageFake(rt, faultyStorage)
 
-	codeZeroEpoch, _, errZeroEpoch := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	codeZeroEpoch, _, errZeroEpoch := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 	require.Equal(t, 1, codeZeroEpoch, "scene=env_sync_zero_epoch want=1 got=%d stderr=%s", codeZeroEpoch, errZeroEpoch)
 	require.Contains(t, errZeroEpoch, "valid write mount epoch")
 	require.NoDirExists(t, unusedStageDir)
 
 	okStorage := newFakeStorage()
 	okStorage.seedDisk(testDiskID1, "sync-env-disk", 1<<30, 0)
-	withMountStorageFake(t, okStorage)
-	captured := stubMountServeFUSE(t, mp)
+	setMountStorageFake(rt, okStorage)
+	captured := stubMountServeFUSE(t, rt, mp)
 
-	codeOK, _, errOK := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	codeOK, _, errOK := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 	require.Equal(t, 0, codeOK, "scene=env_sync_ok want=0 got=%d stderr=%s", codeOK, errOK)
 	require.Equal(t, fusefs.MountModeSync, captured.cfg.Mode)
 	require.Equal(t, uint64(1), captured.cfg.Epoch)
@@ -965,17 +923,18 @@ func TestMount_HandshakeErrors_GivenServerRejectsMount_ReturnsExit1AndCleansStag
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			withCleanOTelAndLogger(t)
+			rt := defaultCLIRuntime()
 			mp := t.TempDir()
 			stageDir := filepath.Join(t.TempDir(), "handshake-stage")
 			t.Setenv("BOWL_STAGE_DIR", stageDir)
-			withMissingMountInfo(t)
-			withTempMountMetaDirs(t, t.TempDir())
+			setMissingMountInfo(t, rt)
+			setTempMountMetaDirs(rt, t.TempDir())
 
 			storage := newFakeStorage()
 			tc.setup(storage)
-			withMountStorageFake(t, storage)
+			setMountStorageFake(rt, storage)
 
-			code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+			code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 			require.Equal(t, 1, code, "scene=%s want=1 got=%d stderr=%s", tc.name, code, errOut)
 			require.Contains(t, errOut, tc.wantSubstr, "scene=%s", tc.name)
 			requireEmptyDir(t, stageDir, "handshake_cleanup_"+tc.name)
@@ -984,41 +943,41 @@ func TestMount_HandshakeErrors_GivenServerRejectsMount_ReturnsExit1AndCleansStag
 }
 
 func TestMount_ServeError_GivenFUSEFailure_ReturnsExit1AndCleansMetaAndStageSession(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
 	stageDir := filepath.Join(t.TempDir(), "serve-err-stage")
 	t.Setenv("BOWL_STAGE_DIR", stageDir)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "d1", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+	setMountStorageFake(rt, storage)
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 		ready()
 		return errors.New("fuse device failed")
-	})
+	}
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 
 	require.Equal(t, 1, code, "scene=serve_error want=1 got=%d stderr=%s", code, errOut)
 	require.Contains(t, errOut, "fuse device failed")
-	_, remains := findMountMeta(mp)
+	_, remains := rt.findMountMeta(mp)
 	require.False(t, remains, "scene=serve_error want=mountMeta_removed got=true")
 	requireEmptyDir(t, stageDir, "serve_error_stage_cleanup")
 }
 
 func TestRunMount_StageSessionError_GivenUncreatableStageDir_FailsBeforeMountHandshake(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "d1", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	blockerFile := filepath.Join(t.TempDir(), "file-blocker")
 	require.NoError(t, os.WriteFile(blockerFile, []byte("x"), 0o600))
@@ -1037,7 +996,7 @@ func TestRunMount_StageSessionError_GivenUncreatableStageDir_FailsBeforeMountHan
 	}
 
 	var logBuf bytes.Buffer
-	err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+	err := rt.runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "initialize stage directory")
@@ -1047,7 +1006,6 @@ func TestRunMount_StageSessionError_GivenUncreatableStageDir_FailsBeforeMountHan
 func TestMount_BackgroundDaemon_GivenROAndStagedFlags_SpawnsWithoutParentStageSession(t *testing.T) {
 	mp := t.TempDir()
 	deferredStageDir := filepath.Join(t.TempDir(), "daemon-only-stage")
-	withMissingMountInfo(t)
 
 	cases := []struct {
 		name     string
@@ -1073,13 +1031,15 @@ func TestMount_BackgroundDaemon_GivenROAndStagedFlags_SpawnsWithoutParentStageSe
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			rt := defaultCLIRuntime()
+			setMissingMountInfo(t, rt)
 			var spawnedArgs []string
-			withSpawnDaemonStub(t, func(args []string, _ io.Writer) int {
+			rt.spawnDaemon = func(args []string, _ io.Writer) int {
 				spawnedArgs = append([]string(nil), args...)
 				return 0
-			})
+			}
 
-			code, _, errOut := runCLI(tc.args...)
+			code, _, errOut := runCLIWithRuntime(rt, tc.args...)
 			require.Equal(t, 0, code, "scene=%s want=0 got=%d stderr=%s", tc.name, code, errOut)
 			require.Empty(t, errOut)
 			require.Equal(t, tc.wantArgs, spawnedArgs)
@@ -1090,17 +1050,18 @@ func TestMount_BackgroundDaemon_GivenROAndStagedFlags_SpawnsWithoutParentStageSe
 
 func TestMount_GivenBoolFalseAndRepeatedInvocations_ResetsPerCallState(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "isolation-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
-	captured := stubMountServeFUSE(t, mp)
-	code, _, errOut := runCLI(
+	captured := stubMountServeFUSE(t, rt, mp)
+	code, _, errOut := runCLIWithRuntime(rt,
 		"mount", testDiskID1, mp,
 		"-f", "--mode=ro", "--allow-other", "--direct-io", "--debug", "--stats-file", "--admin-addr", "off",
 	)
@@ -1111,8 +1072,8 @@ func TestMount_GivenBoolFalseAndRepeatedInvocations_ResetsPerCallState(t *testin
 	require.True(t, captured.cfg.Debug)
 	require.True(t, captured.cfg.EnableStatsFile)
 
-	captured2 := stubMountServeFUSE(t, mp)
-	code, _, errOut = runCLI(
+	captured2 := stubMountServeFUSE(t, rt, mp)
+	code, _, errOut = runCLIWithRuntime(rt,
 		"mount", testDiskID1, mp,
 		"-f", "--allow-other=false", "--direct-io=false", "--debug=false", "--stats-file=false", "--admin-addr", "off",
 	)
@@ -1147,10 +1108,10 @@ func TestReadDaemonHandshake_GivenOKErrorAndEOF_ReturnsExpectedExitCodes(t *test
 }
 
 func TestResolveLogFile_GivenExplicitPath_CreatesParentDirAndFile(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	explicitPath := filepath.Join(t.TempDir(), "nested", "logs", "custom.log")
 
-	f, gotPath, err := ResolveLogFile(explicitPath, testDiskID1)
+	f, gotPath, err := rt.resolveLogFile(explicitPath, testDiskID1)
 
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -1158,16 +1119,14 @@ func TestResolveLogFile_GivenExplicitPath_CreatesParentDirAndFile(t *testing.T) 
 }
 
 func TestResolveLogFile_GivenSystemDirEACCES_FallsBackToXDGStateHome(t *testing.T) {
-
-	prevOpenSys := openSystemLogFn
-	openSystemLogFn = func(string) (*os.File, string, error) {
+	rt := defaultCLIRuntime()
+	rt.openSystemLogFn = func(string) (*os.File, string, error) {
 		return nil, "/var/log/bowl/mount.log", syscall.EACCES
 	}
-	t.Cleanup(func() { openSystemLogFn = prevOpenSys })
 	xdgDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", xdgDir)
 
-	f, gotPath, err := ResolveLogFile("", testDiskID1)
+	f, gotPath, err := rt.resolveLogFile("", testDiskID1)
 
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -1176,27 +1135,27 @@ func TestResolveLogFile_GivenSystemDirEACCES_FallsBackToXDGStateHome(t *testing.
 }
 
 func TestRunMount_LeaseLifecycle_GivenCanceledCtx_RenewsAndUnmountsBeforeRemovingMeta(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
-	withMountRenewIntervalStub(t, 15*time.Millisecond)
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
+	setMountRenewIntervalStub(rt, 15*time.Millisecond)
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "lease-disk", 1<<30, 0)
 	storage.mountLeaseTTL = 30
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	var metaExistsAtUnmount bool
 	storage.onUnmountBranch = func(_ *storagev1.UnmountBranchRequest) {
-		_, metaExistsAtUnmount = findMountMeta(mp)
+		_, metaExistsAtUnmount = rt.findMountMeta(mp)
 	}
 
 	parentCtx, cancelParent := context.WithCancel(context.Background())
 	defer cancelParent()
 
-	withServeFUSEStub(t, func(ctx context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+	rt.serveFUSE = func(ctx context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 		ready()
 		require.Eventually(t, func() bool {
 			return len(storage.getRenewReqs()) >= 2
@@ -1204,7 +1163,7 @@ func TestRunMount_LeaseLifecycle_GivenCanceledCtx_RenewsAndUnmountsBeforeRemovin
 		cancelParent()
 		<-ctx.Done()
 		return nil
-	})
+	}
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -1221,7 +1180,7 @@ func TestRunMount_LeaseLifecycle_GivenCanceledCtx_RenewsAndUnmountsBeforeRemovin
 	}
 
 	var logBuf bytes.Buffer
-	err := runMount(parentCtx, opts, baseCfg, mp, &logBuf, nil)
+	err := rt.runMount(parentCtx, opts, baseCfg, mp, &logBuf, nil)
 
 	require.NoError(t, err)
 	requireEmptyDir(t, stageDir, "runMount_lifecycle_stage_cleanup")
@@ -1234,7 +1193,7 @@ func TestRunMount_LeaseLifecycle_GivenCanceledCtx_RenewsAndUnmountsBeforeRemovin
 	require.Equal(t, testDiskID1, unmounts[0].GetDiskId())
 	require.Equal(t, "01950000-0000-7000-9000-000000000001", unmounts[0].GetMountId())
 	require.True(t, metaExistsAtUnmount, "UnmountDisk 必须在清理 mountMeta 文件之前调用")
-	_, metaAfter := findMountMeta(mp)
+	_, metaAfter := rt.findMountMeta(mp)
 	require.False(t, metaAfter, "UnmountDisk 完成后必须移除 mountMeta 文件")
 }
 
@@ -1297,15 +1256,16 @@ func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlip
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			withCleanOTelAndLogger(t)
+			rt := defaultCLIRuntime()
 			mp := t.TempDir()
-			withMissingMountInfo(t)
-			withTempMountMetaDirs(t, t.TempDir())
-			withMountRenewIntervalStub(t, 10*time.Millisecond)
+			setMissingMountInfo(t, rt)
+			setTempMountMetaDirs(rt, t.TempDir())
+			setMountRenewIntervalStub(rt, 10*time.Millisecond)
 
 			storage := newFakeStorage()
 			storage.seedDisk(testDiskID1, "lease-disk", 1<<30, 0)
 			storage.renewErr = tc.renewErr
-			withMountStorageFake(t, storage)
+			setMountStorageFake(rt, storage)
 
 			var (
 				logBuf    syncBuffer
@@ -1315,9 +1275,9 @@ func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlip
 				readyCode int
 				readyBody string
 			)
-			withServeFUSEStub(t, func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+			rt.serveFUSE = func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
 				ready()
-				meta, ok := findMountMeta(gotMP)
+				meta, ok := rt.findMountMeta(gotMP)
 				require.True(t, ok)
 
 				require.Eventually(t, func() bool {
@@ -1331,7 +1291,7 @@ func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlip
 
 				time.Sleep(35 * time.Millisecond)
 				return nil
-			})
+			}
 
 			opts := &mountOptions{
 				endpoint:  "http://127.0.0.1:9000",
@@ -1346,7 +1306,7 @@ func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlip
 				StageDir:  t.TempDir(),
 			}
 
-			runErr := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+			runErr := rt.runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
 			require.NoError(t, runErr)
 			require.True(t, gotFenced, "scene=%s want=rawFS_fenced", tc.name)
 			require.Equal(t, tc.wantStatus, gotStatus, "scene=%s", tc.name)
@@ -1403,17 +1363,17 @@ func TestPermanentRenewFenceStatus_GivenErrorInfoOverrideAndPermanentCodes_Deleg
 }
 
 func TestRunMount_LeaseRenewExternalFence_GivenRawFSFenced_StopsRenewerFlipsReadyzAndSkipsUnmount(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
-	withMountRenewIntervalStub(t, 15*time.Millisecond)
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
+	setMountRenewIntervalStub(rt, 15*time.Millisecond)
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "rpc-fenced-disk", 1<<30, 0)
 	storage.mountLeaseTTL = 30
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	var (
 		logBuf         syncBuffer
@@ -1422,9 +1382,9 @@ func TestRunMount_LeaseRenewExternalFence_GivenRawFSFenced_StopsRenewerFlipsRead
 		readyAfter     int
 		readyAfterBody string
 	)
-	withServeFUSEStub(t, func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
 		ready()
-		meta, ok := findMountMeta(gotMP)
+		meta, ok := rt.findMountMeta(gotMP)
 		require.True(t, ok)
 
 		readyBefore, _ = fetchReadyzStatusAndBody(t, meta.AdminAddr)
@@ -1440,7 +1400,7 @@ func TestRunMount_LeaseRenewExternalFence_GivenRawFSFenced_StopsRenewerFlipsRead
 
 		time.Sleep(60 * time.Millisecond)
 		return nil
-	})
+	}
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -1455,7 +1415,7 @@ func TestRunMount_LeaseRenewExternalFence_GivenRawFSFenced_StopsRenewerFlipsRead
 		StageDir:  t.TempDir(),
 	}
 
-	err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+	err := rt.runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
 
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, readyBefore)
@@ -1466,23 +1426,23 @@ func TestRunMount_LeaseRenewExternalFence_GivenRawFSFenced_StopsRenewerFlipsRead
 }
 
 func TestRunMount_LeaseRenewTransientError_GivenTransientFailuresThenRecovery_RetriesAcceleratedExpiresReadyzHealsAndRestoresCadence(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
-	withMountRenewIntervalStub(t, 120*time.Millisecond)
-	withMountRenewRetryIntervalStub(t, 15*time.Millisecond)
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
+	setMountRenewIntervalStub(rt, 120*time.Millisecond)
+	setMountRenewRetryIntervalStub(rt, 15*time.Millisecond)
 
 	var (
 		clockMu sync.Mutex
 		nowTime = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	)
-	withMountNowStub(t, func() time.Time {
+	rt.mountNowFn = func() time.Time {
 		clockMu.Lock()
 		defer clockMu.Unlock()
 		return nowTime
-	})
+	}
 	advanceClock := func(d time.Duration) {
 		clockMu.Lock()
 		nowTime = nowTime.Add(d)
@@ -1517,7 +1477,7 @@ func TestRunMount_LeaseRenewTransientError_GivenTransientFailuresThenRecovery_Re
 			return &storagev1.RenewMountResponse{LeaseTtlSeconds: 30}, nil
 		}
 	}
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	var (
 		logBuf           syncBuffer
@@ -1526,9 +1486,9 @@ func TestRunMount_LeaseRenewTransientError_GivenTransientFailuresThenRecovery_Re
 		readyHealed      int
 		fencedAfterRetry bool
 	)
-	withServeFUSEStub(t, func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
 		ready()
-		meta, ok := findMountMeta(gotMP)
+		meta, ok := rt.findMountMeta(gotMP)
 		require.True(t, ok)
 
 		readyInitial, _ = fetchReadyzStatusAndBody(t, meta.AdminAddr)
@@ -1557,7 +1517,7 @@ func TestRunMount_LeaseRenewTransientError_GivenTransientFailuresThenRecovery_Re
 			return renewCalls >= 4
 		}, time.Second, 5*time.Millisecond)
 		return nil
-	})
+	}
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -1572,7 +1532,7 @@ func TestRunMount_LeaseRenewTransientError_GivenTransientFailuresThenRecovery_Re
 		StageDir:  t.TempDir(),
 	}
 
-	err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+	err := rt.runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
 
 	require.NoError(t, err)
 	require.Contains(t, logBuf.String(), "mount_lease_renew_failed")
@@ -1631,7 +1591,8 @@ func TestDefaultMountRenewInterval_GivenTTLValues_ClampsMinimumOneSecond(t *test
 }
 
 func TestValidatePathNotInMountpoint_GivenEqualAndSymlinkLoop_ReturnsFlagErrors(t *testing.T) {
-	mp := canonicalMountpoint(t.TempDir())
+	rt := defaultCLIRuntime()
+	mp := rt.canonicalMountpoint(t.TempDir())
 	loopDir := t.TempDir()
 	loopA := filepath.Join(loopDir, "loop-a")
 	loopB := filepath.Join(loopDir, "loop-b")
@@ -1647,11 +1608,11 @@ func TestValidatePathNotInMountpoint_GivenEqualAndSymlinkLoop_ReturnsFlagErrors(
 }
 
 func TestRunDaemonWorker_GivenValidPaths_DetachesCwdToRootAndSignalsOK(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
+	setStageDirTmpfsStub(rt, false)
 
 	mp := t.TempDir()
 	stageDir := filepath.Join(t.TempDir(), "daemon-stage")
@@ -1659,31 +1620,31 @@ func TestRunDaemonWorker_GivenValidPaths_DetachesCwdToRootAndSignalsOK(t *testin
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "daemon-worker-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	defer r.Close()
-	withReadinessPipeStub(t, w)
+	setReadinessPipeStub(rt, w)
 
 	var redirectedFile *os.File
-	withRedirectDaemonStdioStub(t, func(f *os.File) {
+	rt.redirectDaemonStdio = func(f *os.File) {
 		redirectedFile = f
-	})
+	}
 
 	var events []string
-	withChdirStub(t, func(dir string) error {
+	rt.chdirFn = func(dir string) error {
 		_, statErr := os.Stat(logPath)
 		require.NoError(t, statErr, "log file must be opened before chdir")
 		events = append(events, "chdir:"+dir)
 		return nil
-	})
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+	}
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
 		require.Equal(t, mp, gotMP)
 		events = append(events, "serve")
 		ready()
 		return nil
-	})
+	}
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -1700,7 +1661,7 @@ func TestRunDaemonWorker_GivenValidPaths_DetachesCwdToRootAndSignalsOK(t *testin
 		StageDir:  stageDir,
 	}
 
-	code := runDaemonWorker(context.Background(), opts, baseCfg, mp)
+	code := rt.runDaemonWorker(context.Background(), opts, baseCfg, mp)
 
 	require.Equal(t, 0, code)
 	require.Equal(t, []string{"chdir:/", "serve"}, events)
@@ -1711,32 +1672,32 @@ func TestRunDaemonWorker_GivenValidPaths_DetachesCwdToRootAndSignalsOK(t *testin
 }
 
 func TestRunDaemonWorker_GivenChdirError_ReportsERRAndExits1(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	mp := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "daemon-err.log")
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "daemon-err-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	defer r.Close()
-	withReadinessPipeStub(t, w)
-	withRedirectDaemonStdioStub(t, func(*os.File) {})
+	setReadinessPipeStub(rt, w)
+	rt.redirectDaemonStdio = func(*os.File) {}
 
 	serveCalled := false
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
 		serveCalled = true
 		return nil
-	})
-	withChdirStub(t, func(dir string) error {
+	}
+	rt.chdirFn = func(dir string) error {
 		require.Equal(t, "/", dir)
 		return errors.New("chdir denied")
-	})
+	}
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -1751,7 +1712,7 @@ func TestRunDaemonWorker_GivenChdirError_ReportsERRAndExits1(t *testing.T) {
 		Mode:   fusefs.MountModeRO,
 	}
 
-	code := runDaemonWorker(context.Background(), opts, baseCfg, mp)
+	code := rt.runDaemonWorker(context.Background(), opts, baseCfg, mp)
 
 	require.Equal(t, 1, code)
 	require.False(t, serveCalled, "runMount must not execute when chdirFn fails")
@@ -1761,11 +1722,11 @@ func TestRunDaemonWorker_GivenChdirError_ReportsERRAndExits1(t *testing.T) {
 }
 
 func TestMount_DaemonWorker_GivenRelativePaths_ResolvesBeforeChdirToRoot(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
+	setStageDirTmpfsStub(rt, false)
 
 	t.Chdir(t.TempDir())
 	callerDir, err := os.Getwd()
@@ -1777,25 +1738,25 @@ func TestMount_DaemonWorker_GivenRelativePaths_ResolvesBeforeChdirToRoot(t *test
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "worker-rel-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	defer r.Close()
-	withReadinessPipeStub(t, w)
-	withRedirectDaemonStdioStub(t, func(*os.File) {})
+	setReadinessPipeStub(rt, w)
+	rt.redirectDaemonStdio = func(*os.File) {}
 
 	var chdirArgs []string
-	withChdirStub(t, func(dir string) error {
+	rt.chdirFn = func(dir string) error {
 		_, statErr := os.Stat(absLogFile)
 		require.NoError(t, statErr, "relative --log-file must open against caller cwd before chdir")
 		chdirArgs = append(chdirArgs, dir)
 		return nil
-	})
-	captured := stubMountServeFUSE(t, absMP)
+	}
+	captured := stubMountServeFUSE(t, rt, absMP)
 	t.Setenv("BOWL_DAEMON_WORKER", "1")
 
-	code, out, errOut := runCLI(
+	code, out, errOut := runCLIWithRuntime(rt,
 		"mount", testDiskID1, "rel-mp",
 		"--stage-dir", "rel-stage",
 		"--log-file", filepath.Join("rel-logs", "worker.log"),
@@ -1816,11 +1777,11 @@ func TestMount_DaemonWorker_GivenRelativePaths_ResolvesBeforeChdirToRoot(t *test
 }
 
 func TestMount_Foreground_GivenRelativePaths_PreservesCallerWorkingDirectory(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
+	setStageDirTmpfsStub(rt, false)
 
 	t.Chdir(t.TempDir())
 	cwdBefore, err := os.Getwd()
@@ -1828,17 +1789,17 @@ func TestMount_Foreground_GivenRelativePaths_PreservesCallerWorkingDirectory(t *
 	require.NoError(t, os.MkdirAll(filepath.Join(cwdBefore, "fg-mp"), 0o755))
 
 	chdirCalled := false
-	withChdirStub(t, func(string) error {
+	rt.chdirFn = func(string) error {
 		chdirCalled = true
 		return nil
-	})
+	}
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "fg-cwd-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	captured := stubMountServeFUSE(t, filepath.Join(cwdBefore, "fg-mp"))
+	setMountStorageFake(rt, storage)
+	captured := stubMountServeFUSE(t, rt, filepath.Join(cwdBefore, "fg-mp"))
 
-	code, _, errOut := runCLI("mount", testDiskID1, "fg-mp", "-f", "--stage-dir", "fg-stage", "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, "fg-mp", "-f", "--stage-dir", "fg-stage", "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=foreground_preserves_cwd want=0 got=%d stderr=%s", code, errOut)
 	require.False(t, chdirCalled, "foreground mode must not call chdirFn")
@@ -1849,11 +1810,11 @@ func TestMount_Foreground_GivenRelativePaths_PreservesCallerWorkingDirectory(t *
 }
 
 func TestMount_AlreadyMounted_GivenSymlinkToActiveMount_ReturnsExit1(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	realParent := t.TempDir()
 	realMP := filepath.Join(realParent, "real-mp")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
-	canonMP := canonicalMountpoint(realMP)
+	canonMP := rt.canonicalMountpoint(realMP)
 
 	symMP := filepath.Join(t.TempDir(), "sym-mp")
 	require.NoError(t, os.Symlink(realMP, symMP))
@@ -1862,52 +1823,52 @@ func TestMount_AlreadyMounted_GivenSymlinkToActiveMount_ReturnsExit1(t *testing.
 	require.NoError(t, os.Symlink(realParent, symParent))
 	viaSymParent := filepath.Join(symParent, "real-mp")
 
-	withMountInfoContent(t, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	setMountInfoContent(t, rt, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	code, out, errOut := runCLI("mount", testDiskID1, symMP, "-f")
+	code, out, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, symMP, "-f")
 	require.Equal(t, 1, code, "scene=dup_mount_leaf_symlink want=1 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "already mounted")
 
-	code, out, errOut = runCLI("mount", testDiskID1, viaSymParent, "-f")
+	code, out, errOut = runCLIWithRuntime(rt, "mount", testDiskID1, viaSymParent, "-f")
 	require.Equal(t, 1, code, "scene=dup_mount_parent_symlink want=1 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "already mounted")
 }
 
 func TestMount_Foreground_GivenSymlinkMountpoint_CanonicalizesServeFUSEAndMountMeta(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
 	realMP := filepath.Join(t.TempDir(), "real-mp")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
-	canonMP := canonicalMountpoint(realMP)
+	canonMP := rt.canonicalMountpoint(realMP)
 	symMP := filepath.Join(t.TempDir(), "sym-mp")
 	require.NoError(t, os.Symlink(realMP, symMP))
 
 	metaDir := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, metaDir)
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, metaDir)
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "symlink-mount-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	var gotServeMP string
 	var gotMeta mountMeta
 	var metaFileCanonExists bool
 	var metaFileSymExists bool
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
 		gotServeMP = gotMP
 		ready()
-		gotMeta, _ = findMountMeta(canonMP)
+		gotMeta, _ = rt.findMountMeta(canonMP)
 		_, errCanon := os.Stat(filepath.Join(metaDir, mountMetaFileName(canonMP)))
 		metaFileCanonExists = errCanon == nil
 		_, errSym := os.Stat(filepath.Join(metaDir, mountMetaFileName(symMP)))
 		metaFileSymExists = errSym == nil
 		return nil
-	})
+	}
 
-	code, _, errOut := runCLI("mount", testDiskID1, symMP, "-f", "--admin-addr", "off")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, symMP, "-f", "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=mount_symlink want=0 got=%d stderr=%s", code, errOut)
 	require.Equal(t, canonMP, gotServeMP, "serveFUSE must receive canonical mountpoint")
@@ -1917,12 +1878,12 @@ func TestMount_Foreground_GivenSymlinkMountpoint_CanonicalizesServeFUSEAndMountM
 }
 
 func TestMount_DaemonWorker_GivenRelativeSymlinkMountpoint_CanonicalizesBeforeChdir(t *testing.T) {
-
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
-	withStageDirTmpfsStub(t, false)
+	setTempMountMetaDirs(rt, metaDir)
+	setStageDirTmpfsStub(rt, false)
 
 	workDir := t.TempDir()
 	t.Chdir(workDir)
@@ -1931,33 +1892,33 @@ func TestMount_DaemonWorker_GivenRelativeSymlinkMountpoint_CanonicalizesBeforeCh
 	realMP := filepath.Join(callerDir, "real-mp")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
 	require.NoError(t, os.Symlink("real-mp", filepath.Join(callerDir, "sym-mp")))
-	canonMP := canonicalMountpoint(realMP)
+	canonMP := rt.canonicalMountpoint(realMP)
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "worker-sym-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	defer r.Close()
-	withReadinessPipeStub(t, w)
-	withRedirectDaemonStdioStub(t, func(*os.File) {})
+	setReadinessPipeStub(rt, w)
+	rt.redirectDaemonStdio = func(*os.File) {}
 
 	var chdirTarget string
-	withChdirStub(t, func(dir string) error {
+	rt.chdirFn = func(dir string) error {
 		chdirTarget = dir
 		return nil
-	})
+	}
 
 	var gotServeMP string
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
 		gotServeMP = gotMP
 		ready()
 		return nil
-	})
+	}
 	t.Setenv("BOWL_DAEMON_WORKER", "1")
 
-	code, out, errOut := runCLI("mount", testDiskID1, "sym-mp", "--admin-addr", "off")
+	code, out, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, "sym-mp", "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=worker_symlink want=0 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
@@ -1967,14 +1928,14 @@ func TestMount_DaemonWorker_GivenRelativeSymlinkMountpoint_CanonicalizesBeforeCh
 }
 
 func TestMount_Validation_GivenSymlinkLoopMountpoint_Exits2(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	loopDir := t.TempDir()
 	loopA := filepath.Join(loopDir, "loop-a")
 	loopB := filepath.Join(loopDir, "loop-b")
 	require.NoError(t, os.Symlink(loopB, loopA))
 	require.NoError(t, os.Symlink(loopA, loopB))
 
-	code, out, errOut := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, loopA)
+	code, out, errOut := runCLIWithDeadline(t, rt, 2*time.Second, "mount", testDiskID1, loopA)
 
 	require.Equal(t, 2, code, "scene=mountpoint_symlink_loop want=2 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
@@ -1982,25 +1943,25 @@ func TestMount_Validation_GivenSymlinkLoopMountpoint_Exits2(t *testing.T) {
 }
 
 func TestMount_AlreadyMounted_GivenWedgedMountRoots_RejectsDuplicateAndBadFlagsWithoutMountRootLstat(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	const (
 		realWedgedMP = "/wedged-root/mnt"
 		realOkMP     = "/ok-root/mnt"
 		symWedgedMP  = "/tmp/sym-wedged"
 		symOkMP      = "/tmp/sym-ok"
 	)
-	withMountInfoContent(t,
+	setMountInfoContent(t, rt,
 		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
 			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
 			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
 	)
-	lstatCalls := withMountInfoNoRootLstatStub(t, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
+	lstatCalls := setMountInfoNoRootLstatStub(t, rt, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
 		"/tmp":      {mode: os.ModeDir | 0o755},
 		symWedgedMP: {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
 		symOkMP:     {mode: os.ModeSymlink | 0o777, target: realOkMP},
 	})
 
-	code, out, errOut := runCLI("mount", testDiskID1, realWedgedMP, "-f")
+	code, out, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, realWedgedMP, "-f")
 	require.Equal(t, 1, code, "stderr=%s", errOut)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "already mounted")
@@ -2014,7 +1975,7 @@ func TestMount_AlreadyMounted_GivenWedgedMountRoots_RejectsDuplicateAndBadFlagsW
 		{input: symWedgedMP, want: realWedgedMP},
 		{input: symOkMP, want: realOkMP},
 	} {
-		code, out, errOut = runCLI("mount", testDiskID1, tc.input, "-f")
+		code, out, errOut = runCLIWithRuntime(rt, "mount", testDiskID1, tc.input, "-f")
 		require.Equal(t, 1, code, "input=%s stderr=%s", tc.input, errOut)
 		require.Empty(t, out)
 		require.Contains(t, errOut, "already mounted")
@@ -2054,7 +2015,7 @@ func TestMount_AlreadyMounted_GivenWedgedMountRoots_RejectsDuplicateAndBadFlagsW
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			code, out, errOut = runCLI(tc.args...)
+			code, out, errOut = runCLIWithRuntime(rt, tc.args...)
 			require.Equal(t, 2, code, "scene=%s stderr=%s", tc.name, errOut)
 			require.Empty(t, out)
 			require.Contains(t, errOut, tc.wantSubstr)
@@ -2066,7 +2027,6 @@ func TestMount_AlreadyMounted_GivenWedgedMountRoots_RejectsDuplicateAndBadFlagsW
 }
 
 func TestMount_ForceFlag_GivenHelpAndValidation_PreservesShortFAndRejectsROMode(t *testing.T) {
-
 	code, out, errOut := runCLI("mount", "--help")
 
 	require.Equal(t, 0, code, "stderr=%s", errOut)
@@ -2102,19 +2062,20 @@ func TestMount_ForceFlag_GivenHelpAndValidation_PreservesShortFAndRejectsROMode(
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			rt := defaultCLIRuntime()
 			if tc.envMode != "" {
 				t.Setenv("BOWL_MOUNT_MODE", tc.envMode)
 			}
 			spawnCalled := false
-			withSpawnDaemonStub(t, func([]string, io.Writer) int {
+			rt.spawnDaemon = func([]string, io.Writer) int {
 				spawnCalled = true
 				return 0
-			})
+			}
 			storage := newFakeStorage()
 			storage.seedDisk(testDiskID1, "force-val-disk", 1<<30, 0)
-			withMountStorageFake(t, storage)
+			setMountStorageFake(rt, storage)
 
-			gotCode, gotOut, gotErr := runCLIWithDeadline(t, 2*time.Second, tc.args...)
+			gotCode, gotOut, gotErr := runCLIWithDeadline(t, rt, 2*time.Second, tc.args...)
 			require.Equal(t, 2, gotCode, "scene=%s stderr=%s", tc.name, gotErr)
 			require.Empty(t, gotOut)
 			require.Contains(t, gotErr, tc.wantSubstr)
@@ -2124,14 +2085,15 @@ func TestMount_ForceFlag_GivenHelpAndValidation_PreservesShortFAndRejectsROMode(
 	}
 
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 	roStorage := newFakeStorage()
 	roStorage.seedDisk(testDiskID1, "ro-force-false-disk", 1<<30, 0)
-	withMountStorageFake(t, roStorage)
-	stubMountServeFUSE(t, validMP)
+	setMountStorageFake(rt, roStorage)
+	stubMountServeFUSE(t, rt, validMP)
 
-	roCode, _, roErr := runCLI("mount", testDiskID1, validMP, "-f", "--mode=ro", "--force=false", "--admin-addr", "off")
+	roCode, _, roErr := runCLIWithRuntime(rt, "mount", testDiskID1, validMP, "-f", "--mode=ro", "--force=false", "--admin-addr", "off")
 	require.Equal(t, 0, roCode, "stderr=%s", roErr)
 	roReqs := roStorage.getMountReqs()
 	require.Len(t, roReqs, 1)
@@ -2142,18 +2104,19 @@ func TestMount_ForceFlag_GivenHelpAndValidation_PreservesShortFAndRejectsROMode(
 func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndFormatsErrDiskMounted(t *testing.T) {
 	t.Run("ShortFRemainsForegroundWithoutForce", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 		mp := t.TempDir()
 		stageDir := filepath.Join(t.TempDir(), "stage-short-f")
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "short-f-disk", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		stubMountServeFUSE(t, mp)
+		setMountStorageFake(rt, storage)
+		stubMountServeFUSE(t, rt, mp)
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
 		require.Equal(t, 0, code, "stderr=%s", errOut)
 		reqs := storage.getMountReqs()
 		require.Len(t, reqs, 1)
@@ -2163,18 +2126,19 @@ func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndForm
 
 	t.Run("ForegroundForceForwardsForceTrue", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 		mp := t.TempDir()
 		stageDir := filepath.Join(t.TempDir(), "stage-fg-force")
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "fg-force-disk", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		stubMountServeFUSE(t, mp)
+		setMountStorageFake(rt, storage)
+		stubMountServeFUSE(t, rt, mp)
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--force", "--stage-dir", stageDir, "--admin-addr", "off")
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--force", "--stage-dir", stageDir, "--admin-addr", "off")
 		require.Equal(t, 0, code, "stderr=%s", errOut)
 		reqs := storage.getMountReqs()
 		require.Len(t, reqs, 1)
@@ -2184,34 +2148,37 @@ func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndForm
 
 	t.Run("BackgroundSpawnAndDaemonWorkerForwardForce", func(t *testing.T) {
 		mp := t.TempDir()
-		withMissingMountInfo(t)
+		rtParent := defaultCLIRuntime()
+		setMissingMountInfo(t, rtParent)
 
 		var spawnedArgs []string
-		withSpawnDaemonStub(t, func(args []string, _ io.Writer) int {
+		rtParent.spawnDaemon = func(args []string, _ io.Writer) int {
 			spawnedArgs = append([]string(nil), args...)
 			return 0
-		})
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "--force", "--mode=sync")
+		}
+		code, _, errOut := runCLIWithRuntime(rtParent, "mount", testDiskID1, mp, "--force", "--mode=sync")
 		require.Equal(t, 0, code, "stderr=%s", errOut)
 		require.Equal(t, []string{testDiskID1, mp, "--force", "--mode=sync"}, spawnedArgs)
 
 		withCleanOTelAndLogger(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		rtWorker := defaultCLIRuntime()
+		setMissingMountInfo(t, rtWorker)
+		setTempMountMetaDirs(rtWorker, t.TempDir())
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "worker-force-disk", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		stubMountServeFUSE(t, mp)
+		setMountStorageFake(rtWorker, storage)
+		stubMountServeFUSE(t, rtWorker, mp)
 
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
 		defer r.Close()
-		withReadinessPipeStub(t, w)
-		withRedirectDaemonStdioStub(t, func(*os.File) {})
-		withChdirStub(t, func(string) error { return nil })
+		setReadinessPipeStub(rtWorker, w)
+		rtWorker.redirectDaemonStdio = func(*os.File) {}
+		rtWorker.chdirFn = func(string) error { return nil }
 		t.Setenv("BOWL_DAEMON_WORKER", "1")
 		logFile := filepath.Join(t.TempDir(), "worker-force.log")
 
-		workerCode, _, workerErr := runCLI("mount", testDiskID1, mp, "--force", "--mode=sync", "--log-file", logFile, "--admin-addr", "off")
+		workerCode, _, workerErr := runCLIWithRuntime(rtWorker, "mount", testDiskID1, mp, "--force", "--mode=sync", "--log-file", logFile, "--admin-addr", "off")
 		require.Equal(t, 0, workerCode, "stderr=%s", workerErr)
 		reqs := storage.getMountReqs()
 		require.Len(t, reqs, 1)
@@ -2220,9 +2187,10 @@ func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndForm
 
 	t.Run("ErrDiskMountedReturnsActionableExit1Message", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 		mp := t.TempDir()
 		stageDir := filepath.Join(t.TempDir(), "stage-busy")
 
@@ -2237,9 +2205,9 @@ func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndForm
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "busy-disk", 1<<30, 0)
 		storage.forcedErr["MountBranch"] = abortedBusyErr
-		withMountStorageFake(t, storage)
+		setMountStorageFake(rt, storage)
 
-		code, out, errOut := runCLI("mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
+		code, out, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
 		require.Equal(t, 1, code, "stderr=%s", errOut)
 		require.Empty(t, out)
 		require.Contains(t, errOut, "active read-write mount")
@@ -2252,17 +2220,18 @@ func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndForm
 func TestMount_Teardown_GivenOverwrittenMountMeta_PreservesNewInstanceAndRemovesOwn(t *testing.T) {
 	t.Run("PreservesNewInstanceWithDifferentPID", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
 		metaDir := t.TempDir()
-		withTempMountMetaDirs(t, metaDir)
+		setTempMountMetaDirs(rt, metaDir)
 		mp := t.TempDir()
-		canonMP := canonicalMountpoint(mp)
+		canonMP := rt.canonicalMountpoint(mp)
 		metaFile := filepath.Join(metaDir, mountMetaFileName(canonMP))
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "mount-a-disk", 1<<30, 0)
-		withMountStorageFake(t, storage)
+		setMountStorageFake(rt, storage)
 
 		mountB := mountMeta{
 			Mountpoint: canonMP,
@@ -2271,14 +2240,14 @@ func TestMount_Teardown_GivenOverwrittenMountMeta_PreservesNewInstanceAndRemoves
 			AdminAddr:  "127.0.0.1:29991",
 			StartedAt:  time.Now().UTC().Add(time.Second),
 		}
-		withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+		rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 			ready()
-			_, err := writeMountMeta(&mountB)
+			_, err := rt.writeMountMeta(&mountB)
 			require.NoError(t, err)
 			return nil
-		})
+		}
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
 		require.Equal(t, 0, code, "scene=teardown_diff_pid stderr=%s", errOut)
 
 		raw, readErr := os.ReadFile(metaFile)
@@ -2293,17 +2262,18 @@ func TestMount_Teardown_GivenOverwrittenMountMeta_PreservesNewInstanceAndRemoves
 
 	t.Run("PreservesNewInstanceWithSamePIDDifferentStartedAt", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
 		metaDir := t.TempDir()
-		withTempMountMetaDirs(t, metaDir)
+		setTempMountMetaDirs(rt, metaDir)
 		mp := t.TempDir()
-		canonMP := canonicalMountpoint(mp)
+		canonMP := rt.canonicalMountpoint(mp)
 		metaFile := filepath.Join(metaDir, mountMetaFileName(canonMP))
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "mount-a-same-pid", 1<<30, 0)
-		withMountStorageFake(t, storage)
+		setMountStorageFake(rt, storage)
 
 		mountB := mountMeta{
 			Mountpoint: canonMP,
@@ -2312,14 +2282,14 @@ func TestMount_Teardown_GivenOverwrittenMountMeta_PreservesNewInstanceAndRemoves
 			AdminAddr:  "127.0.0.1:29992",
 			StartedAt:  time.Now().UTC().Add(time.Minute),
 		}
-		withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+		rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 			ready()
-			_, err := writeMountMeta(&mountB)
+			_, err := rt.writeMountMeta(&mountB)
 			require.NoError(t, err)
 			return nil
-		})
+		}
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
 		require.Equal(t, 0, code, "scene=teardown_same_pid_new_started_at stderr=%s", errOut)
 
 		raw, readErr := os.ReadFile(metaFile)
@@ -2333,25 +2303,26 @@ func TestMount_Teardown_GivenOverwrittenMountMeta_PreservesNewInstanceAndRemoves
 
 	t.Run("PreservesUnparseableFile", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
 		metaDir := t.TempDir()
-		withTempMountMetaDirs(t, metaDir)
+		setTempMountMetaDirs(rt, metaDir)
 		mp := t.TempDir()
-		canonMP := canonicalMountpoint(mp)
+		canonMP := rt.canonicalMountpoint(mp)
 		metaFile := filepath.Join(metaDir, mountMetaFileName(canonMP))
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "mount-a-corrupt", 1<<30, 0)
-		withMountStorageFake(t, storage)
+		setMountStorageFake(rt, storage)
 
-		withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+		rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 			ready()
 			require.NoError(t, os.WriteFile(metaFile, []byte("{corrupt"), 0o644))
 			return nil
-		})
+		}
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
 		require.Equal(t, 0, code, "scene=teardown_corrupt stderr=%s", errOut)
 
 		raw, readErr := os.ReadFile(metaFile)
@@ -2361,29 +2332,99 @@ func TestMount_Teardown_GivenOverwrittenMountMeta_PreservesNewInstanceAndRemoves
 
 	t.Run("RemovesOwnMountMetaWhenUnchanged", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
 		metaDir := t.TempDir()
-		withTempMountMetaDirs(t, metaDir)
+		setTempMountMetaDirs(rt, metaDir)
 		mp := t.TempDir()
-		canonMP := canonicalMountpoint(mp)
+		canonMP := rt.canonicalMountpoint(mp)
 		metaFile := filepath.Join(metaDir, mountMetaFileName(canonMP))
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "mount-a-own", 1<<30, 0)
-		withMountStorageFake(t, storage)
+		setMountStorageFake(rt, storage)
 
-		withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+		rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 			ready()
 			_, statErr := os.Stat(metaFile)
 			require.NoError(t, statErr)
 			return nil
-		})
+		}
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
 		require.Equal(t, 0, code, "scene=teardown_own stderr=%s", errOut)
 
 		_, statErr := os.Stat(metaFile)
 		require.ErrorIs(t, statErr, os.ErrNotExist, "scene=teardown_own want=own_meta_removed got=%v", statErr)
 	})
+}
+
+func TestMountAndDisk_GivenDefaultTransport_MountUsesShardedAndDiskUsesSingleConnection(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "transport-check", 1<<30, 0)
+
+	var (
+		addrMu    sync.Mutex
+		addrsByOp = make(map[string]map[string]struct{})
+	)
+	path, connectHandler := storagev1connect.NewStorageServiceHandler(storage)
+	mux := http.NewServeMux()
+	mux.Handle(path, connectHandler)
+
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			addrMu.Lock()
+			if addrsByOp[r.URL.Path] == nil {
+				addrsByOp[r.URL.Path] = make(map[string]struct{})
+			}
+			addrsByOp[r.URL.Path][r.RemoteAddr] = struct{}{}
+			addrMu.Unlock()
+			mux.ServeHTTP(w, r)
+		}),
+		Protocols:         &protocols,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	endpoint := "http://" + ln.Addr().String()
+
+	rtMount := defaultCLIRuntime()
+	setMissingMountInfo(t, rtMount)
+	setTempMountMetaDirs(rtMount, t.TempDir())
+	mp := t.TempDir()
+	rtMount.serveFUSE = func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+		ready()
+		var out fuse.StatfsOut
+		_ = rawFS.StatFs(nil, &fuse.InHeader{}, &out)
+		return nil
+	}
+
+	code, _, errOut := runCLIWithRuntime(rtMount, "--endpoint", endpoint, "mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+
+	addrMu.Lock()
+	controlAddrs := addrsByOp[storagev1connect.StorageServiceMountBranchProcedure]
+	metaAddrs := addrsByOp[storagev1connect.StorageServiceStatFSProcedure]
+	addrMu.Unlock()
+	require.Len(t, controlAddrs, 1)
+	require.Len(t, metaAddrs, 1)
+	for addr := range controlAddrs {
+		_, overlap := metaAddrs[addr]
+		require.False(t, overlap, "mount must use sharded transport with separate control and meta TCP connections")
+	}
+
+	rtDisk := defaultCLIRuntime()
+	code, out, errOut := runCLIWithRuntime(rtDisk, "--endpoint", endpoint, "disk", "get", testDiskID1)
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Contains(t, out, "transport-check")
 }

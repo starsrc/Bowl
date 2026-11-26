@@ -10,43 +10,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
 )
 
 const umountProgressRequestTimeout = 200 * time.Millisecond
 
-var (
-	lookPath   = exec.LookPath
-	runCommand = func(name string, args ...string) ([]byte, error) {
-		return exec.Command(name, args...).CombinedOutput()
-	}
-	umountIsTerminal = func(w io.Writer) bool {
-		f, ok := w.(*os.File)
-		if !ok || f == nil {
-			return false
-		}
-		return term.IsTerminal(int(f.Fd()))
-	}
-	umountHTTPClient           = http.DefaultClient
-	umountDrainTimeout         = 5 * time.Minute
-	umountDrainExitGrace       = 5 * time.Second
-	umountDrainPollInterval    = 20 * time.Millisecond
-	umountProgressPollInterval = 100 * time.Millisecond
-	umountNonTTYLogInterval    = 2 * time.Second
-	umountFallbackGracePeriod  = 1 * time.Second
-	umountFallbackLogInterval  = 5 * time.Second
-)
-
-func findUmountCommand(absMountpoint string, force bool) (binPath string, cmdArgs []string, found bool) {
+func (rt *cliRuntime) findUmountCommand(absMountpoint string, force bool) (binPath string, cmdArgs []string, found bool) {
 	candidates := []struct {
 		bin       string
 		args      []string
@@ -57,7 +33,7 @@ func findUmountCommand(absMountpoint string, force bool) (binPath string, cmdArg
 		{bin: "umount", args: []string{absMountpoint}, forceArgs: []string{"-l", absMountpoint}},
 	}
 	for _, c := range candidates {
-		path, err := lookPath(c.bin)
+		path, err := rt.lookPath(c.bin)
 		if err != nil {
 			continue
 		}
@@ -69,7 +45,7 @@ func findUmountCommand(absMountpoint string, force bool) (binPath string, cmdArg
 	return "", nil, false
 }
 
-func isMountMetaDrained(metaPath string, meta *mountMeta) bool {
+func (rt *cliRuntime) isMountMetaDrained(metaPath string, meta *mountMeta) bool {
 	if meta == nil || meta.PID <= 0 {
 		return true
 	}
@@ -85,7 +61,7 @@ func isMountMetaDrained(metaPath string, meta *mountMeta) bool {
 			}
 		}
 	}
-	return !mountMetaProcessAlive(*meta)
+	return !rt.mountMetaProcessAlive(*meta)
 }
 
 func normalizeUmountAdminAddr(raw string) string {
@@ -95,7 +71,7 @@ func normalizeUmountAdminAddr(raw string) string {
 	return loopbackAdminAddr(trimmed)
 }
 
-func fetchUnmountProgress(addr string, timeout time.Duration) (fusefs.UnmountProgress, bool) {
+func (rt *cliRuntime) fetchUnmountProgress(addr string, timeout time.Duration) (fusefs.UnmountProgress, bool) {
 	u := url.URL{Scheme: "http", Host: addr, Path: "/debug/unmount"}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -103,7 +79,7 @@ func fetchUnmountProgress(addr string, timeout time.Duration) (fusefs.UnmountPro
 	if err != nil {
 		return fusefs.UnmountProgress{}, false
 	}
-	resp, err := umountHTTPClient.Do(req)
+	resp, err := rt.umountHTTPClient.Do(req)
 	if err != nil {
 		return fusefs.UnmountProgress{}, false
 	}
@@ -119,6 +95,7 @@ func fetchUnmountProgress(addr string, timeout time.Duration) (fusefs.UnmountPro
 }
 
 type umountProgressReporter struct {
+	rt                 *cliRuntime
 	stderr             io.Writer
 	isTTY              bool
 	sawProgress        bool
@@ -134,10 +111,11 @@ type umountProgressReporter struct {
 	lastFallbackLogAt  time.Time
 }
 
-func newUmountProgressReporter(stderr io.Writer) *umountProgressReporter {
+func newUmountProgressReporter(rt *cliRuntime, stderr io.Writer) *umountProgressReporter {
 	return &umountProgressReporter{
+		rt:     rt,
 		stderr: stderr,
-		isTTY:  umountIsTerminal(stderr),
+		isTTY:  rt.umountIsTerminal(stderr),
 	}
 }
 
@@ -201,7 +179,7 @@ func (r *umountProgressReporter) updateDeterminate(prog fusefs.UnmountProgress, 
 	}
 
 	pct := int((completed * 100) / total)
-	shouldPrint := !prevStarted || (!r.printed100 && now.Sub(r.lastNonTTYLogAt) >= umountNonTTYLogInterval)
+	shouldPrint := !prevStarted || (!r.printed100 && now.Sub(r.lastNonTTYLogAt) >= r.rt.umountNonTTYLogInterval)
 	if !shouldPrint {
 		return
 	}
@@ -213,7 +191,7 @@ func (r *umountProgressReporter) updateDeterminate(prog fusefs.UnmountProgress, 
 }
 
 func (r *umountProgressReporter) updateFallback(now, start time.Time) {
-	if r.sawProgress || now.Sub(start) < umountFallbackGracePeriod {
+	if r.sawProgress || now.Sub(start) < r.rt.umountFallbackGracePeriod {
 		return
 	}
 	if r.isTTY {
@@ -232,13 +210,13 @@ func (r *umountProgressReporter) updateFallback(now, start time.Time) {
 			r.lastFallbackSpinAt = now
 			return
 		}
-		if now.Sub(r.lastFallbackSpinAt) >= umountProgressPollInterval {
+		if now.Sub(r.lastFallbackSpinAt) >= r.rt.umountProgressPollInterval {
 			_ = r.fallbackSpinner.Add(1)
 			r.lastFallbackSpinAt = now
 		}
 		return
 	}
-	if !r.fallbackStarted || now.Sub(r.lastFallbackLogAt) >= umountFallbackLogInterval {
+	if !r.fallbackStarted || now.Sub(r.lastFallbackLogAt) >= r.rt.umountFallbackLogInterval {
 		r.fallbackStarted = true
 		r.lastFallbackLogAt = now
 		fmt.Fprintln(r.stderr, "Syncing to cloud...")
@@ -258,7 +236,7 @@ func (r *umountProgressReporter) finish(timedOut bool) {
 	r.printed100 = true
 }
 
-func waitMountMetaDrained(stderr io.Writer, metaPath string, meta *mountMeta) error {
+func (rt *cliRuntime) waitMountMetaDrained(stderr io.Writer, metaPath string, meta *mountMeta) error {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -266,23 +244,23 @@ func waitMountMetaDrained(stderr io.Writer, metaPath string, meta *mountMeta) er
 	if meta != nil {
 		rawAdminAddr = meta.AdminAddr
 	}
-	if isMountMetaDrained(metaPath, meta) {
+	if rt.isMountMetaDrained(metaPath, meta) {
 		return nil
 	}
 
 	adminAddr := normalizeUmountAdminAddr(rawAdminAddr)
 	hasAdmin := adminAddr != "" && !strings.EqualFold(adminAddr, adminAddrOff)
 	start := time.Now()
-	drainTimeout := umountDrainTimeout
+	drainTimeout := rt.umountDrainTimeout
 	if meta != nil && meta.UnmountTimeoutMs > 0 {
-		drainTimeout = time.Duration(meta.UnmountTimeoutMs)*time.Millisecond + umountDrainExitGrace
+		drainTimeout = time.Duration(meta.UnmountTimeoutMs)*time.Millisecond + rt.umountDrainExitGrace
 	}
 	deadline := start.Add(drainTimeout)
-	reporter := newUmountProgressReporter(stderr)
+	reporter := newUmountProgressReporter(rt, stderr)
 	var lastPollAt time.Time
 
 	for {
-		if isMountMetaDrained(metaPath, meta) {
+		if rt.isMountMetaDrained(metaPath, meta) {
 			reporter.finish(false)
 			return nil
 		}
@@ -291,19 +269,19 @@ func waitMountMetaDrained(stderr io.Writer, metaPath string, meta *mountMeta) er
 			reporter.finish(true)
 			return fmt.Errorf("unmount command returned, but timed out waiting for mount process drain and lease release for %s", metaPath)
 		}
-		if hasAdmin && (lastPollAt.IsZero() || now.Sub(lastPollAt) >= umountProgressPollInterval) {
+		if hasAdmin && (lastPollAt.IsZero() || now.Sub(lastPollAt) >= rt.umountProgressPollInterval) {
 			lastPollAt = now
 			reqTimeout := min(umountProgressRequestTimeout, max(10*time.Millisecond, time.Until(deadline)))
-			if prog, ok := fetchUnmountProgress(adminAddr, reqTimeout); ok {
+			if prog, ok := rt.fetchUnmountProgress(adminAddr, reqTimeout); ok {
 				reporter.updateDeterminate(prog, now)
 			}
 		}
 		reporter.updateFallback(now, start)
-		time.Sleep(umountDrainPollInterval)
+		time.Sleep(rt.umountDrainPollInterval)
 	}
 }
 
-func newUmountCmd() *cobra.Command {
+func newUmountCmd(rt *cliRuntime) *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
@@ -312,7 +290,7 @@ func newUmountCmd() *cobra.Command {
 		Short:   "Unmount a locally mounted virtual disk",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, posArgs []string) error {
-			return runUmount(cmd.ErrOrStderr(), posArgs[0], force)
+			return rt.runUmount(cmd.ErrOrStderr(), posArgs[0], force)
 		},
 	}
 
@@ -320,14 +298,14 @@ func newUmountCmd() *cobra.Command {
 	return cmd
 }
 
-func runUmount(stderr io.Writer, mountpoint string, force bool) error {
+func (rt *cliRuntime) runUmount(stderr io.Writer, mountpoint string, force bool) error {
 	absMountpoint, err := filepath.Abs(mountpoint)
 	if err != nil {
 		return runtimeExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err))
 	}
 	absMountpoint = filepath.Clean(absMountpoint)
 
-	info, mounted, err := ResolveMountPointInfo(absMountpoint)
+	info, mounted, err := rt.resolveMountPointInfo(absMountpoint)
 	if err != nil {
 		return runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
 	}
@@ -343,7 +321,7 @@ func runUmount(stderr io.Writer, mountpoint string, force bool) error {
 	}
 	canonMountpoint := info.Path
 
-	binPath, cmdArgs, found := findUmountCommand(canonMountpoint, force)
+	binPath, cmdArgs, found := rt.findUmountCommand(canonMountpoint, force)
 	if !found {
 		return runtimeExitErr(errors.New("no system unmount tool found: expected fusermount3, fusermount, or umount"))
 	}
@@ -354,10 +332,10 @@ func runUmount(stderr io.Writer, mountpoint string, force bool) error {
 		hasMeta  bool
 	)
 	if !force {
-		metaPath, meta, hasMeta = resolveUmountMountMeta(canonMountpoint)
+		metaPath, meta, hasMeta = rt.resolveUmountMountMeta(canonMountpoint)
 	}
 
-	if out, runErr := runCommand(binPath, cmdArgs...); runErr != nil {
+	if out, runErr := rt.runCommand(binPath, cmdArgs...); runErr != nil {
 		outStr := string(out)
 		if outStr != "" {
 			return runtimeExitErr(fmt.Errorf("unmount failed: %w\n%s", runErr, outStr))
@@ -366,7 +344,7 @@ func runUmount(stderr io.Writer, mountpoint string, force bool) error {
 	}
 
 	if !force && hasMeta {
-		if drainErr := waitMountMetaDrained(stderr, metaPath, &meta); drainErr != nil {
+		if drainErr := rt.waitMountMetaDrained(stderr, metaPath, &meta); drainErr != nil {
 			return runtimeExitErr(drainErr)
 		}
 	}

@@ -49,17 +49,6 @@ func readDaemonHandshake(r io.Reader, stderr io.Writer) int {
 	return 1
 }
 
-var (
-	spawnDaemon            = spawnDaemonProcess
-	chdirFn                = os.Chdir
-	readinessPipeFile      = func() *os.File { return os.NewFile(3, "readiness-pipe") }
-	redirectDaemonStdio    = defaultRedirectDaemonStdio
-	daemonHandshakeTimeout = 30 * time.Second
-	daemonKillGrace        = 5 * time.Second
-	daemonSignalNotify     = defaultDaemonSignalNotify
-	daemonCommandFn        = defaultDaemonCommand
-)
-
 func defaultDaemonSignalNotify() (sigCh <-chan os.Signal, stop func()) {
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
@@ -97,12 +86,12 @@ func defaultRedirectDaemonStdio(logF *os.File) {
 	_ = unix.Dup2(logFd, int(os.Stderr.Fd()))
 }
 
-func terminateAndReapDaemonChild(cmd *exec.Cmd, grace time.Duration) {
+func (rt *cliRuntime) terminateAndReapDaemonChild(cmd *exec.Cmd, grace time.Duration) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
 	if grace <= 0 {
-		grace = daemonKillGrace
+		grace = rt.daemonKillGrace
 	}
 	if grace <= 0 {
 		grace = 5 * time.Second
@@ -126,7 +115,7 @@ func terminateAndReapDaemonChild(cmd *exec.Cmd, grace time.Duration) {
 	}
 }
 
-func spawnDaemonProcess(args []string, stderr io.Writer) int {
+func (rt *cliRuntime) spawnDaemonProcess(args []string, stderr io.Writer) int {
 	r, w, err := os.Pipe()
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: failed to create readiness pipe: %v\n", err)
@@ -134,7 +123,7 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 	}
 	defer func() { _ = r.Close() }()
 
-	cmd, err := daemonCommandFn(args, w)
+	cmd, err := rt.daemonCommandFn(args, w)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		_ = w.Close()
@@ -147,7 +136,7 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 		defer func() { _ = devNull.Close() }()
 	}
 
-	sigCh, stopSignals := daemonSignalNotify()
+	sigCh, stopSignals := rt.daemonSignalNotify()
 	defer stopSignals()
 
 	if startErr := cmd.Start(); startErr != nil {
@@ -158,7 +147,7 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 
 	_ = w.Close()
 
-	timeout := daemonHandshakeTimeout
+	timeout := rt.daemonHandshakeTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -180,13 +169,13 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 		_, _ = io.WriteString(stderr, outcome.errMsg)
 		return 1
 	case <-timer.C:
-		terminateAndReapDaemonChild(cmd, daemonKillGrace)
+		rt.terminateAndReapDaemonChild(cmd, rt.daemonKillGrace)
 		_ = r.Close()
 		<-readDone
 		fmt.Fprintf(stderr, "Error: background daemon timed out after %s waiting for mount handshake\n", timeout)
 		return 1
 	case sig := <-sigCh:
-		terminateAndReapDaemonChild(cmd, daemonKillGrace)
+		rt.terminateAndReapDaemonChild(cmd, rt.daemonKillGrace)
 		_ = r.Close()
 		<-readDone
 		fmt.Fprintf(stderr, "Error: background daemon startup interrupted by signal %s\n", sig)
@@ -199,8 +188,8 @@ func sanitizeDaemonReadinessErr(err error) string {
 	return strings.ReplaceAll(msg, "\n", " ")
 }
 
-func writeDaemonReadinessError(err error) {
-	pipeWriter := readinessPipeFile()
+func (rt *cliRuntime) writeDaemonReadinessError(err error) {
+	pipeWriter := rt.readinessPipeFile()
 	if pipeWriter == nil {
 		return
 	}
@@ -208,11 +197,11 @@ func writeDaemonReadinessError(err error) {
 	_ = pipeWriter.Close()
 }
 
-func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string) int {
-	workerCtx, stopSignals := mountSignalContext(ctx)
+func (rt *cliRuntime) runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string) int {
+	workerCtx, stopSignals := rt.mountSignalContext(ctx)
 	defer stopSignals()
 
-	pipeWriter := readinessPipeFile()
+	pipeWriter := rt.readinessPipeFile()
 	notifyErr := func(err error) {
 		if pipeWriter != nil {
 			_, _ = fmt.Fprintf(pipeWriter, "ERR:%s\n", sanitizeDaemonReadinessErr(err))
@@ -233,21 +222,21 @@ func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Co
 		return 1
 	}
 
-	logF, _, err := ResolveLogFile(opts.logFile, baseCfg.DiskID)
+	logF, _, err := rt.resolveLogFile(opts.logFile, baseCfg.DiskID)
 	if err != nil {
 		notifyErr(err)
 		return 1
 	}
 	defer logF.Close()
 
-	if chdirErr := chdirFn("/"); chdirErr != nil {
+	if chdirErr := rt.chdirFn("/"); chdirErr != nil {
 		notifyErr(fmt.Errorf("change daemon working directory to /: %w", chdirErr))
 		return 1
 	}
 
-	redirectDaemonStdio(logF)
+	rt.redirectDaemonStdio(logF)
 
-	if mountErr := runMount(workerCtx, opts, baseCfg, mountpoint, logF, notifyOK); mountErr != nil {
+	if mountErr := rt.runMount(workerCtx, opts, baseCfg, mountpoint, logF, notifyOK); mountErr != nil {
 		notifyErr(mountErr)
 		fmt.Fprintf(logF, "Error: mount failed: %v\n", mountErr)
 		_ = logF.Sync()

@@ -14,7 +14,6 @@ import (
 
 func TestMount_UnmountTimeoutValidation_GivenInvalidOrConflictingFlagsAndEnvs_Exits2(t *testing.T) {
 	mp := t.TempDir()
-	withMissingMountInfo(t)
 
 	flagCases := []struct {
 		name string
@@ -37,7 +36,9 @@ func TestMount_UnmountTimeoutValidation_GivenInvalidOrConflictingFlagsAndEnvs_Ex
 	}
 	for _, tc := range flagCases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, out, errOut := runCLI(tc.args...)
+			rt := defaultCLIRuntime()
+			setMissingMountInfo(t, rt)
+			code, out, errOut := runCLIWithRuntime(rt, tc.args...)
 			require.Equal(t, 2, code, "case=%s want=2 got=%d stderr=%s", tc.name, code, errOut)
 			require.Empty(t, out)
 			require.Contains(t, errOut, "Error:")
@@ -59,10 +60,12 @@ func TestMount_UnmountTimeoutValidation_GivenInvalidOrConflictingFlagsAndEnvs_Ex
 	}
 	for _, tc := range envCases {
 		t.Run(tc.name, func(t *testing.T) {
+			rt := defaultCLIRuntime()
+			setMissingMountInfo(t, rt)
 			for k, v := range tc.envs {
 				t.Setenv(k, v)
 			}
-			code, out, errOut := runCLI("mount", testDiskID1, mp, "-f")
+			code, out, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f")
 			require.Equal(t, 2, code, "case=%s want=2 got=%d stderr=%s", tc.name, code, errOut)
 			require.Empty(t, out)
 			require.Contains(t, errOut, "Error:")
@@ -73,18 +76,19 @@ func TestMount_UnmountTimeoutValidation_GivenInvalidOrConflictingFlagsAndEnvs_Ex
 func TestMount_UnmountTimeoutResolution_SmartClampingAndEnvPropagation(t *testing.T) {
 	t.Run("lowered total clamps unset default sub-timeouts", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
 		mp := t.TempDir()
 		stageDir := filepath.Join(t.TempDir(), "stage-clamp")
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "clamp-disk", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		captured := stubMountServeFUSE(t, mp)
+		setMountStorageFake(rt, storage)
+		captured := stubMountServeFUSE(t, rt, mp)
 
-		code, _, errOut := runCLI(
+		code, _, errOut := runCLIWithRuntime(rt,
 			"mount", testDiskID1, mp,
 			"-f", "--admin-addr=off", "--stage-dir", stageDir,
 			"--unmount-timeout=20s",
@@ -99,18 +103,19 @@ func TestMount_UnmountTimeoutResolution_SmartClampingAndEnvPropagation(t *testin
 
 	t.Run("lowered stage timeout clamps unset stall timeout", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
 		mp := t.TempDir()
 		stageDir := filepath.Join(t.TempDir(), "stage-clamp-stall")
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "clamp-stall-disk", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		captured := stubMountServeFUSE(t, mp)
+		setMountStorageFake(rt, storage)
+		captured := stubMountServeFUSE(t, rt, mp)
 
-		code, _, errOut := runCLI(
+		code, _, errOut := runCLIWithRuntime(rt,
 			"mount", testDiskID1, mp,
 			"-f", "--admin-addr=off", "--stage-dir", stageDir,
 			"--unmount-stage-timeout=15s",
@@ -124,11 +129,12 @@ func TestMount_UnmountTimeoutResolution_SmartClampingAndEnvPropagation(t *testin
 
 	t.Run("env vars populate all four unmount budgets", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
 		mp := t.TempDir()
 		stageDir := filepath.Join(t.TempDir(), "stage-env")
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 
 		t.Setenv("BOWL_UNMOUNT_TIMEOUT", "10m")
 		t.Setenv("BOWL_UNMOUNT_STAGE_TIMEOUT", "8m")
@@ -137,10 +143,10 @@ func TestMount_UnmountTimeoutResolution_SmartClampingAndEnvPropagation(t *testin
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "env-disk", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		captured := stubMountServeFUSE(t, mp)
+		setMountStorageFake(rt, storage)
+		captured := stubMountServeFUSE(t, rt, mp)
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr=off", "--stage-dir", stageDir)
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--admin-addr=off", "--stage-dir", stageDir)
 		require.Equal(t, 0, code, "stderr=%s", errOut)
 		require.Equal(t, 10*time.Minute, captured.cfg.UnmountTimeout)
 		require.Equal(t, 8*time.Minute, captured.cfg.UnmountStageTimeout)
@@ -151,19 +157,20 @@ func TestMount_UnmountTimeoutResolution_SmartClampingAndEnvPropagation(t *testin
 
 	t.Run("sync mode ignores ambient stage unmount envs and clamps fsync", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
+		rt := defaultCLIRuntime()
 		mp := t.TempDir()
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 
 		t.Setenv("BOWL_UNMOUNT_STAGE_TIMEOUT", "invalid-ignored-in-sync")
 		t.Setenv("BOWL_UNMOUNT_STAGE_STALL_TIMEOUT", "invalid-ignored-in-sync")
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "sync-disk", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		captured := stubMountServeFUSE(t, mp)
+		setMountStorageFake(rt, storage)
+		captured := stubMountServeFUSE(t, rt, mp)
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=sync", "--admin-addr=off", "--unmount-timeout=25s")
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--mode=sync", "--admin-addr=off", "--unmount-timeout=25s")
 		require.Equal(t, 0, code, "stderr=%s", errOut)
 		require.Equal(t, 25*time.Second, captured.cfg.UnmountTimeout)
 		require.Equal(t, 25*time.Second, captured.cfg.UnmountFsyncTimeout)
@@ -174,26 +181,27 @@ func TestMount_UnmountTimeoutResolution_SmartClampingAndEnvPropagation(t *testin
 
 func TestMount_UnmountLeaseRPC_SkipsWhenBudgetExhausted(t *testing.T) {
 	withCleanOTelAndLogger(t)
+	rt := defaultCLIRuntime()
 	mp := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "exhausted-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
-	withServeFUSEStub(t, func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 		ready()
 		rawFS.OnUnmount()
 		time.Sleep(80 * time.Millisecond)
 		return nil
-	})
+	}
 
-	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=sync", "--admin-addr=off", "--unmount-timeout=40ms")
+	code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--mode=sync", "--admin-addr=off", "--unmount-timeout=40ms")
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Contains(t, errOut, `"msg":"unmount_disk_rpc_skipped_timeout"`)
 	require.Empty(t, storage.getUnmountReqs(), "UnmountDisk RPC must be skipped when total unmount budget is exhausted")
-	_, metaExists := findMountMeta(mp)
+	_, metaExists := rt.findMountMeta(mp)
 	require.False(t, metaExists, "mountMeta must still be removed after skipped UnmountDisk RPC")
 }
 
@@ -206,16 +214,11 @@ func TestUmount_HelpHasNoNewFlagsAndFallbackStillWorks(t *testing.T) {
 	metaPath := filepath.Join(metaDir, "alive.json")
 	require.NoError(t, os.WriteFile(metaPath, []byte(`{}`), 0o644))
 
-	prevDrain := umountDrainTimeout
-	prevPoll := umountDrainPollInterval
-	umountDrainTimeout = 60 * time.Millisecond
-	umountDrainPollInterval = 10 * time.Millisecond
-	t.Cleanup(func() {
-		umountDrainTimeout = prevDrain
-		umountDrainPollInterval = prevPoll
-	})
+	rt := defaultCLIRuntime()
+	rt.umountDrainTimeout = 60 * time.Millisecond
+	rt.umountDrainPollInterval = 10 * time.Millisecond
 
-	err := waitMountMetaDrained(nil, metaPath, &mountMeta{PID: os.Getpid()})
+	err := rt.waitMountMetaDrained(nil, metaPath, &mountMeta{PID: os.Getpid()})
 	require.Error(t, err)
 }
 
@@ -224,20 +227,13 @@ func TestUmount_WaitMountMetaDrained_UsesMetaUnmountTimeoutPlusGrace(t *testing.
 	metaPath := filepath.Join(metaDir, "custom-timeout.json")
 	require.NoError(t, os.WriteFile(metaPath, []byte(`{}`), 0o644))
 
-	prevDrain := umountDrainTimeout
-	prevGrace := umountDrainExitGrace
-	prevPoll := umountDrainPollInterval
-	umountDrainTimeout = 5 * time.Second
-	umountDrainExitGrace = 30 * time.Millisecond
-	umountDrainPollInterval = 10 * time.Millisecond
-	t.Cleanup(func() {
-		umountDrainTimeout = prevDrain
-		umountDrainExitGrace = prevGrace
-		umountDrainPollInterval = prevPoll
-	})
+	rt := defaultCLIRuntime()
+	rt.umountDrainTimeout = 5 * time.Second
+	rt.umountDrainExitGrace = 30 * time.Millisecond
+	rt.umountDrainPollInterval = 10 * time.Millisecond
 
 	start := time.Now()
-	err := waitMountMetaDrained(nil, metaPath, &mountMeta{
+	err := rt.waitMountMetaDrained(nil, metaPath, &mountMeta{
 		PID:              os.Getpid(),
 		UnmountTimeoutMs: 70,
 	})

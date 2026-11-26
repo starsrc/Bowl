@@ -38,12 +38,12 @@ type leaseEvictJSON struct {
 	UpdatedBranches []branchJSON `json:"updated_branches"`
 }
 
-func newLeaseCmd(ports diskPorts, rootOpts *rootOptions) *cobra.Command {
+func newLeaseCmd(rt *cliRuntime, rootOpts *rootOptions) *cobra.Command {
 	specs := []*diskSubcommandSpec{
 		&leaseListSpec,
 		&leaseEvictSpec,
 	}
-	return newGroupCmd("lease", "Manage active mount leases on a virtual disk", specs, ports, rootOpts)
+	return newGroupCmd(rt, "lease", "Manage active mount leases on a virtual disk", specs, rootOpts)
 }
 
 var leaseListSpec = diskSubcommandSpec{
@@ -86,7 +86,7 @@ func (a *leaseListAdapter) spanAttrs() []attribute.KeyValue {
 	return attrs
 }
 
-func (a *leaseListAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *leaseListAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
 	return nil
 }
 
@@ -208,7 +208,7 @@ func (a *leaseEvictAdapter) spanAttrs() []attribute.KeyValue {
 	return attrs
 }
 
-func (a *leaseEvictAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *leaseEvictAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
 	return nil
 }
 

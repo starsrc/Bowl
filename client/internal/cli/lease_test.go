@@ -20,6 +20,7 @@ func TestLease_GivenValidationErrors_ReturnsExit2(t *testing.T) {
 }
 
 func TestLease_GivenListAndEvict_FiltersByBranchAndReportsUpdatedEpochs(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "lease-disk", 1<<30, 0)
 	storage.seedBranch(testDiskID1, "feat", 1, 0)
@@ -30,14 +31,14 @@ func TestLease_GivenListAndEvict_FiltersByBranchAndReportsUpdatedEpochs(t *testi
 	)
 	storage.seedMountLease(testDiskID1, "main", mountMain, false, 2, exp)
 	storage.seedMountLease(testDiskID1, "feat", mountFeat, true, 0, exp)
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
-	code, qOut, errOut := runCLI("lease", "ls", "-d", testDiskID1, "-q")
+	code, qOut, errOut := runCLIWithRuntime(rt, "lease", "ls", "-d", testDiskID1, "-q")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	require.Equal(t, mountMain+"\n"+mountFeat+"\n", qOut)
 
-	code, filteredOut, errOut := runCLI("lease", "list", "-d", testDiskID1, "--branch", "feat", "--json")
+	code, filteredOut, errOut := runCLIWithRuntime(rt, "lease", "list", "-d", testDiskID1, "--branch", "feat", "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var listRes leaseListJSON
@@ -47,14 +48,14 @@ func TestLease_GivenListAndEvict_FiltersByBranchAndReportsUpdatedEpochs(t *testi
 	require.Equal(t, mountFeat, listRes.Mounts[0].MountID)
 	require.Equal(t, "ro", listRes.Mounts[0].Mode)
 
-	code, evictOut, errOut := runCLI("lease", "evict", "-d", testDiskID1, "--branch", "main")
+	code, evictOut, errOut := runCLIWithRuntime(rt, "lease", "evict", "-d", testDiskID1, "--branch", "main")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	require.Contains(t, evictOut, "Evicted 1 mount lease(s)")
 	require.Contains(t, evictOut, "Updated branch writer epochs:")
 	require.Contains(t, evictOut, "main")
 
-	code, evictJSONOut, errOut := runCLI("lease", "evict", "-d", testDiskID1, "--mount-id", mountFeat, "--json")
+	code, evictJSONOut, errOut := runCLIWithRuntime(rt, "lease", "evict", "-d", testDiskID1, "--mount-id", mountFeat, "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var evictRes leaseEvictJSON

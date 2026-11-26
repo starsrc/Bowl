@@ -123,10 +123,11 @@ func TestDisk_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *testin
 
 func TestDiskCreate_GivenValidSizeAndBowlTokenEnv_CreatesDiskInQuietAndJSONModesWithoutAuth(t *testing.T) {
 	t.Setenv("BOWL_TOKEN", "env-sec-tok")
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
-	code, quietOut, errOut := runCLI("disk", "create", "--size", "1GiB", "--name", "c1", "-q")
+	code, quietOut, errOut := runCLIWithRuntime(rt, "disk", "create", "--size", "1GiB", "--name", "c1", "-q")
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -134,7 +135,7 @@ func TestDiskCreate_GivenValidSizeAndBowlTokenEnv_CreatesDiskInQuietAndJSONModes
 	require.NotEmpty(t, createdID)
 	require.Empty(t, storage.lastAuth)
 
-	code, jsonOut, errOut := runCLI("--json", "disk", "create", "--size=2GiB", "--name=c2")
+	code, jsonOut, errOut := runCLIWithRuntime(rt, "--json", "disk", "create", "--size=2GiB", "--name=c2")
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -149,11 +150,12 @@ func TestDiskCreate_GivenValidSizeAndBowlTokenEnv_CreatesDiskInQuietAndJSONModes
 }
 
 func TestDiskGet_GivenSeededDisk_RendersGitModelFieldsAndViewAlias(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "root-disk", 1<<30, 4096)
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
-	code, out, errOut := runCLI("disk", "view", testDiskID1)
+	code, out, errOut := runCLIWithRuntime(rt, "disk", "view", testDiskID1)
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Contains(t, out, "Disk ID:        "+testDiskID1)
@@ -162,7 +164,7 @@ func TestDiskGet_GivenSeededDisk_RendersGitModelFieldsAndViewAlias(t *testing.T)
 	require.NotContains(t, out, "Root Ino:")
 	require.NotContains(t, out, "Used Inodes:")
 
-	code, jsonOut, errOut := runCLI("disk", "get", testDiskID1, "--json")
+	code, jsonOut, errOut := runCLIWithRuntime(rt, "disk", "get", testDiskID1, "--json")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	var dj diskJSON
@@ -172,12 +174,13 @@ func TestDiskGet_GivenSeededDisk_RendersGitModelFieldsAndViewAlias(t *testing.T)
 }
 
 func TestDiskList_GivenTwoDisksWithLimit_RendersTableQuietPaginationAndJSON(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "alpha", 2<<30, 1<<30)
 	storage.seedDisk(testDiskID2, "beta", 4<<30, 0)
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
-	code, out, errOut := runCLI("disk", "ls", "--limit", "1")
+	code, out, errOut := runCLIWithRuntime(rt, "disk", "ls", "--limit", "1")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Contains(t, out, "DISK ID")
@@ -185,12 +188,12 @@ func TestDiskList_GivenTwoDisksWithLimit_RendersTableQuietPaginationAndJSON(t *t
 	require.Contains(t, out, "50.00%")
 	require.Contains(t, out, "Next Page Token: "+testDiskID2)
 
-	code, quietOut, errOut := runCLI("disk", "list", "-q")
+	code, quietOut, errOut := runCLIWithRuntime(rt, "disk", "list", "-q")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, testDiskID1+"\n"+testDiskID2+"\n", quietOut)
 
-	code, jsonOut, errOut := runCLI("disk", "list", "--limit", "1", "--page-token", testDiskID2, "--json")
+	code, jsonOut, errOut := runCLIWithRuntime(rt, "disk", "list", "--limit", "1", "--page-token", testDiskID2, "--json")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	var listRes diskListJSON
@@ -201,11 +204,12 @@ func TestDiskList_GivenTwoDisksWithLimit_RendersTableQuietPaginationAndJSON(t *t
 }
 
 func TestDiskEdit_GivenValidExpansionAndEmptyName_UpdatesMetadata(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "old-name", 2<<30, 4096)
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
-	code, out, errOut := runCLI("disk", "edit", testDiskID1, "--size", "4GiB", "--name", "", "--json")
+	code, out, errOut := runCLIWithRuntime(rt, "disk", "edit", testDiskID1, "--size", "4GiB", "--name", "", "--json")
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -213,52 +217,57 @@ func TestDiskEdit_GivenValidExpansionAndEmptyName_UpdatesMetadata(t *testing.T) 
 	require.NoError(t, json.Unmarshal([]byte(out), &dj))
 	require.Empty(t, dj.Name)
 	require.Equal(t, uint64(4<<30), dj.MaxBytes)
+	require.Zero(t, storage.getDiskCalls, "disk edit must not issue a pre-check GetDisk RPC")
+	require.Equal(t, 1, storage.updateCalls)
 }
 
-func TestDiskUpdate_GivenTargetBelowUsedBytes_RejectsBeforeUpdateRPC(t *testing.T) {
+func TestDiskUpdate_GivenTargetBelowUsedBytes_CallsUpdateDiskDirectlyAndSurfacesPrecondition(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "used-disk", 100<<20, 10<<20)
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
-	code, out, errOut := runCLI("disk", "update", testDiskID1, "--size", "1MiB")
+	code, out, errOut := runCLIWithRuntime(rt, "disk", "update", testDiskID1, "--size", "1MiB")
 
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "shrinking below used space is not allowed")
-	require.Equal(t, 0, storage.updateCalls, "pre-check rejection must not call UpdateDisk")
+	require.Contains(t, errOut, "shrink failed because target size is smaller than current used bytes")
+	require.Equal(t, 0, storage.getDiskCalls, "disk update must not issue a pre-check GetDisk RPC")
+	require.Equal(t, 1, storage.updateCalls, "disk update must call UpdateDisk directly in 1 RPC")
 }
 
 func TestDiskDelete_GivenLocalBranchMountOrInteractiveCancel_BlocksBeforeRPC(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "busy-disk", 1<<30, 0)
-	withDiskStorageFake(t, storage)
-	withMountInfoContent(t, "100 30 0:50 / /mnt/bowl-feat rw - fuse.bowl bowl:"+testDiskID1+"@feat rw\n")
+	setDiskStorageFake(rt, storage)
+	setMountInfoContent(t, rt, "100 30 0:50 / /mnt/bowl-feat rw - fuse.bowl bowl:"+testDiskID1+"@feat rw\n")
 
-	code, out, errOut := runCLI("disk", "rm", testDiskID1, "-y")
+	code, out, errOut := runCLIWithRuntime(rt, "disk", "rm", testDiskID1, "-y")
 
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "bowl umount /mnt/bowl-feat")
 	require.Equal(t, 0, storage.deleteCalls)
 
-	withUnreadableMountInfo(t)
-	code, out, errOut = runCLI("disk", "delete", testDiskID1, "-y")
+	setUnreadableMountInfo(t, rt)
+	code, out, errOut = runCLIWithRuntime(rt, "disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "check local mount table")
 	require.Equal(t, 0, storage.deleteCalls)
 
-	withMissingMountInfo(t)
-	withDiskStdin(t, strings.NewReader("n\n"))
-	code, out, errOut = runCLI("disk", "delete", testDiskID1)
+	setMissingMountInfo(t, rt)
+	setDiskStdin(rt, strings.NewReader("n\n"))
+	code, out, errOut = runCLIWithRuntime(rt, "disk", "delete", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "Operation canceled")
 	require.NotContains(t, errOut, "Error:")
 	require.Equal(t, 0, storage.deleteCalls)
 
-	withDiskStdin(t, errReader{err: errors.New("broken pipe")})
-	code, out, errOut = runCLI("disk", "delete", testDiskID1)
+	setDiskStdin(rt, errReader{err: errors.New("broken pipe")})
+	code, out, errOut = runCLIWithRuntime(rt, "disk", "delete", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "read confirmation input")
@@ -266,13 +275,14 @@ func TestDiskDelete_GivenLocalBranchMountOrInteractiveCancel_BlocksBeforeRPC(t *
 }
 
 func TestDiskDelete_GivenYesFlagJSONAndInteractiveYES_DeletesDisk(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "d1", 1<<30, 0)
 	storage.seedDisk(testDiskID2, "d2", 1<<30, 0)
-	withDiskStorageFake(t, storage)
-	withMissingMountInfo(t)
+	setDiskStorageFake(rt, storage)
+	setMissingMountInfo(t, rt)
 
-	code, jsonOut, errOut := runCLI("disk", "delete", testDiskID1, "--yes", "--json")
+	code, jsonOut, errOut := runCLIWithRuntime(rt, "disk", "delete", testDiskID1, "--yes", "--json")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	var delRes diskDeleteJSON
@@ -281,33 +291,34 @@ func TestDiskDelete_GivenYesFlagJSONAndInteractiveYES_DeletesDisk(t *testing.T) 
 	require.True(t, delRes.Deleted)
 	require.NotNil(t, storage.lastDeleteReq)
 
-	withDiskStdin(t, strings.NewReader("YES\n"))
-	code, textOut, errOut := runCLI("disk", "delete", testDiskID2)
+	setDiskStdin(rt, strings.NewReader("YES\n"))
+	code, textOut, errOut := runCLIWithRuntime(rt, "disk", "delete", testDiskID2)
 	require.Equal(t, 0, code)
 	require.Contains(t, errOut, "Delete virtual disk "+testDiskID2)
 	require.Equal(t, "Deleted virtual disk "+testDiskID2+"\n", textOut)
 }
 
 func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
-	withDiskStorageFake(t, storage)
-	withMissingMountInfo(t)
+	setDiskStorageFake(rt, storage)
+	setMissingMountInfo(t, rt)
 
-	code, _, errOut := runCLI("disk", "get", testDiskID1)
+	code, _, errOut := runCLIWithRuntime(rt, "disk", "get", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "disk not found: "+testDiskID1)
 
-	code, _, errOut = runCLI("disk", "update", testDiskID1, "--name", "only-name")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "update", testDiskID1, "--name", "only-name")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "disk not found: "+testDiskID1)
 
-	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "disk not found: "+testDiskID1)
 
 	storage.seedDisk(testDiskID1, "root", 100<<20, 10<<20)
 	storage.mounted[testDiskID1] = true
-	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "still mounted")
 	require.Contains(t, errOut, "bowl lease list -d "+testDiskID1)
@@ -319,33 +330,34 @@ func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testin
 	require.NoError(t, detailErr)
 	ebusyErr.AddDetail(detail)
 	storage.forcedErr["DeleteDisk"] = ebusyErr
-	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "bowl lease list -d "+testDiskID1)
 	require.Contains(t, errOut, "bowl lease evict -d "+testDiskID1)
 	delete(storage.forcedErr, "DeleteDisk")
 
 	storage.returnNilDisk["CreateDisk"] = true
-	code, _, errOut = runCLI("disk", "create", "--size", "1GiB")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "create", "--size", "1GiB")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "empty virtual disk metadata")
 	delete(storage.returnNilDisk, "CreateDisk")
 
 	storage.returnNilDisk["UpdateDisk"] = true
-	code, _, errOut = runCLI("disk", "update", testDiskID1, "--name", "only-name")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "update", testDiskID1, "--name", "only-name")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "empty virtual disk metadata")
 }
 
 func TestDisk_GivenActiveOTelTracer_PropagatesTraceparentRequestIDAndSpanStatus(t *testing.T) {
 	exporter := setupDiskTestTracer(t)
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "root", 1<<30, 0)
-	withDiskStorageFake(t, storage)
-	withMissingMountInfo(t)
+	setDiskStorageFake(rt, storage)
+	setMissingMountInfo(t, rt)
 
 	exporter.Reset()
-	code, createOut, errOut := runCLI("disk", "create", "--size", "1GiB", "-q")
+	code, createOut, errOut := runCLIWithRuntime(rt, "disk", "create", "--size", "1GiB", "-q")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	createdID := strings.TrimSpace(createOut)
@@ -355,35 +367,35 @@ func TestDisk_GivenActiveOTelTracer_PropagatesTraceparentRequestIDAndSpanStatus(
 	require.NotEqual(t, "1", storage.lastRequestID)
 
 	exporter.Reset()
-	code, _, errOut = runCLI("disk", "list")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "list")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	listSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.list")
 	require.Contains(t, storage.lastTraceparent, listSpan.SpanContext.TraceID().String())
 
 	exporter.Reset()
-	code, _, errOut = runCLI("disk", "get", createdID)
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "get", createdID)
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	getSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.get")
 	require.Contains(t, storage.lastTraceparent, getSpan.SpanContext.TraceID().String())
 
 	exporter.Reset()
-	code, _, errOut = runCLI("disk", "edit", createdID, "--name", "renamed")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "edit", createdID, "--name", "renamed")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	updateSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.update")
 	require.Contains(t, storage.lastTraceparent, updateSpan.SpanContext.TraceID().String())
 
 	exporter.Reset()
-	code, _, errOut = runCLI("disk", "delete", createdID, "-y")
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "delete", createdID, "-y")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	deleteSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.delete")
 	require.Contains(t, storage.lastTraceparent, deleteSpan.SpanContext.TraceID().String())
 
 	exporter.Reset()
-	code, _, errOut = runCLI("disk", "get", testDiskID2)
+	code, _, errOut = runCLIWithRuntime(rt, "disk", "get", testDiskID2)
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "disk not found")
 	errSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.get")

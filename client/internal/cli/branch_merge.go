@@ -181,7 +181,7 @@ func (a *branchMergeAdapter) spanAttrs() []attribute.KeyValue {
 	}
 }
 
-func (a *branchMergeAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *branchMergeAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
 	return nil
 }
 

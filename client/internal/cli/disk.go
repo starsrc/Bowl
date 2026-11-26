@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"connectrpc.com/connect"
@@ -31,27 +31,6 @@ const (
 	MaxCommitMessageBytes = 4096
 )
 
-type diskPorts struct {
-	newClient            func(endpoint string) (storagev1connect.StorageServiceClient, int, error)
-	findMountpoint       func(diskID string) (DiskMountInfo, error)
-	findBranchMountpoint func(diskID, branch string) (DiskMountInfo, error)
-	stdin                io.Reader
-}
-
-var (
-	diskHTTPClient *http.Client
-	diskStdin      io.Reader = os.Stdin
-)
-
-func defaultDiskPorts() diskPorts {
-	return diskPorts{
-		newClient:            newDiskStorageClient,
-		findMountpoint:       FindDiskMountpoint,
-		findBranchMountpoint: FindBranchMountpoint,
-		stdin:                diskStdin,
-	}
-}
-
 type diskSubcommandSpec struct {
 	use              string
 	aliases          []string
@@ -69,7 +48,7 @@ type diskSubcommandSpec struct {
 type diskRequestAdapter interface {
 	finalize(cmd *cobra.Command, diskID string, posArgs []string) (showUsage bool, err error)
 	spanAttrs() []attribute.KeyValue
-	preRPC(ports diskPorts, stderr io.Writer) *diskCLIError
+	preRPC(rt *cliRuntime, stderr io.Writer) *diskCLIError
 	invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError)
 }
 
@@ -109,6 +88,16 @@ type diskJSON struct {
 	UsedBytes     uint64 `json:"used_bytes"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
+}
+
+type diskListJSON struct {
+	Disks         []diskJSON `json:"disks"`
+	NextPageToken string     `json:"next_page_token"`
+}
+
+type diskDeleteJSON struct {
+	DiskID  string `json:"disk_id"`
+	Deleted bool   `json:"deleted"`
 }
 
 func toDiskJSON(d *storagev1.Disk) diskJSON {
@@ -214,6 +203,9 @@ func parsePositiveCommitID(raw, label string) (uint64, error) {
 }
 
 func confirmInteractive(stdin io.Reader, stderr io.Writer, prompt string) *diskCLIError {
+	if stdin == nil {
+		stdin = os.Stdin
+	}
 	fmt.Fprint(stderr, prompt)
 	line, readErr := bufio.NewReader(stdin).ReadString('\n')
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
@@ -297,7 +289,7 @@ func mapDiskRPCError(err error, policy diskRPCErrorPolicy) *diskCLIError {
 	}
 }
 
-func newDiskStorageClient(endpoint string) (storagev1connect.StorageServiceClient, int, error) {
+func (rt *cliRuntime) newDiskStorageClient(endpoint string) (storagev1connect.StorageServiceClient, int, error) {
 	resolvedEndpoint, err := rpc.ResolveEndpoint(endpoint)
 	if err != nil {
 		return nil, 2, fmt.Errorf("invalid endpoint: %w", err)
@@ -305,7 +297,7 @@ func newDiskStorageClient(endpoint string) (storagev1connect.StorageServiceClien
 
 	client, err := rpc.NewClientFromConfig(rpc.ClientConfig{
 		Endpoint:   resolvedEndpoint,
-		HTTPClient: diskHTTPClient,
+		HTTPClient: rt.diskHTTPClient,
 	})
 	if err != nil {
 		return nil, 1, fmt.Errorf("create RPC client: %w", err)
@@ -313,7 +305,7 @@ func newDiskStorageClient(endpoint string) (storagev1connect.StorageServiceClien
 	return client, 0, nil
 }
 
-func newGroupCmd(use, short string, specs []*diskSubcommandSpec, ports diskPorts, rootOpts *rootOptions) *cobra.Command {
+func newGroupCmd(rt *cliRuntime, use, short string, specs []*diskSubcommandSpec, rootOpts *rootOptions) *cobra.Command {
 	groupCmd := &cobra.Command{
 		Use:   use,
 		Short: short,
@@ -330,12 +322,12 @@ func newGroupCmd(use, short string, specs []*diskSubcommandSpec, ports diskPorts
 	}
 
 	for _, spec := range specs {
-		groupCmd.AddCommand(newDiskSubcommand(spec, ports, rootOpts))
+		groupCmd.AddCommand(newDiskSubcommand(rt, spec, rootOpts))
 	}
 	return groupCmd
 }
 
-func newDiskCmd(ports diskPorts, rootOpts *rootOptions) *cobra.Command {
+func newDiskCmd(rt *cliRuntime, rootOpts *rootOptions) *cobra.Command {
 	specs := []*diskSubcommandSpec{
 		&diskCreateSpec,
 		&diskListSpec,
@@ -343,10 +335,10 @@ func newDiskCmd(ports diskPorts, rootOpts *rootOptions) *cobra.Command {
 		&diskUpdateSpec,
 		&diskDeleteSpec,
 	}
-	return newGroupCmd("disk", "Manage virtual disks", specs, ports, rootOpts)
+	return newGroupCmd(rt, "disk", "Manage virtual disks", specs, rootOpts)
 }
 
-func newDiskSubcommand(spec *diskSubcommandSpec, ports diskPorts, rootOpts *rootOptions) *cobra.Command {
+func newDiskSubcommand(rt *cliRuntime, spec *diskSubcommandSpec, rootOpts *rootOptions) *cobra.Command {
 	var (
 		quiet   bool
 		adapter diskRequestAdapter
@@ -378,7 +370,7 @@ func newDiskSubcommand(spec *diskSubcommandSpec, ports diskPorts, rootOpts *root
 			if showUsage, err := adapter.finalize(cmd, diskID, posArgs); err != nil {
 				return usageExitErr(err, showUsage)
 			}
-			return runDiskValidated(spec, adapter, ports, quiet, rootOpts.jsonOut, rootOpts.endpoint, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return runDiskValidated(rt, spec, adapter, quiet, rootOpts.jsonOut, rootOpts.endpoint, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 
@@ -396,27 +388,14 @@ func newDiskSubcommand(spec *diskSubcommandSpec, ports diskPorts, rootOpts *root
 }
 
 func runDiskValidated(
+	rt *cliRuntime,
 	spec *diskSubcommandSpec,
 	adapter diskRequestAdapter,
-	ports diskPorts,
 	quiet, jsonOut bool,
 	endpoint string,
 	stdout, stderr io.Writer,
 ) error {
-	if ports.newClient == nil {
-		ports.newClient = newDiskStorageClient
-	}
-	if ports.findMountpoint == nil {
-		ports.findMountpoint = FindDiskMountpoint
-	}
-	if ports.findBranchMountpoint == nil {
-		ports.findBranchMountpoint = FindBranchMountpoint
-	}
-	if ports.stdin == nil {
-		ports.stdin = os.Stdin
-	}
-
-	if cliErr := adapter.preRPC(ports, stderr); cliErr != nil {
+	if cliErr := adapter.preRPC(rt, stderr); cliErr != nil {
 		if cliErr.msg != "" {
 			return &cliExitError{code: cliErr.exitCode, err: errors.New(cliErr.msg)}
 		}
@@ -430,7 +409,7 @@ func runDiskValidated(
 	)
 	defer finishSpan()
 
-	client, exitCode, clientErr := ports.newClient(endpoint)
+	client, exitCode, clientErr := rt.newDiskStorageClient(endpoint)
 	if clientErr != nil {
 		finishDiskCLISpanError(span, clientErr)
 		return &cliExitError{code: exitCode, err: clientErr}
@@ -504,4 +483,371 @@ func runDiskValidated(
 		printDiskDetail(stdout, outcome.disk)
 	}
 	return nil
+}
+
+var diskCreateSpec = diskSubcommandSpec{
+	use:        "create",
+	short:      "Create a new virtual disk",
+	args:       cobra.NoArgs,
+	allowQuiet: true,
+	quietHelp:  "Quiet mode, output only the created disk ID",
+	spanName:   "cli.disk.create",
+	timeout:    10 * time.Second,
+	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
+		a := &diskCreateAdapter{}
+		flags := cmd.Flags()
+		flags.StringVar(&a.sizeRaw, "size", "", "Required capacity quota limit such as 10GiB")
+		flags.StringVar(&a.name, "name", "", "Optional virtual disk name up to 255 bytes")
+		return a
+	},
+}
+
+type diskCreateAdapter struct {
+	sizeRaw  string
+	name     string
+	maxBytes uint64
+}
+
+func (a *diskCreateAdapter) finalize(cmd *cobra.Command, _ string, _ []string) (bool, error) {
+	if !cmd.Flags().Changed("size") || strings.TrimSpace(a.sizeRaw) == "" {
+		return true, errors.New("--size is required")
+	}
+	maxBytes, err := ParseSize(a.sizeRaw)
+	if err != nil {
+		return false, fmt.Errorf("invalid --size: %w", err)
+	}
+	if err := validateDiskName(a.name); err != nil {
+		return false, err
+	}
+	a.maxBytes = maxBytes
+	return false, nil
+}
+
+func (a *diskCreateAdapter) spanAttrs() []attribute.KeyValue {
+	return nil
+}
+
+func (a *diskCreateAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
+	return nil
+}
+
+func (a *diskCreateAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
+	resp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+		Name:     a.name,
+		MaxBytes: a.maxBytes,
+	}))
+	if err != nil {
+		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
+			defaultOp: "create virtual disk failed",
+		})
+	}
+	disk, cliErr := requireNonNilDisk(resp.Msg.GetDisk())
+	if cliErr != nil {
+		return diskOutcome{}, cliErr
+	}
+	return diskOutcome{disk: disk, setSpanDiskID: true}, nil
+}
+
+var diskListSpec = diskSubcommandSpec{
+	use:        "list",
+	aliases:    []string{"ls"},
+	short:      "List virtual disks with pagination",
+	args:       cobra.NoArgs,
+	allowQuiet: true,
+	quietHelp:  "Quiet mode, output only disk IDs one per line",
+	spanName:   "cli.disk.list",
+	timeout:    10 * time.Second,
+	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
+		a := &diskListAdapter{}
+		flags := cmd.Flags()
+		flags.IntVar(&a.limit, "limit", 50, "Maximum number of disks per page in [1, 1000]")
+		flags.StringVar(&a.pageToken, "page-token", "", "Pagination cursor token")
+		return a
+	},
+}
+
+type diskListAdapter struct {
+	limit     int
+	pageToken string
+	pageSize  uint32
+}
+
+func (a *diskListAdapter) finalize(cmd *cobra.Command, _ string, _ []string) (bool, error) {
+	if cmd.Flags().Changed("limit") {
+		if a.limit < 1 || a.limit > 1000 {
+			return false, fmt.Errorf("invalid --limit %d: must be an integer in [1, 1000]", a.limit)
+		}
+		a.pageSize = uint32(a.limit)
+	}
+	return false, nil
+}
+
+func (a *diskListAdapter) spanAttrs() []attribute.KeyValue {
+	return nil
+}
+
+func (a *diskListAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
+	return nil
+}
+
+func (a *diskListAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
+	resp, err := client.ListDisks(ctx, connect.NewRequest(&storagev1.ListDisksRequest{
+		PageSize:  a.pageSize,
+		PageToken: a.pageToken,
+	}))
+	if err != nil {
+		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
+			defaultOp: "list virtual disks failed",
+		})
+	}
+
+	disks := resp.Msg.GetDisks()
+	nextPageToken := resp.Msg.GetNextPageToken()
+
+	items := make([]diskJSON, 0, len(disks))
+	ids := make([]string, 0, len(disks))
+	for _, d := range disks {
+		dj := toDiskJSON(d)
+		items = append(items, dj)
+		ids = append(ids, dj.DiskID)
+	}
+
+	return diskOutcome{
+		quietLines:    ids,
+		hasQuietLines: true,
+		jsonPayload: diskListJSON{
+			Disks:         items,
+			NextPageToken: nextPageToken,
+		},
+		renderHuman: func(w io.Writer) {
+			renderDiskListTable(w, items, nextPageToken)
+		},
+	}, nil
+}
+
+func renderDiskListTable(w io.Writer, items []diskJSON, nextPageToken string) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "DISK ID\tNAME\tDEFAULT BRANCH\tUSED\tMAX\tUSAGE%\tCREATED AT")
+	for _, dj := range items {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.2f%%\t%s\n",
+			dj.DiskID,
+			dj.Name,
+			dj.DefaultBranch,
+			FormatSize(dj.UsedBytes),
+			FormatSize(dj.MaxBytes),
+			diskUsagePct(dj.UsedBytes, dj.MaxBytes),
+			dj.CreatedAt,
+		)
+	}
+	_ = tw.Flush()
+
+	if nextPageToken != "" {
+		fmt.Fprintf(w, "\nNext Page Token: %s\n", nextPageToken)
+	}
+}
+
+var diskGetSpec = diskSubcommandSpec{
+	use:       "get <disk-id>",
+	aliases:   []string{"view"},
+	short:     "Show details of a virtual disk",
+	args:      cobra.ExactArgs(1),
+	uuidLabel: "disk-id",
+	spanName:  "cli.disk.get",
+	timeout:   10 * time.Second,
+	buildAdapter: func(_ *cobra.Command) diskRequestAdapter {
+		return &diskGetAdapter{}
+	},
+}
+
+type diskGetAdapter struct {
+	diskID string
+}
+
+func (a *diskGetAdapter) finalize(_ *cobra.Command, diskID string, _ []string) (bool, error) {
+	a.diskID = diskID
+	return false, nil
+}
+
+func (a *diskGetAdapter) spanAttrs() []attribute.KeyValue {
+	return []attribute.KeyValue{attribute.String("bowl.disk_id", a.diskID)}
+}
+
+func (a *diskGetAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
+	return nil
+}
+
+func (a *diskGetAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
+	resp, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{
+		DiskId: a.diskID,
+	}))
+	if err != nil {
+		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
+			diskID:    a.diskID,
+			defaultOp: "get disk metadata failed",
+		})
+	}
+	disk, cliErr := requireNonNilDisk(resp.Msg.GetDisk())
+	if cliErr != nil {
+		return diskOutcome{}, cliErr
+	}
+	return diskOutcome{disk: disk}, nil
+}
+
+var diskUpdateSpec = diskSubcommandSpec{
+	use:       "update <disk-id>",
+	aliases:   []string{"edit"},
+	short:     "Update a virtual disk name or capacity quota",
+	args:      cobra.ExactArgs(1),
+	uuidLabel: "disk-id",
+	spanName:  "cli.disk.update",
+	timeout:   10 * time.Second,
+	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
+		a := &diskUpdateAdapter{}
+		flags := cmd.Flags()
+		flags.StringVar(&a.sizeRaw, "size", "", "New capacity quota limit such as 20GiB")
+		flags.StringVar(&a.nameRaw, "name", "", "New virtual disk name up to 255 bytes; pass \"\" to clear")
+		return a
+	},
+}
+
+type diskUpdateAdapter struct {
+	diskID  string
+	sizeRaw string
+	nameRaw string
+	namePtr *string
+	sizePtr *uint64
+}
+
+func (a *diskUpdateAdapter) finalize(cmd *cobra.Command, diskID string, _ []string) (bool, error) {
+	a.diskID = diskID
+	flags := cmd.Flags()
+	if flags.Changed("size") {
+		maxBytes, err := ParseSize(a.sizeRaw)
+		if err != nil {
+			return false, fmt.Errorf("invalid --size: %w", err)
+		}
+		a.sizePtr = &maxBytes
+	}
+	if flags.Changed("name") {
+		if err := validateDiskName(a.nameRaw); err != nil {
+			return false, err
+		}
+		nameCopy := a.nameRaw
+		a.namePtr = &nameCopy
+	}
+	if a.sizePtr == nil && a.namePtr == nil {
+		return true, errors.New("at least one of --size or --name must be specified")
+	}
+	return false, nil
+}
+
+func (a *diskUpdateAdapter) spanAttrs() []attribute.KeyValue {
+	return []attribute.KeyValue{attribute.String("bowl.disk_id", a.diskID)}
+}
+
+func (a *diskUpdateAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
+	return nil
+}
+
+func (a *diskUpdateAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
+	updateResp, err := client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{
+		DiskId:   a.diskID,
+		Name:     a.namePtr,
+		MaxBytes: a.sizePtr,
+	}))
+	if err != nil {
+		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
+			diskID:    a.diskID,
+			defaultOp: "update disk metadata failed",
+			preconditionMsg: func(_ string, rpcErr error) string {
+				return fmt.Sprintf("shrink failed because target size is smaller than current used bytes: %v", rpcErr)
+			},
+		})
+	}
+	updatedDisk, cliErr := requireNonNilDisk(updateResp.Msg.GetDisk())
+	if cliErr != nil {
+		return diskOutcome{}, cliErr
+	}
+	return diskOutcome{disk: updatedDisk}, nil
+}
+
+var diskDeleteSpec = diskSubcommandSpec{
+	use:       "delete <disk-id>",
+	aliases:   []string{"rm"},
+	short:     "Delete a virtual disk and all its branches and commits",
+	args:      cobra.ExactArgs(1),
+	uuidLabel: "disk-id",
+	spanName:  "cli.disk.delete",
+	timeout:   15 * time.Second,
+	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
+		a := &diskDeleteAdapter{}
+		cmd.Flags().BoolVarP(&a.yes, "yes", "y", false, "Skip interactive confirmation prompt")
+		return a
+	},
+}
+
+type diskDeleteAdapter struct {
+	diskID string
+	yes    bool
+}
+
+func (a *diskDeleteAdapter) finalize(_ *cobra.Command, diskID string, _ []string) (bool, error) {
+	a.diskID = diskID
+	return false, nil
+}
+
+func (a *diskDeleteAdapter) spanAttrs() []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("bowl.disk_id", a.diskID),
+	}
+}
+
+func (a *diskDeleteAdapter) preRPC(rt *cliRuntime, stderr io.Writer) *diskCLIError {
+	info, err := rt.findDiskMountpoint(a.diskID)
+	if err != nil {
+		return &diskCLIError{
+			exitCode: 1,
+			msg:      fmt.Sprintf("check local mount table: %v", err),
+		}
+	}
+	if info.Mounted {
+		return &diskCLIError{
+			exitCode: 1,
+			msg:      fmt.Sprintf("disk %s is currently mounted at %s; run bowl umount %s before deleting", a.diskID, info.Mountpoint, info.Mountpoint),
+		}
+	}
+
+	if !a.yes {
+		prompt := fmt.Sprintf("Delete virtual disk %s and all its branches and commits? This action is irreversible [y/N]: ", a.diskID)
+		return confirmInteractive(rt.diskStdin, stderr, prompt)
+	}
+
+	return nil
+}
+
+func (a *diskDeleteAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
+	_, err := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+		DiskId: a.diskID,
+	}))
+	if err != nil {
+		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
+			diskID:           a.diskID,
+			defaultOp:        "delete virtual disk failed",
+			checkInvalidArg:  true,
+			checkEBUSYReason: true,
+			preconditionMsg: func(id string, _ error) string {
+				return fmt.Sprintf("disk %s is still mounted with an active client session; unmount it, or run `bowl lease list -d %s` / `bowl lease evict -d %s` before deleting", id, id, id)
+			},
+		})
+	}
+
+	return diskOutcome{
+		jsonPayload: diskDeleteJSON{
+			DiskID:  a.diskID,
+			Deleted: true,
+		},
+		renderHuman: func(w io.Writer) {
+			fmt.Fprintf(w, "Deleted virtual disk %s\n", a.diskID)
+		},
+	}, nil
 }

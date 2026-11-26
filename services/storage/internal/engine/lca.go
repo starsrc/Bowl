@@ -1,6 +1,6 @@
 package engine
 
-func collectAncestors(r pebbleReader, startCommitID uint64) (map[uint64]CommitMeta, error) {
+func collectAncestors(r pebbleReader, dk diskKeys, startCommitID uint64) (map[uint64]CommitMeta, error) {
 	if startCommitID == 0 {
 		return nil, ErrInvalid
 	}
@@ -15,7 +15,7 @@ func collectAncestors(r pebbleReader, startCommitID uint64) (map[uint64]CommitMe
 		if _, seen := anc[cur]; seen {
 			continue
 		}
-		cmt, err := readCommitMeta(r, cur)
+		cmt, err := readCommitMeta(r, dk, cur)
 		if err != nil {
 			return nil, err
 		}
@@ -30,22 +30,22 @@ func collectAncestors(r pebbleReader, startCommitID uint64) (map[uint64]CommitMe
 	return anc, nil
 }
 
-func findLCA(r pebbleReader, commitA, commitB uint64) (uint64, error) {
+func findLCA(r pebbleReader, dk diskKeys, commitA, commitB uint64) (uint64, error) {
 	if commitA == 0 || commitB == 0 {
 		return 0, ErrInvalid
 	}
 	if commitA == commitB {
-		if _, err := readCommitMeta(r, commitA); err != nil {
+		if _, err := readCommitMeta(r, dk, commitA); err != nil {
 			return 0, err
 		}
 		return commitA, nil
 	}
 
-	ancA, err := collectAncestors(r, commitA)
+	ancA, err := collectAncestors(r, dk, commitA)
 	if err != nil {
 		return 0, err
 	}
-	ancB, err := collectAncestors(r, commitB)
+	ancB, err := collectAncestors(r, dk, commitB)
 	if err != nil {
 		return 0, err
 	}

@@ -73,7 +73,8 @@ func (a *BranchActor) execCommit(batch *pebble.Batch, branch BranchMeta, raw any
 	if err != nil {
 		return CommitMeta{}, err
 	}
-	migratedOwned, orphanEff, migErr := migrateOrphansAcrossLayerSwap(batch, branch.WorkLayerID, newWorkLayerID, branch.HeadCommitID)
+	dk := a.disk.keys
+	migratedOwned, orphanEff, migErr := migrateOrphansAcrossLayerSwap(batch, dk, branch.WorkLayerID, newWorkLayerID, branch.HeadCommitID)
 	if migErr != nil {
 		return CommitMeta{}, migErr
 	}
@@ -94,10 +95,10 @@ func (a *BranchActor) execCommit(batch *pebble.Batch, branch BranchMeta, raw any
 	branch.WorkOwnedBytes = migratedOwned
 	branch.UpdatedAt = nowNano
 
-	if setErr := batch.Set(MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
 		return CommitMeta{}, setErr
 	}
-	if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 		return CommitMeta{}, setErr
 	}
 	return cmt, nil
@@ -169,7 +170,8 @@ func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) 
 	if !ok {
 		return nil, ErrInvalid
 	}
-	if _, err := readBranchMeta(batch, req.newBranch); err == nil {
+	dk := a.disk.keys
+	if _, err := readBranchMeta(batch, dk, req.newBranch); err == nil {
 		return nil, ErrExist
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
@@ -192,12 +194,12 @@ func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) 
 	if err != nil {
 		return nil, err
 	}
-	migratedOwned, orphanEff, migErr := migrateOrphansAcrossLayerSwap(batch, branch.WorkLayerID, srcNewWorkID, branch.HeadCommitID)
+	migratedOwned, orphanEff, migErr := migrateOrphansAcrossLayerSwap(batch, dk, branch.WorkLayerID, srcNewWorkID, branch.HeadCommitID)
 	if migErr != nil {
 		return nil, migErr
 	}
 
-	dirty, err := layerHasAnyKey(batch, branch.WorkLayerID)
+	dirty, err := layerHasAnyKey(batch, dk, branch.WorkLayerID)
 	if err != nil {
 		return nil, err
 	}
@@ -238,13 +240,13 @@ func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) 
 		UpdatedAt:      nowNano,
 	}
 
-	if setErr := batch.Set(MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
 		return nil, setErr
 	}
-	if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 		return nil, setErr
 	}
-	if setErr := batch.Set(MetaBranchKey(dstBranch.Name), EncodeBranchMeta(dstBranch), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaBranchKey(dstBranch.Name), EncodeBranchMeta(dstBranch), nil); setErr != nil {
 		return nil, setErr
 	}
 	return forkResp{commit: cmt, branch: dstBranch}, nil
@@ -288,14 +290,15 @@ func (a *BranchActor) execReset(batch *pebble.Batch, quota *tickQuotaTracker, br
 	if !ok {
 		return BranchMeta{}, ErrInvalid
 	}
-	mounted, err := hasActiveMountOnReader(batch, branch.Name, a.disk.now().UnixNano(), false)
+	dk := a.disk.keys
+	mounted, err := hasActiveMountOnReader(batch, dk, branch.Name, a.disk.now().UnixNano(), false)
 	if err != nil {
 		return BranchMeta{}, err
 	}
 	if mounted {
 		return BranchMeta{}, ErrDiskMounted
 	}
-	targetCmt, cmtErr := readCommitMeta(batch, req.targetCommitID)
+	targetCmt, cmtErr := readCommitMeta(batch, dk, req.targetCommitID)
 	if cmtErr != nil {
 		return BranchMeta{}, cmtErr
 	}
@@ -305,7 +308,7 @@ func (a *BranchActor) execReset(batch *pebble.Batch, quota *tickQuotaTracker, br
 	}
 
 	if branch.WorkLayerID != 0 {
-		start, end := LayerRangeBounds(branch.WorkLayerID)
+		start, end := dk.LayerRangeBounds(branch.WorkLayerID)
 		if delErr := batch.DeleteRange(start, end, nil); delErr != nil {
 			return BranchMeta{}, delErr
 		}
@@ -319,7 +322,7 @@ func (a *BranchActor) execReset(batch *pebble.Batch, quota *tickQuotaTracker, br
 	branch.LogicalBytes = targetCmt.LogicalBytes
 	branch.UpdatedAt = a.disk.now().UnixNano()
 
-	if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 		return BranchMeta{}, setErr
 	}
 	quota.release(freedWork)
@@ -344,14 +347,15 @@ func (d *DiskStore) DeleteBranch(ctx context.Context, branch string) error {
 	if err != nil {
 		return err
 	}
-	mounted, err := hasActiveMountOnReader(d.db, branch, d.now().UnixNano(), false)
+	dk := d.keys
+	mounted, err := hasActiveMountOnReader(d.db, dk, branch, d.now().UnixNano(), false)
 	if err != nil {
 		return err
 	}
 	if mounted {
 		return ErrDiskMounted
 	}
-	staleMounts, err := listAllMountsFromReader(d.db, branch)
+	staleMounts, err := listAllMountsFromReader(d.db, dk, branch)
 	if err != nil {
 		return err
 	}
@@ -365,16 +369,16 @@ func (d *DiskStore) DeleteBranch(ctx context.Context, branch string) error {
 	batch := d.db.NewBatch()
 	defer func() { _ = batch.Close() }()
 
-	if delErr := batch.Delete(MetaBranchKey(branch), nil); delErr != nil {
+	if delErr := batch.Delete(dk.MetaBranchKey(branch), nil); delErr != nil {
 		return delErr
 	}
 	for _, m := range staleMounts {
-		if delErr := batch.Delete(MetaMountKey(m.ID), nil); delErr != nil {
+		if delErr := batch.Delete(dk.MetaMountKey(m.ID), nil); delErr != nil {
 			return delErr
 		}
 	}
 	if bm.WorkLayerID != 0 {
-		start, end := LayerRangeBounds(bm.WorkLayerID)
+		start, end := dk.LayerRangeBounds(bm.WorkLayerID)
 		if delErr := batch.DeleteRange(start, end, nil); delErr != nil {
 			return delErr
 		}
@@ -387,8 +391,8 @@ func (d *DiskStore) DeleteBranch(ctx context.Context, branch string) error {
 	return nil
 }
 
-func reachableCommitsFromReader(r pebbleReader) (map[uint64]struct{}, error) {
-	bPrefix := MetaBranchPrefix()
+func reachableCommitsFromReader(r pebbleReader, dk diskKeys) (map[uint64]struct{}, error) {
+	bPrefix := dk.MetaBranchPrefix()
 	bIter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: bPrefix,
 		UpperBound: PrefixUpperBound(bPrefix),
@@ -424,7 +428,7 @@ func reachableCommitsFromReader(r pebbleReader) (map[uint64]struct{}, error) {
 			continue
 		}
 		reachable[cur] = struct{}{}
-		cmt, cmtErr := readCommitMeta(r, cur)
+		cmt, cmtErr := readCommitMeta(r, dk, cur)
 		if cmtErr != nil {
 			if errors.Is(cmtErr, ErrNotFound) {
 				continue
@@ -452,13 +456,14 @@ func (d *DiskStore) DeleteCommit(ctx context.Context, commitID uint64) error {
 	d.branchRegMu.Lock()
 	defer d.branchRegMu.Unlock()
 
+	dk := d.keys
 	snap := d.db.NewSnapshot()
-	cmt, err := readCommitMeta(snap, commitID)
+	cmt, err := readCommitMeta(snap, dk, commitID)
 	if err != nil {
 		_ = snap.Close()
 		return err
 	}
-	reachable, err := reachableCommitsFromReader(snap)
+	reachable, err := reachableCommitsFromReader(snap, dk)
 	closeErr := snap.Close()
 	if err != nil {
 		return err
@@ -477,11 +482,11 @@ func (d *DiskStore) DeleteCommit(ctx context.Context, commitID uint64) error {
 	batch := d.db.NewBatch()
 	defer func() { _ = batch.Close() }()
 
-	if delErr := batch.Delete(MetaCommitKey(commitID), nil); delErr != nil {
+	if delErr := batch.Delete(dk.MetaCommitKey(commitID), nil); delErr != nil {
 		return delErr
 	}
 	if cmt.LayerID != 0 {
-		start, end := LayerRangeBounds(cmt.LayerID)
+		start, end := dk.LayerRangeBounds(cmt.LayerID)
 		if delErr := batch.DeleteRange(start, end, nil); delErr != nil {
 			return delErr
 		}
@@ -502,14 +507,15 @@ func (d *DiskStore) PruneCommits(ctx context.Context) (int, error) {
 	d.branchRegMu.Lock()
 	defer d.branchRegMu.Unlock()
 
+	dk := d.keys
 	snap := d.db.NewSnapshot()
-	reachable, err := reachableCommitsFromReader(snap)
+	reachable, err := reachableCommitsFromReader(snap, dk)
 	if err != nil {
 		_ = snap.Close()
 		return 0, err
 	}
 
-	prefix := MetaCommitPrefix()
+	prefix := dk.MetaCommitPrefix()
 	iter, err := snap.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: PrefixUpperBound(prefix),
@@ -547,11 +553,11 @@ func (d *DiskStore) PruneCommits(ctx context.Context) (int, error) {
 		if cmt.LayerID != 0 {
 			d.removeCommitActor(cmt.LayerID)
 		}
-		if delErr := batch.Delete(MetaCommitKey(cmt.ID), nil); delErr != nil {
+		if delErr := batch.Delete(dk.MetaCommitKey(cmt.ID), nil); delErr != nil {
 			return 0, delErr
 		}
 		if cmt.LayerID != 0 {
-			start, end := LayerRangeBounds(cmt.LayerID)
+			start, end := dk.LayerRangeBounds(cmt.LayerID)
 			if delErr := batch.DeleteRange(start, end, nil); delErr != nil {
 				return 0, delErr
 			}

@@ -10,15 +10,15 @@ import (
 
 var securityCapabilityXattr = []byte("security.capability")
 
-func clearSecurityCapability(batch *pebble.Batch, work uint64, layers []uint64, ino uint64) error {
-	_, err := overlayGetXattr(batch, layers, ino, securityCapabilityXattr)
+func clearSecurityCapability(batch *pebble.Batch, dk diskKeys, work uint64, layers []uint64, ino uint64) error {
+	_, err := overlayGetXattr(batch, dk, layers, ino, securityCapabilityXattr)
 	if errors.Is(err, ErrNoData) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	return batch.Set(LayerXattrKey(work, ino, securityCapabilityXattr), EncodeTombstone(), nil)
+	return batch.Set(dk.LayerXattrKey(work, ino, securityCapabilityXattr), EncodeTombstone(), nil)
 }
 
 type mknodReq struct {
@@ -76,7 +76,8 @@ func (a *BranchActor) execMknod(batch *pebble.Batch, branch BranchMeta, layers [
 	if !ok {
 		return Inode{}, ErrInvalid
 	}
-	parent, err := overlayGetInode(batch, layers, req.parentIno)
+	dk := a.disk.keys
+	parent, err := overlayGetInode(batch, dk, layers, req.parentIno)
 	if err != nil {
 		return Inode{}, err
 	}
@@ -86,7 +87,7 @@ func (a *BranchActor) execMknod(batch *pebble.Batch, branch BranchMeta, layers [
 	if parent.Nlink == 0 {
 		return Inode{}, ErrNotFound
 	}
-	if _, entryErr := overlayGetEntry(batch, layers, req.parentIno, []byte(req.name)); entryErr == nil {
+	if _, entryErr := overlayGetEntry(batch, dk, layers, req.parentIno, []byte(req.name)); entryErr == nil {
 		return Inode{}, ErrExist
 	} else if !errors.Is(entryErr, ErrNotFound) {
 		return Inode{}, entryErr
@@ -134,14 +135,14 @@ func (a *BranchActor) execMknod(batch *pebble.Batch, branch BranchMeta, layers [
 	}
 
 	work := branch.WorkLayerID
-	if setErr := batch.Set(LayerInodeKey(work, child.Ino), EncodeLiveEnvelope(childRaw), nil); setErr != nil {
+	if setErr := batch.Set(dk.LayerInodeKey(work, child.Ino), EncodeLiveEnvelope(childRaw), nil); setErr != nil {
 		return Inode{}, setErr
 	}
-	if setErr := batch.Set(LayerInodeKey(work, parent.Ino), EncodeLiveEnvelope(parentRaw), nil); setErr != nil {
+	if setErr := batch.Set(dk.LayerInodeKey(work, parent.Ino), EncodeLiveEnvelope(parentRaw), nil); setErr != nil {
 		return Inode{}, setErr
 	}
 	ent := Entry{Ino: child.Ino, Mode: child.Mode}
-	if setErr := batch.Set(LayerEntryKey(work, req.parentIno, []byte(req.name)), EncodeLiveEnvelope(EncodeEntry(ent)), nil); setErr != nil {
+	if setErr := batch.Set(dk.LayerEntryKey(work, req.parentIno, []byte(req.name)), EncodeLiveEnvelope(EncodeEntry(ent)), nil); setErr != nil {
 		return Inode{}, setErr
 	}
 	return child, nil
@@ -184,7 +185,7 @@ func (a *BranchActor) execFsync(batch *pebble.Batch, layers []uint64, raw any) e
 	if !ok {
 		return ErrInvalid
 	}
-	inode, err := overlayGetInode(batch, layers, req.ino)
+	inode, err := overlayGetInode(batch, a.disk.keys, layers, req.ino)
 	if err != nil {
 		return err
 	}
@@ -199,7 +200,7 @@ func (a *BranchActor) execFsyncDir(batch *pebble.Batch, layers []uint64, raw any
 	if !ok {
 		return ErrInvalid
 	}
-	inode, err := overlayGetInode(batch, layers, req.ino)
+	inode, err := overlayGetInode(batch, a.disk.keys, layers, req.ino)
 	if err != nil {
 		return err
 	}
@@ -257,8 +258,9 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 	)
 
 	if zeroRange {
+		dk := d.keys
 		snap := d.db.NewSnapshot()
-		branchMeta, layers, layerErr := resolveBranchLayers(snap, branch)
+		branchMeta, layers, layerErr := resolveBranchLayers(snap, dk, branch)
 		if layerErr != nil {
 			_ = snap.Close()
 			return layerErr
@@ -267,7 +269,7 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 			_ = snap.Close()
 			return ErrStaleEpoch
 		}
-		curInode, inoErr := overlayGetInode(snap, layers, ino)
+		curInode, inoErr := overlayGetInode(snap, dk, layers, ino)
 		if inoErr != nil {
 			_ = snap.Close()
 			return inoErr
@@ -309,7 +311,7 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 				continue
 			}
 
-			oldRef, exists, refErr := overlayGetDataRef(snap, layers, ino, blkIdx)
+			oldRef, exists, refErr := overlayGetDataRef(snap, dk, layers, ino, blkIdx)
 			if refErr != nil {
 				_ = snap.Close()
 				return refErr
@@ -371,7 +373,8 @@ func (a *BranchActor) execFallocate(batch *pebble.Batch, quota *tickQuotaTracker
 	if !ok {
 		return ErrInvalid
 	}
-	inode, err := overlayGetInode(batch, layers, req.ino)
+	dk := a.disk.keys
+	inode, err := overlayGetInode(batch, dk, layers, req.ino)
 	if err != nil {
 		return err
 	}
@@ -405,7 +408,7 @@ func (a *BranchActor) execFallocate(batch *pebble.Batch, quota *tickQuotaTracker
 		if end >= blkSize {
 			fullEnd := (end / blkSize) - 1
 			if fullStart <= fullEnd {
-				liveBlks, dropWork, dropEff, listErr := overlayCollectLiveBlocksRange(batch, layers, inode.Ino, fullStart, fullEnd)
+				liveBlks, dropWork, dropEff, listErr := overlayCollectLiveBlocksRange(batch, dk, layers, inode.Ino, fullStart, fullEnd)
 				if listErr != nil {
 					return listErr
 				}
@@ -415,11 +418,11 @@ func (a *BranchActor) execFallocate(batch *pebble.Batch, quota *tickQuotaTracker
 			}
 		}
 		for _, upd := range req.partialUpdates {
-			oldWorkLen, workErr := readLayerDataRefLen(batch, work, inode.Ino, upd.blockIdx)
+			oldWorkLen, workErr := readLayerDataRefLen(batch, dk, work, inode.Ino, upd.blockIdx)
 			if workErr != nil {
 				return workErr
 			}
-			oldEffLen, effErr := overlayGetDataRefLen(batch, layers, inode.Ino, upd.blockIdx)
+			oldEffLen, effErr := overlayGetDataRefLen(batch, dk, layers, inode.Ino, upd.blockIdx)
 			if effErr != nil {
 				return effErr
 			}
@@ -442,17 +445,17 @@ func (a *BranchActor) execFallocate(batch *pebble.Batch, quota *tickQuotaTracker
 
 	if req.zeroRange {
 		for _, blkIdx := range fullDropBlks {
-			if setErr := batch.Set(LayerDataKey(work, inode.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
+			if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
 				return setErr
 			}
 		}
 		for _, upd := range req.partialUpdates {
 			if upd.tombstone {
-				if setErr := batch.Set(LayerDataKey(work, inode.Ino, upd.blockIdx), EncodeTombstone(), nil); setErr != nil {
+				if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, upd.blockIdx), EncodeTombstone(), nil); setErr != nil {
 					return setErr
 				}
 			} else {
-				if setErr := batch.Set(LayerDataKey(work, inode.Ino, upd.blockIdx), EncodeLiveEnvelope(EncodeBlobRef(upd.ref)), nil); setErr != nil {
+				if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, upd.blockIdx), EncodeLiveEnvelope(EncodeBlobRef(upd.ref)), nil); setErr != nil {
 					return setErr
 				}
 			}
@@ -460,7 +463,7 @@ func (a *BranchActor) execFallocate(batch *pebble.Batch, quota *tickQuotaTracker
 		inode.Mode &^= ModeSetUID | ModeSetGID
 	}
 
-	if capErr := clearSecurityCapability(batch, work, layers, inode.Ino); capErr != nil {
+	if capErr := clearSecurityCapability(batch, dk, work, layers, inode.Ino); capErr != nil {
 		return capErr
 	}
 
@@ -476,12 +479,12 @@ func (a *BranchActor) execFallocate(batch *pebble.Batch, quota *tickQuotaTracker
 	if err != nil {
 		return err
 	}
-	if setErr := batch.Set(LayerInodeKey(work, inode.Ino), EncodeLiveEnvelope(encoded), nil); setErr != nil {
+	if setErr := batch.Set(dk.LayerInodeKey(work, inode.Ino), EncodeLiveEnvelope(encoded), nil); setErr != nil {
 		return setErr
 	}
 	if workOwnedDelta != 0 || logicalDelta != 0 {
 		applyBranchByteDeltas(&branch, workOwnedDelta, logicalDelta)
-		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+		if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 			return setErr
 		}
 	}

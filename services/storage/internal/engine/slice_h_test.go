@@ -33,7 +33,7 @@ func (l *syncEventLog) snapshot() []string {
 
 func TestStep21_CreateTmpfile_LinkPromotion_ExclusiveReject_AndPurgeOrphan(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "step21-tmpfile",
 		BlockSize: 4096,
@@ -70,7 +70,7 @@ func TestStep21_CreateTmpfile_LinkPromotion_ExclusiveReject_AndPurgeOrphan(t *te
 
 	br, err := disk.GetBranch(DefaultBranchName)
 	require.NoError(t, err)
-	_, hasOrphan, err := readLayerOrphanKind(disk.db, br.WorkLayerID, promoted.Ino)
+	_, hasOrphan, err := readLayerOrphanKind(disk.db, disk.keys, br.WorkLayerID, promoted.Ino)
 	require.NoError(t, err)
 	require.False(t, hasOrphan)
 
@@ -101,7 +101,7 @@ func TestStep21_CreateTmpfile_LinkPromotion_ExclusiveReject_AndPurgeOrphan(t *te
 
 func TestStep21_UnlinkOpenInClient_OverlayOrphanIsolation_CommitForkAndZeroLayerFork(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "step21-isolation",
 		BlockSize: 4096,
@@ -189,7 +189,7 @@ func TestStep21_UnlinkOpenInClient_OverlayOrphanIsolation_CommitForkAndZeroLayer
 
 func TestStep21_MountBranch_AtomicOrphanSweep_AndGCReclaimsOrphanPacks(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         t.TempDir(),
 		DiskID:      "step21-mount-gc",
 		BlockSize:   4096,
@@ -242,7 +242,7 @@ func TestStep21_MountBranch_AtomicOrphanSweep_AndGCReclaimsOrphanPacks(t *testin
 
 func TestStep22_NormalPOSIXWrites_SkipPackAndWALSync(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "step22-nosync",
 		BlockSize: 4096,
@@ -315,44 +315,44 @@ func TestStep22_SyncBarrier_StrictDataBeforeWALOrdering_AllOps(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name string
-		run  func(t *testing.T, disk *DiskStore, fileIno uint64)
+		run  func(t *testing.T, disk *testDisk, fileIno uint64)
 	}{
 		{
 			name: "Fsync",
-			run: func(t *testing.T, disk *DiskStore, fileIno uint64) {
+			run: func(t *testing.T, disk *testDisk, fileIno uint64) {
 				require.NoError(t, disk.Fsync(ctx, DefaultBranchName, fileIno))
 			},
 		},
 		{
 			name: "FsyncDir",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				require.NoError(t, disk.FsyncDir(ctx, DefaultBranchName, RootIno))
 			},
 		},
 		{
 			name: "Commit",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				_, err := disk.Commit(ctx, DefaultBranchName, "barrier commit")
 				require.NoError(t, err)
 			},
 		},
 		{
 			name: "Fork",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				_, _, err := disk.Fork(ctx, DefaultBranchName, "forked", "barrier fork")
 				require.NoError(t, err)
 			},
 		},
 		{
 			name: "MountBranch",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				_, err := disk.MountBranch(ctx, DefaultBranchName, false, false, time.Minute)
 				require.NoError(t, err)
 			},
 		},
 		{
 			name: "UpdateDiskMeta",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				newName := "updated-disk"
 				_, err := disk.UpdateDiskMeta(ctx, &newName, nil)
 				require.NoError(t, err)
@@ -360,20 +360,20 @@ func TestStep22_SyncBarrier_StrictDataBeforeWALOrdering_AllOps(t *testing.T) {
 		},
 		{
 			name: "Unmount",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				require.NoError(t, disk.Unmount(ctx, "missing-mount-id"))
 			},
 		},
 		{
 			name: "Reset",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				_, err := disk.Reset(ctx, DefaultBranchName, 1)
 				require.NoError(t, err)
 			},
 		},
 		{
 			name: "DeleteBranch",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				_, _, err := disk.Fork(ctx, DefaultBranchName, "tmp-del", "fork before delete")
 				require.NoError(t, err)
 				extra, err := disk.Create(ctx, DefaultBranchName, RootIno, "dirty-again.bin", 0o644, 0, 0)
@@ -385,7 +385,7 @@ func TestStep22_SyncBarrier_StrictDataBeforeWALOrdering_AllOps(t *testing.T) {
 		},
 		{
 			name: "PruneCommits",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				cmt, err := disk.Commit(ctx, DefaultBranchName, "to-prune")
 				require.NoError(t, err)
 				_, err = disk.Reset(ctx, DefaultBranchName, 1)
@@ -402,7 +402,7 @@ func TestStep22_SyncBarrier_StrictDataBeforeWALOrdering_AllOps(t *testing.T) {
 		},
 		{
 			name: "Close",
-			run: func(t *testing.T, disk *DiskStore, _ uint64) {
+			run: func(t *testing.T, disk *testDisk, _ uint64) {
 				require.NoError(t, disk.Close())
 			},
 		},
@@ -410,7 +410,7 @@ func TestStep22_SyncBarrier_StrictDataBeforeWALOrdering_AllOps(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			disk, err := OpenDisk(DiskOptions{
+			disk, err := openTestDisk(testDiskOptions{
 				Dir:       t.TempDir(),
 				DiskID:    "step22-order-" + tc.name,
 				BlockSize: 4096,
@@ -451,7 +451,7 @@ func TestStep22_SyncBarrier_StrictDataBeforeWALOrdering_AllOps(t *testing.T) {
 
 func TestStep22_PackSyncFailure_AbortsTickWithoutCommittingWAL(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "step22-fail-abort",
 		BlockSize: 4096,
@@ -541,7 +541,7 @@ func TestStep22_PackSyncFailure_AbortsTickWithoutCommittingWAL(t *testing.T) {
 
 func TestSliceH_Mknod_Readlink_ISGIDInheritance(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "slice-h-mknod-readlink",
 		BlockSize: 4096,
@@ -601,7 +601,7 @@ func TestSliceH_Mknod_Readlink_ISGIDInheritance(t *testing.T) {
 
 func TestSliceH_Fsync_FsyncDir_ValidationAndBarriers(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "slice-h-fsync",
 		BlockSize: 4096,
@@ -623,7 +623,7 @@ func TestSliceH_Fsync_FsyncDir_ValidationAndBarriers(t *testing.T) {
 
 func TestSliceH_ReadDirPage_And_ReadDirPlus_Pagination(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "slice-h-readdir",
 		BlockSize: 4096,
@@ -686,7 +686,7 @@ func TestSliceH_ReadDirPage_And_ReadDirPlus_Pagination(t *testing.T) {
 
 func TestSliceH_Fallocate_Modes_ZeroElision_Flags_AndQuota(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "slice-h-fallocate",
 		BlockSize: 4096,
@@ -740,14 +740,14 @@ func TestSliceH_Fallocate_Modes_ZeroElision_Flags_AndQuota(t *testing.T) {
 
 	br, err := disk.GetBranch(DefaultBranchName)
 	require.NoError(t, err)
-	_, hasMidBlk, err := overlayGetDataRef(disk.db, []uint64{br.WorkLayerID}, f.Ino, 1)
+	_, hasMidBlk, err := overlayGetDataRef(disk.db, disk.keys, []uint64{br.WorkLayerID}, f.Ino, 1)
 	require.NoError(t, err)
 	require.False(t, hasMidBlk)
 
 	bytesBeforeZeroElide := disk.packs.PhysicalBytes()
 	require.NoError(t, disk.Fallocate(ctx, DefaultBranchName, f.Ino, 0, 2048, FallocZeroRange|FallocKeepSize))
 	require.Equal(t, bytesBeforeZeroElide, disk.packs.PhysicalBytes())
-	_, hasFirstBlk, err := overlayGetDataRef(disk.db, []uint64{br.WorkLayerID}, f.Ino, 0)
+	_, hasFirstBlk, err := overlayGetDataRef(disk.db, disk.keys, []uint64{br.WorkLayerID}, f.Ino, 0)
 	require.NoError(t, err)
 	require.False(t, hasFirstBlk)
 
@@ -778,7 +778,7 @@ func TestSliceH_Fallocate_Modes_ZeroElision_Flags_AndQuota(t *testing.T) {
 
 func TestSliceH_Rename_NoReplace_Exchange_CycleCheck_OpenTarget_AndHardlinkParents(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "slice-h-rename",
 		BlockSize: 4096,
@@ -859,7 +859,7 @@ func TestSliceH_Rename_NoReplace_Exchange_CycleCheck_OpenTarget_AndHardlinkParen
 
 	br, err := disk.GetBranch(DefaultBranchName)
 	require.NoError(t, err)
-	_, closer, getErr := disk.db.Get(LayerParentKey(br.WorkLayerID, f1.Ino, d2.Ino))
+	_, closer, getErr := disk.db.Get(disk.keys.LayerParentKey(br.WorkLayerID, f1.Ino, d2.Ino))
 	require.NoError(t, getErr)
 	require.NoError(t, closer.Close())
 
@@ -884,7 +884,7 @@ func TestSliceH_Rename_NoReplace_Exchange_CycleCheck_OpenTarget_AndHardlinkParen
 	victimData, err := disk.Read(ctx, DefaultBranchName, f2.Ino, 0, 64)
 	require.NoError(t, err)
 	require.Equal(t, []byte("open-victim"), victimData)
-	kind, hasOrphan, err := readLayerOrphanKind(disk.db, br.WorkLayerID, f2.Ino)
+	kind, hasOrphan, err := readLayerOrphanKind(disk.db, disk.keys, br.WorkLayerID, f2.Ino)
 	require.NoError(t, err)
 	require.True(t, hasOrphan)
 	require.Equal(t, OrphanUnlinked, kind)
@@ -893,7 +893,7 @@ func TestSliceH_Rename_NoReplace_Exchange_CycleCheck_OpenTarget_AndHardlinkParen
 func TestSliceH_SetAttr_Flags_Timestamps_ClearSUID_AndCapability(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "slice-h-setattr",
 		BlockSize: 4096,
@@ -975,7 +975,7 @@ func TestSliceH_SetAttr_Flags_Timestamps_ClearSUID_AndCapability(t *testing.T) {
 
 func TestSliceH_Xattr_UserNamespaceRules_And64KiBQuota(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "slice-h-xattr",
 		BlockSize: 4096,
@@ -1015,7 +1015,7 @@ func TestSliceH_Xattr_UserNamespaceRules_And64KiBQuota(t *testing.T) {
 
 func TestSliceH_ReadInto_And_ReadCommitNode_RegularSymlinkDir(t *testing.T) {
 	ctx := context.Background()
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "slice-h-read",
 		BlockSize: 4096,

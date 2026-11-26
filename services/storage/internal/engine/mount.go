@@ -36,11 +36,11 @@ func validateMountID(id string) error {
 	return nil
 }
 
-func readMountMeta(r pebbleReader, mountID string) (MountMeta, error) {
+func readMountMeta(r pebbleReader, dk diskKeys, mountID string) (MountMeta, error) {
 	if err := validateMountID(mountID); err != nil {
 		return MountMeta{}, err
 	}
-	val, closer, err := r.Get(MetaMountKey(mountID))
+	val, closer, err := r.Get(dk.MetaMountKey(mountID))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return MountMeta{}, ErrNotFound
 	}
@@ -55,8 +55,8 @@ func readMountMeta(r pebbleReader, mountID string) (MountMeta, error) {
 	return meta, nil
 }
 
-func listAllMountsFromReader(r pebbleReader, branch string) ([]MountMeta, error) {
-	prefix := MetaMountPrefix()
+func listAllMountsFromReader(r pebbleReader, dk diskKeys, branch string) ([]MountMeta, error) {
+	prefix := dk.MetaMountPrefix()
 	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: PrefixUpperBound(prefix),
@@ -85,8 +85,8 @@ func listAllMountsFromReader(r pebbleReader, branch string) ([]MountMeta, error)
 	return out, nil
 }
 
-func listActiveMountsFromReader(r pebbleReader, branch string, nowNano int64) ([]MountMeta, error) {
-	all, err := listAllMountsFromReader(r, branch)
+func listActiveMountsFromReader(r pebbleReader, dk diskKeys, branch string, nowNano int64) ([]MountMeta, error) {
+	all, err := listAllMountsFromReader(r, dk, branch)
 	if err != nil {
 		return nil, err
 	}
@@ -99,8 +99,8 @@ func listActiveMountsFromReader(r pebbleReader, branch string, nowNano int64) ([
 	return active, nil
 }
 
-func hasActiveMountOnReader(r pebbleReader, branch string, nowNano int64, rwOnly bool) (bool, error) {
-	prefix := MetaMountPrefix()
+func hasActiveMountOnReader(r pebbleReader, dk diskKeys, branch string, nowNano int64, rwOnly bool) (bool, error) {
+	prefix := dk.MetaMountPrefix()
 	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: PrefixUpperBound(prefix),
@@ -177,9 +177,10 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTrack
 		return MountBranchResult{}, ErrInvalid
 	}
 
+	dk := a.disk.keys
 	now := a.disk.now()
 	nowNano := now.UnixNano()
-	existing, err := listAllMountsFromReader(batch, branch.Name)
+	existing, err := listAllMountsFromReader(batch, dk, branch.Name)
 	if err != nil {
 		return MountBranchResult{}, err
 	}
@@ -207,7 +208,7 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTrack
 
 	var deletedIDs []string
 	for _, id := range expiredIDs {
-		if delErr := batch.Delete(MetaMountKey(id), nil); delErr != nil {
+		if delErr := batch.Delete(dk.MetaMountKey(id), nil); delErr != nil {
 			return MountBranchResult{}, delErr
 		}
 		deletedIDs = append(deletedIDs, id)
@@ -219,12 +220,12 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTrack
 	)
 	if !req.readOnly {
 		for _, id := range activeRWIDs {
-			if delErr := batch.Delete(MetaMountKey(id), nil); delErr != nil {
+			if delErr := batch.Delete(dk.MetaMountKey(id), nil); delErr != nil {
 				return MountBranchResult{}, delErr
 			}
 			deletedIDs = append(deletedIDs, id)
 		}
-		freedWork, freedLogical, sweepErr := sweepOrphansInWorkLayer(batch, branch.WorkLayerID, branch.HeadCommitID)
+		freedWork, freedLogical, sweepErr := sweepOrphansInWorkLayer(batch, dk, branch.WorkLayerID, branch.HeadCommitID)
 		if sweepErr != nil {
 			return MountBranchResult{}, sweepErr
 		}
@@ -232,7 +233,7 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTrack
 		branch.LogicalBytes = saturatingSub(branch.LogicalBytes, freedLogical)
 		branch.WriterEpoch++
 		branch.UpdatedAt = nowNano
-		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+		if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 			return MountBranchResult{}, setErr
 		}
 		quota.release(freedWork)
@@ -249,7 +250,7 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTrack
 		MountedAt:   nowNano,
 		ExpiresAt:   now.Add(req.ttl).UnixNano(),
 	}
-	if setErr := batch.Set(MetaMountKey(mount.ID), EncodeMountMeta(mount), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaMountKey(mount.ID), EncodeMountMeta(mount), nil); setErr != nil {
 		return MountBranchResult{}, setErr
 	}
 	if len(deletedIDs) > 0 {
@@ -319,7 +320,8 @@ func (a *BranchActor) execRenewMount(batch *pebble.Batch, branch BranchMeta, raw
 	if !req.readOnly && req.epoch != branch.WriterEpoch {
 		return MountMeta{}, ErrStaleEpoch
 	}
-	mount, err := readMountMeta(batch, req.mountID)
+	dk := a.disk.keys
+	mount, err := readMountMeta(batch, dk, req.mountID)
 	if err != nil {
 		return MountMeta{}, err
 	}
@@ -334,7 +336,7 @@ func (a *BranchActor) execRenewMount(batch *pebble.Batch, branch BranchMeta, raw
 		return MountMeta{}, ErrNotFound
 	}
 	mount.ExpiresAt = now.Add(req.ttl).UnixNano()
-	if setErr := batch.Set(MetaMountKey(mount.ID), EncodeMountMeta(mount), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaMountKey(mount.ID), EncodeMountMeta(mount), nil); setErr != nil {
 		return MountMeta{}, setErr
 	}
 	return mount, nil
@@ -344,7 +346,7 @@ func (d *DiskStore) GetMount(mountID string) (MountMeta, error) {
 	if d.closing.Load() {
 		return MountMeta{}, ErrClosed
 	}
-	return readMountMeta(d.db, mountID)
+	return readMountMeta(d.db, d.keys, mountID)
 }
 
 func (d *DiskStore) Unmount(ctx context.Context, mountID string) error {
@@ -361,7 +363,7 @@ func (d *DiskStore) Unmount(ctx context.Context, mountID string) error {
 	}
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
-	return d.deleteKeySync(ctx, MetaMountKey(mountID))
+	return d.deleteKeySync(ctx, d.keys.MetaMountKey(mountID))
 }
 
 func (d *DiskStore) EvictMounts(ctx context.Context, branch, mountID string) (EvictMountsResult, error) {
@@ -392,7 +394,7 @@ func (d *DiskStore) EvictMounts(ctx context.Context, branch, mountID string) (Ev
 		d.branchRegMu.RLock()
 		defer d.branchRegMu.RUnlock()
 
-		mount, err := readMountMeta(d.db, mountID)
+		mount, err := readMountMeta(d.db, d.keys, mountID)
 		if errors.Is(err, ErrNotFound) {
 			return EvictMountsResult{}, nil
 		}
@@ -401,7 +403,7 @@ func (d *DiskStore) EvictMounts(ctx context.Context, branch, mountID string) (Ev
 		}
 		res, evictErr := d.evictMountsOnBranch(ctx, mount.BranchName, mountID, false)
 		if errors.Is(evictErr, ErrNotFound) {
-			if delErr := d.deleteKeySync(ctx, MetaMountKey(mountID)); delErr != nil {
+			if delErr := d.deleteKeySync(ctx, d.keys.MetaMountKey(mountID)); delErr != nil {
 				return EvictMountsResult{}, delErr
 			}
 			var count uint32
@@ -419,7 +421,7 @@ func (d *DiskStore) EvictMounts(ctx context.Context, branch, mountID string) (Ev
 	d.branchRegMu.Lock()
 	defer d.branchRegMu.Unlock()
 
-	allMounts, err := listAllMountsFromReader(d.db, "")
+	allMounts, err := listAllMountsFromReader(d.db, d.keys, "")
 	if err != nil {
 		return EvictMountsResult{}, err
 	}
@@ -444,7 +446,7 @@ func (d *DiskStore) EvictMounts(ctx context.Context, branch, mountID string) (Ev
 		if errors.Is(evictErr, ErrNotFound) {
 			orphanBatch := d.db.NewBatch()
 			for _, m := range byBranch[bName] {
-				if delErr := orphanBatch.Delete(MetaMountKey(m.ID), nil); delErr != nil {
+				if delErr := orphanBatch.Delete(d.keys.MetaMountKey(m.ID), nil); delErr != nil {
 					_ = orphanBatch.Close()
 					return EvictMountsResult{}, delErr
 				}
@@ -502,9 +504,10 @@ func (a *BranchActor) execEvictMount(batch *pebble.Batch, branch BranchMeta, raw
 		return EvictMountsResult{}, ErrInvalid
 	}
 
+	dk := a.disk.keys
 	nowNano := a.disk.now().UnixNano()
 	if req.mountID != "" {
-		mount, err := readMountMeta(batch, req.mountID)
+		mount, err := readMountMeta(batch, dk, req.mountID)
 		if errors.Is(err, ErrNotFound) {
 			return EvictMountsResult{}, nil
 		}
@@ -514,7 +517,7 @@ func (a *BranchActor) execEvictMount(batch *pebble.Batch, branch BranchMeta, raw
 		if mount.BranchName != branch.Name {
 			return EvictMountsResult{}, ErrNotFound
 		}
-		if delErr := batch.Delete(MetaMountKey(mount.ID), nil); delErr != nil {
+		if delErr := batch.Delete(dk.MetaMountKey(mount.ID), nil); delErr != nil {
 			return EvictMountsResult{}, delErr
 		}
 		res := EvictMountsResult{
@@ -526,7 +529,7 @@ func (a *BranchActor) execEvictMount(batch *pebble.Batch, branch BranchMeta, raw
 		if !mount.ReadOnly {
 			branch.WriterEpoch++
 			branch.UpdatedAt = nowNano
-			if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+			if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 				return EvictMountsResult{}, setErr
 			}
 			res.UpdatedBranches = []BranchMeta{branch}
@@ -534,7 +537,7 @@ func (a *BranchActor) execEvictMount(batch *pebble.Batch, branch BranchMeta, raw
 		return res, nil
 	}
 
-	mounts, err := listAllMountsFromReader(batch, branch.Name)
+	mounts, err := listAllMountsFromReader(batch, dk, branch.Name)
 	if err != nil {
 		return EvictMountsResult{}, err
 	}
@@ -546,7 +549,7 @@ func (a *BranchActor) execEvictMount(batch *pebble.Batch, branch BranchMeta, raw
 	hadActiveRW := false
 	hadAnyRW := false
 	for _, m := range mounts {
-		if delErr := batch.Delete(MetaMountKey(m.ID), nil); delErr != nil {
+		if delErr := batch.Delete(dk.MetaMountKey(m.ID), nil); delErr != nil {
 			return EvictMountsResult{}, delErr
 		}
 		res.EvictedMountIDs = append(res.EvictedMountIDs, m.ID)
@@ -563,7 +566,7 @@ func (a *BranchActor) execEvictMount(batch *pebble.Batch, branch BranchMeta, raw
 	if hadActiveRW || (req.explicitBranch && hadAnyRW) {
 		branch.WriterEpoch++
 		branch.UpdatedAt = nowNano
-		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+		if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 			return EvictMountsResult{}, setErr
 		}
 		res.UpdatedBranches = []BranchMeta{branch}
@@ -584,7 +587,7 @@ func (d *DiskStore) ListMounts(branch string, now time.Time) ([]MountMeta, error
 	if now.IsZero() {
 		now = d.now()
 	}
-	return listActiveMountsFromReader(d.db, branch, now.UnixNano())
+	return listActiveMountsFromReader(d.db, d.keys, branch, now.UnixNano())
 }
 
 func (d *DiskStore) HasActiveMounts(branch string, now time.Time) (bool, error) {
@@ -599,7 +602,7 @@ func (d *DiskStore) HasActiveMounts(branch string, now time.Time) (bool, error) 
 	if now.IsZero() {
 		now = d.now()
 	}
-	return hasActiveMountOnReader(d.db, branch, now.UnixNano(), false)
+	return hasActiveMountOnReader(d.db, d.keys, branch, now.UnixNano(), false)
 }
 
 func (d *DiskStore) PruneExpiredMounts(now time.Time) ([]string, error) {
@@ -613,7 +616,7 @@ func (d *DiskStore) PruneExpiredMounts(now time.Time) ([]string, error) {
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
 
-	all, err := listAllMountsFromReader(d.db, "")
+	all, err := listAllMountsFromReader(d.db, d.keys, "")
 	if err != nil {
 		return nil, err
 	}
@@ -631,7 +634,7 @@ func (d *DiskStore) PruneExpiredMounts(now time.Time) ([]string, error) {
 	batch := d.db.NewBatch()
 	defer func() { _ = batch.Close() }()
 	for _, id := range expired {
-		if delErr := batch.Delete(MetaMountKey(id), nil); delErr != nil {
+		if delErr := batch.Delete(d.keys.MetaMountKey(id), nil); delErr != nil {
 			return nil, delErr
 		}
 	}

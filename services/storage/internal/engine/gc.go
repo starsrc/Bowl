@@ -381,14 +381,15 @@ func (d *DiskStore) scanLiveRefsAtSnapshot(packSizes map[uint64]uint64) (map[uin
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	layers, err := collectActiveLayers(snap)
+	dk := d.keys
+	layers, err := collectActiveLayers(snap, dk)
 	if err != nil {
 		return nil, err
 	}
 
 	packLiveRefs := make(map[uint64]map[BlobRef][]BlockRefLocation, len(packSizes))
 	for _, layer := range layers {
-		prefix := LayerDataAllPrefix(layer.layerID)
+		prefix := dk.LayerDataAllPrefix(layer.layerID)
 		iter, iterErr := snap.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
@@ -413,7 +414,7 @@ func (d *DiskStore) scanLiveRefsAtSnapshot(packSizes map[uint64]uint64) (map[uin
 			if _, candidate := packSizes[ref.PackID]; !candidate {
 				continue
 			}
-			_, ino, blkIdx, keyErr := DecodeLayerDataKey(iter.Key())
+			_, ino, blkIdx, keyErr := dk.DecodeLayerDataKey(iter.Key())
 			if keyErr != nil {
 				_ = iter.Close()
 				return nil, keyErr
@@ -439,10 +440,10 @@ func (d *DiskStore) scanLiveRefsAtSnapshot(packSizes map[uint64]uint64) (map[uin
 	return packLiveRefs, nil
 }
 
-func collectActiveLayers(r pebbleReader) ([]activeLayerInfo, error) {
+func collectActiveLayers(r pebbleReader, dk diskKeys) ([]activeLayerInfo, error) {
 	var layers []activeLayerInfo
 
-	bPrefix := MetaBranchPrefix()
+	bPrefix := dk.MetaBranchPrefix()
 	bIter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: bPrefix,
 		UpperBound: PrefixUpperBound(bPrefix),
@@ -468,7 +469,7 @@ func collectActiveLayers(r pebbleReader) ([]activeLayerInfo, error) {
 		return nil, closeErr
 	}
 
-	cPrefix := MetaCommitPrefix()
+	cPrefix := dk.MetaCommitPrefix()
 	cIter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: cPrefix,
 		UpperBound: PrefixUpperBound(cPrefix),
@@ -591,9 +592,10 @@ func (a *BranchActor) execRelocate(batch *pebble.Batch, raw any) (any, error) {
 		return nil, ErrInvalid
 	}
 
+	dk := a.disk.keys
 	var resp relocateResp
 	for _, item := range req.items {
-		key := LayerDataKey(item.loc.LayerID, item.loc.Ino, item.loc.BlockIdx)
+		key := dk.LayerDataKey(item.loc.LayerID, item.loc.Ino, item.loc.BlockIdx)
 		val, closer, err := batch.Get(key)
 		if errors.Is(err, pebble.ErrNotFound) {
 			resp.skipped++

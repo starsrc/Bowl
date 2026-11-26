@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,7 +17,7 @@ func TestStep13_IncrementalPruning_SkipsUntouchedSubtreesCompletely(t *testing.T
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step13-prune",
 		BlockSize: 4096,
@@ -122,18 +123,19 @@ func TestStep13_SparseParentIndex_HardlinkUnlinkWriteRenameAndMultiHopMerge(t *t
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	pKey := LayerParentKey(17, 99, 42)
-	pPrefix := LayerParentPrefix(17, 99)
-	require.Equal(t, len(pPrefix), SplitKey(pKey))
-	require.Equal(t, pPrefix, pKey[:SplitKey(pKey)])
-	require.Equal(t, len(pPrefix), SplitKey(pPrefix))
-	gotL, gotI, gotP, decErr := DecodeLayerParentKey(pKey)
+	dk := newDiskKeys(uuid.MustParse("01936a1b-1234-7000-8000-000000000013"))
+	pKey := dk.LayerParentKey(17, 99, 42)
+	pPrefix := dk.LayerParentPrefix(17, 99)
+	require.Equal(t, len(pPrefix), NodeSplitKey(pKey))
+	require.Equal(t, pPrefix, pKey[:NodeSplitKey(pKey)])
+	require.Equal(t, len(pPrefix), NodeSplitKey(pPrefix))
+	gotL, gotI, gotP, decErr := dk.DecodeLayerParentKey(pKey)
 	require.NoError(t, decErr)
 	require.Equal(t, uint64(17), gotL)
 	require.Equal(t, uint64(99), gotI)
 	require.Equal(t, uint64(42), gotP)
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step13-hardlink",
 		BlockSize: 4096,
@@ -297,7 +299,7 @@ func TestStep13_ConflictKindsStrategiesPathStrategiesPrefixAndPagination(t *test
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step13-conflicts",
 		BlockSize: 4096,
@@ -574,7 +576,7 @@ func TestStep14_RealMerge_SerializesTargetWritesFencesStaleEpochAndDoesNotBlockO
 
 	clk := newStepClock(time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC))
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step14-concurrency",
 		BlockSize: 4096,

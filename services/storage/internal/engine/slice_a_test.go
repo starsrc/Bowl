@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +16,7 @@ func TestStep1_OpenDisk_InitializesSinglePebbleAndSharedPacksWithMainBranch(t *t
 	t.Parallel()
 	dir := t.TempDir()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-alpha",
 		MaxBytes:  16 << 20,
@@ -30,12 +31,14 @@ func TestStep1_OpenDisk_InitializesSinglePebbleAndSharedPacksWithMainBranch(t *t
 	require.NoError(t, err)
 	require.True(t, pebbleInfo.IsDir())
 
-	packsInfo, err := os.Stat(filepath.Join(dir, "packs"))
+	meta := disk.DiskMeta()
+	_, err = uuid.Parse(meta.DiskID)
+	require.NoError(t, err)
+
+	packsInfo, err := os.Stat(filepath.Join(dir, "disks", meta.DiskID, "packs"))
 	require.NoError(t, err)
 	require.True(t, packsInfo.IsDir())
 
-	meta := disk.DiskMeta()
-	require.Equal(t, "disk-alpha", meta.DiskID)
 	require.Equal(t, DefaultBranchName, meta.DefaultBranch)
 	require.Equal(t, uint64(16<<20), meta.MaxBytes)
 	require.Equal(t, uint32(4096), meta.BlockSize)
@@ -58,7 +61,7 @@ func TestStep1_OpenDisk_ReopenPersistsDiskMetaAndRecoversPackAccounting(t *testi
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-persist",
 		MaxBytes:    64 << 10,
@@ -73,9 +76,10 @@ func TestStep1_OpenDisk_ReopenPersistsDiskMetaAndRecoversPackAccounting(t *testi
 	require.Len(t, refs, 1)
 	disk.packs.ReleaseInFlight(refs)
 
+	origDiskID := disk.DiskMeta().DiskID
 	require.NoError(t, disk.Close())
 
-	reopened, err := OpenDisk(DiskOptions{
+	reopened, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		MaxPackSize: 8192,
 	})
@@ -84,7 +88,7 @@ func TestStep1_OpenDisk_ReopenPersistsDiskMetaAndRecoversPackAccounting(t *testi
 		require.NoError(t, reopened.Close())
 	})
 
-	require.Equal(t, "disk-persist", reopened.DiskMeta().DiskID)
+	require.Equal(t, origDiskID, reopened.DiskMeta().DiskID)
 	require.Equal(t, uint64(64<<10), reopened.DiskMeta().MaxBytes)
 	require.Equal(t, uint64(4096), reopened.PackPhysicalBytes())
 
@@ -106,34 +110,36 @@ func TestStep1_OpenDisk_ReopenPersistsDiskMetaAndRecoversPackAccounting(t *testi
 func TestStep3_KeysAndSplitKey_SupportPrefixBloomAndTombstoneEnvelope(t *testing.T) {
 	t.Parallel()
 
-	entryKey := LayerEntryKey(42, 7, []byte("hello.txt"))
-	entryPrefix := LayerEntryPrefix(42, 7)
-	require.Equal(t, len(entryPrefix), SplitKey(entryKey))
-	require.Equal(t, entryPrefix, entryKey[:SplitKey(entryKey)])
-	require.Equal(t, len(entryPrefix), SplitKey(entryPrefix))
+	dk := newDiskKeys(uuid.MustParse("01936a1b-1234-7000-8000-000000000010"))
 
-	xattrKey := LayerXattrKey(42, 7, []byte("user.tag"))
-	xattrPrefix := LayerXattrPrefix(42, 7)
-	require.Equal(t, len(xattrPrefix), SplitKey(xattrKey))
-	require.Equal(t, xattrPrefix, xattrKey[:SplitKey(xattrKey)])
-	require.Equal(t, len(xattrPrefix), SplitKey(xattrPrefix))
+	entryKey := dk.LayerEntryKey(42, 7, []byte("hello.txt"))
+	entryPrefix := dk.LayerEntryPrefix(42, 7)
+	require.Equal(t, len(entryPrefix), NodeSplitKey(entryKey))
+	require.Equal(t, entryPrefix, entryKey[:NodeSplitKey(entryKey)])
+	require.Equal(t, len(entryPrefix), NodeSplitKey(entryPrefix))
 
-	dataKey := LayerDataKey(42, 7, 99)
-	dataPrefix := LayerDataPrefix(42, 7)
-	require.Equal(t, len(dataPrefix), SplitKey(dataKey))
-	require.Equal(t, dataPrefix, dataKey[:SplitKey(dataKey)])
-	require.Equal(t, len(dataPrefix), SplitKey(dataPrefix))
+	xattrKey := dk.LayerXattrKey(42, 7, []byte("user.tag"))
+	xattrPrefix := dk.LayerXattrPrefix(42, 7)
+	require.Equal(t, len(xattrPrefix), NodeSplitKey(xattrKey))
+	require.Equal(t, xattrPrefix, xattrKey[:NodeSplitKey(xattrKey)])
+	require.Equal(t, len(xattrPrefix), NodeSplitKey(xattrPrefix))
 
-	inodeKey := LayerInodeKey(42, 7)
-	require.Equal(t, len(inodeKey), SplitKey(inodeKey))
+	dataKey := dk.LayerDataKey(42, 7, 99)
+	dataPrefix := dk.LayerDataPrefix(42, 7)
+	require.Equal(t, len(dataPrefix), NodeSplitKey(dataKey))
+	require.Equal(t, dataPrefix, dataKey[:NodeSplitKey(dataKey)])
+	require.Equal(t, len(dataPrefix), NodeSplitKey(dataPrefix))
 
-	orphanKey := LayerOrphanKey(42, 7)
-	require.Equal(t, len(orphanKey), SplitKey(orphanKey))
+	inodeKey := dk.LayerInodeKey(42, 7)
+	require.Equal(t, len(inodeKey), NodeSplitKey(inodeKey))
 
-	require.Equal(t, []byte("meta:disk"), MetaDiskKey())
-	require.Equal(t, []byte("meta:branch:feat-1"), MetaBranchKey("feat-1"))
-	require.Equal(t, []byte("meta:mount:mnt-1"), MetaMountKey("mnt-1"))
-	require.NotEmpty(t, MetaCommitKey(9))
+	orphanKey := dk.LayerOrphanKey(42, 7)
+	require.Equal(t, len(orphanKey), NodeSplitKey(orphanKey))
+
+	require.Equal(t, append(dk.Prefix(), []byte("meta:disk")...), dk.MetaDiskKey())
+	require.Equal(t, append(dk.Prefix(), []byte("meta:branch:feat-1")...), dk.MetaBranchKey("feat-1"))
+	require.Equal(t, append(dk.Prefix(), []byte("meta:mount:mnt-1")...), dk.MetaMountKey("mnt-1"))
+	require.NotEmpty(t, dk.MetaCommitKey(9))
 
 	liveEnv := EncodeLiveEnvelope([]byte("payload"))
 	tag, val, err := DecodeEnvelope(liveEnv)
@@ -159,7 +165,7 @@ func TestStep4_PackActor_CoalescesConcurrentWritesAndServesLockFreeReads(t *test
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-coalesce",
 		MaxBytes:    1 << 20,
@@ -207,7 +213,7 @@ func TestStep30_MetadataQuota_EnforcesDiskWideLimitAndReclaimsImmediatelyOnUnlin
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-quota",
 		MaxBytes:    8192,

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,13 +23,13 @@ type forkCallOutcome struct {
 	err    error
 }
 
-func setupSealedPackOrphanDisk(t *testing.T, diskID string, orphanPayload []byte, useTmpfile bool) (disk *DiskStore, dir string, orphanIno uint64) {
+func setupSealedPackOrphanDisk(t *testing.T, diskID string, orphanPayload []byte, useTmpfile bool) (disk *testDisk, dir string, orphanIno uint64) {
 	t.Helper()
 	dir = t.TempDir()
 	ctx := context.Background()
 
 	var err error
-	disk, err = OpenDisk(DiskOptions{
+	disk, err = openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      diskID,
 		MaxBytes:    1 << 20,
@@ -71,13 +70,13 @@ func setupSealedPackOrphanDisk(t *testing.T, diskID string, orphanPayload []byte
 	return disk, dir, orphanIno
 }
 
-func setupActivePackOrphanDisk(t *testing.T, diskID string, orphanPayload []byte, useTmpfile bool) (disk *DiskStore, dir string, orphanIno uint64) {
+func setupActivePackOrphanDisk(t *testing.T, diskID string, orphanPayload []byte, useTmpfile bool) (disk *testDisk, dir string, orphanIno uint64) {
 	t.Helper()
 	dir = t.TempDir()
 	ctx := context.Background()
 
 	var err error
-	disk, err = OpenDisk(DiskOptions{
+	disk, err = openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      diskID,
 		MaxBytes:    1 << 20,
@@ -113,7 +112,7 @@ func setupActivePackOrphanDisk(t *testing.T, diskID string, orphanPayload []byte
 	return disk, dir, orphanIno
 }
 
-func waitForWaitingExclusive(t *testing.T, disk *DiskStore, want int) {
+func waitForWaitingExclusive(t *testing.T, disk *testDisk, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -136,7 +135,7 @@ func TestGCOrphan_SealedPackGCRacingWithCommitTmpfile(t *testing.T) {
 	ctx := context.Background()
 	tmpPayload := bytes.Repeat([]byte{0xa7}, 4096)
 
-	disk, dir, tmpIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-commit-tmpfile", tmpPayload, true)
+	disk, _, tmpIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-commit-tmpfile", tmpPayload, true)
 
 	commitEntered := make(chan struct{})
 	commitOutcomeCh := make(chan commitCallOutcome, 1)
@@ -185,7 +184,7 @@ func TestGCOrphan_SealedPackGCRacingWithCommitTmpfile(t *testing.T) {
 	require.NoError(t, commitOut.err)
 	require.NotZero(t, commitOut.cmt.ID)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	_, err = disk.Link(ctx, DefaultBranchName, tmpIno, RootIno, "promoted.bin")
@@ -201,7 +200,7 @@ func TestGCOrphan_SealedPackGCRacingWithCommitOpenUnlinked(t *testing.T) {
 	ctx := context.Background()
 	openPayload := bytes.Repeat([]byte{0xb3}, 4096)
 
-	disk, dir, openIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-commit-unlinked", openPayload, false)
+	disk, _, openIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-commit-unlinked", openPayload, false)
 
 	commitEntered := make(chan struct{})
 	commitOutcomeCh := make(chan commitCallOutcome, 1)
@@ -250,7 +249,7 @@ func TestGCOrphan_SealedPackGCRacingWithCommitOpenUnlinked(t *testing.T) {
 	require.NoError(t, commitOut.err)
 	require.NotZero(t, commitOut.cmt.ID)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	got, err := disk.Read(ctx, DefaultBranchName, openIno, 0, 4096)
@@ -263,7 +262,7 @@ func TestGCOrphan_SealedPackGCRacingWithForkTmpfile(t *testing.T) {
 	ctx := context.Background()
 	tmpPayload := bytes.Repeat([]byte{0xc5}, 4096)
 
-	disk, dir, tmpIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-fork-tmpfile", tmpPayload, true)
+	disk, _, tmpIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-fork-tmpfile", tmpPayload, true)
 
 	forkEntered := make(chan struct{})
 	forkOutcomeCh := make(chan forkCallOutcome, 1)
@@ -312,7 +311,7 @@ func TestGCOrphan_SealedPackGCRacingWithForkTmpfile(t *testing.T) {
 	require.NoError(t, forkOut.err)
 	require.Equal(t, "feat", forkOut.branch.Name)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	_, err = disk.Link(ctx, DefaultBranchName, tmpIno, RootIno, "promoted.bin")
@@ -328,7 +327,7 @@ func TestGCOrphan_SealedPackGCRacingWithForkOpenUnlinked(t *testing.T) {
 	ctx := context.Background()
 	openPayload := bytes.Repeat([]byte{0xd7}, 4096)
 
-	disk, dir, openIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-fork-unlinked", openPayload, false)
+	disk, _, openIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-fork-unlinked", openPayload, false)
 
 	forkEntered := make(chan struct{})
 	forkOutcomeCh := make(chan forkCallOutcome, 1)
@@ -377,7 +376,7 @@ func TestGCOrphan_SealedPackGCRacingWithForkOpenUnlinked(t *testing.T) {
 	require.NoError(t, forkOut.err)
 	require.Equal(t, "feat", forkOut.branch.Name)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	got, err := disk.Read(ctx, DefaultBranchName, openIno, 0, 4096)
@@ -406,7 +405,7 @@ func TestGCOrphan_ActivePackGCRacingWithCommitAndFork(t *testing.T) {
 			ctx := context.Background()
 			payload := bytes.Repeat([]byte{tc.fillByte}, 4096)
 
-			disk, dir, orphanIno := setupActivePackOrphanDisk(t, "disk-gc-orphan-active-"+tc.name, payload, tc.useTmpfile)
+			disk, _, orphanIno := setupActivePackOrphanDisk(t, "disk-gc-orphan-active-"+tc.name, payload, tc.useTmpfile)
 
 			opEntered := make(chan struct{})
 			gcRelocating := make(chan struct{})
@@ -496,7 +495,7 @@ func TestGCOrphan_ActivePackGCRacingWithCommitAndFork(t *testing.T) {
 			require.NoError(t, opErr)
 			require.False(t, opRacedSeal.Load())
 
-			_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+			_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 			require.ErrorIs(t, statErr, os.ErrNotExist)
 
 			if tc.useTmpfile {
@@ -530,7 +529,7 @@ func TestGCOrphan_InFlightCommitAndForkSerializeRunGC(t *testing.T) {
 			ctx := context.Background()
 			payload := bytes.Repeat([]byte{tc.fillByte}, 4096)
 
-			disk, dir, orphanIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-inflight-"+tc.name, payload, tc.useTmpfile)
+			disk, _, orphanIno := setupSealedPackOrphanDisk(t, "disk-gc-orphan-inflight-"+tc.name, payload, tc.useTmpfile)
 
 			opEntered := make(chan struct{})
 			releaseOp := make(chan struct{})
@@ -603,7 +602,7 @@ func TestGCOrphan_InFlightCommitAndForkSerializeRunGC(t *testing.T) {
 			require.Equal(t, 1, gcOut.stats.PacksDeleted)
 			require.Equal(t, 1, gcOut.stats.BlocksRelocated)
 
-			_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+			_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 			require.ErrorIs(t, statErr, os.ErrNotExist)
 
 			if tc.useTmpfile {
@@ -824,7 +823,7 @@ func TestGCOrphan_ContextCancellationAndAlreadyCancelledFailFast(t *testing.T) {
 	t.Run("CommitAndForkCancelledWhileRunGCHoldsExclusive", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
-		disk, dir, _ := setupSealedPackOrphanDisk(t, "disk-gc-orphan-ctx-shared", bytes.Repeat([]byte{0x51}, 4096), true)
+		disk, _, _ := setupSealedPackOrphanDisk(t, "disk-gc-orphan-ctx-shared", bytes.Repeat([]byte{0x51}, 4096), true)
 
 		gcEntered := make(chan struct{})
 		releaseGC := make(chan struct{})
@@ -876,7 +875,7 @@ func TestGCOrphan_ContextCancellationAndAlreadyCancelledFailFast(t *testing.T) {
 			t.Fatal("timed out waiting for RunGC")
 		}
 
-		_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+		_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 		require.ErrorIs(t, statErr, os.ErrNotExist)
 
 		_, getErr := disk.GetBranch("feat-timeout")
@@ -886,7 +885,7 @@ func TestGCOrphan_ContextCancellationAndAlreadyCancelledFailFast(t *testing.T) {
 	t.Run("RunGCCancelledWhileCommitHoldsShared", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
-		disk, dir, _ := setupSealedPackOrphanDisk(t, "disk-gc-orphan-ctx-gc-commit", bytes.Repeat([]byte{0x52}, 4096), true)
+		disk, _, _ := setupSealedPackOrphanDisk(t, "disk-gc-orphan-ctx-gc-commit", bytes.Repeat([]byte{0x52}, 4096), true)
 
 		commitEntered := make(chan struct{})
 		releaseCommit := make(chan struct{})
@@ -931,14 +930,14 @@ func TestGCOrphan_ContextCancellationAndAlreadyCancelledFailFast(t *testing.T) {
 			t.Fatal("timed out waiting for Commit")
 		}
 
-		_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+		_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 		require.NoError(t, statErr)
 	})
 
 	t.Run("RunGCCancelledWhileForkHoldsShared", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
-		disk, dir, _ := setupSealedPackOrphanDisk(t, "disk-gc-orphan-ctx-gc-fork", bytes.Repeat([]byte{0x53}, 4096), false)
+		disk, _, _ := setupSealedPackOrphanDisk(t, "disk-gc-orphan-ctx-gc-fork", bytes.Repeat([]byte{0x53}, 4096), false)
 
 		forkEntered := make(chan struct{})
 		releaseFork := make(chan struct{})
@@ -983,14 +982,14 @@ func TestGCOrphan_ContextCancellationAndAlreadyCancelledFailFast(t *testing.T) {
 			t.Fatal("timed out waiting for Fork")
 		}
 
-		_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+		_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 		require.NoError(t, statErr)
 	})
 
 	t.Run("AlreadyCancelledFailsFast", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
-		disk, dir, _ := setupSealedPackOrphanDisk(t, "disk-gc-orphan-precancel", bytes.Repeat([]byte{0x54}, 4096), true)
+		disk, _, _ := setupSealedPackOrphanDisk(t, "disk-gc-orphan-precancel", bytes.Repeat([]byte{0x54}, 4096), true)
 
 		beforeBranch, err := disk.GetBranch(DefaultBranchName)
 		require.NoError(t, err)
@@ -1020,7 +1019,7 @@ func TestGCOrphan_ContextCancellationAndAlreadyCancelledFailFast(t *testing.T) {
 		_, getErr := disk.GetBranch("feat-precancel")
 		require.ErrorIs(t, getErr, ErrNotFound)
 
-		_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+		_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 		require.NoError(t, statErr)
 	})
 }
@@ -1032,7 +1031,7 @@ func TestGCOrphan_ConcurrentCommitsAcrossBranchesDoNotBlockEachOther(t *testing.
 	t.Run("CommitAndCommit", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		disk, err := OpenDisk(DiskOptions{
+		disk, err := openTestDisk(testDiskOptions{
 			Dir:         dir,
 			DiskID:      "disk-gc-orphan-concurrent-commits",
 			MaxBytes:    1 << 20,

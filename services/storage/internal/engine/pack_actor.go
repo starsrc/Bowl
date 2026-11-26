@@ -112,6 +112,7 @@ type PackActor struct {
 
 	syncFileHook func(packID uint64) error
 	syncDirHook  func(dir string) error
+	onDirty      func()
 
 	inFlightMu    sync.Mutex
 	inFlightPacks map[uint64]int
@@ -126,13 +127,14 @@ type PackActor struct {
 	closeErr  error
 }
 
-func newPackActor(dir string, maxPackSize uint32) (*PackActor, error) {
+func newPackActor(dir string, maxPackSize uint32, onDirty func()) (*PackActor, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
 	p := &PackActor{
 		dir:              dir,
 		maxPackSize:      maxPackSize,
+		onDirty:          onDirty,
 		dirtyClosedPacks: make(map[uint64]struct{}),
 		packSizes:        make(map[uint64]uint64),
 		inFlightPacks:    make(map[uint64]int),
@@ -352,11 +354,23 @@ func (p *PackActor) SealActiveIf(ctx context.Context, expectedPackID uint64) (bo
 }
 
 func (p *PackActor) SyncActive(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cmd := &packCmd{
 		op:   packOpSync,
 		done: make(chan struct{}),
 	}
-	return p.submit(ctx, cmd)
+	err := p.submit(ctx, cmd)
+	if errors.Is(err, ErrClosed) {
+		select {
+		case <-p.loopDone:
+			return p.closeErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
 }
 
 func (p *PackActor) hasDirty() bool {
@@ -472,6 +486,9 @@ func (p *PackActor) processTick(cmds []*packCmd) {
 				p.dirtyDir = true
 			}
 			p.updateDirtyAtomic()
+			if p.onDirty != nil {
+				p.onDirty()
+			}
 			p.pinInFlight(refs)
 			cmd.refs = refs
 			close(cmd.done)

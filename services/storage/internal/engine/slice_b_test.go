@@ -15,7 +15,7 @@ func TestStep5_BranchActor_CreatedOnDemandAndEvictedSafelyWithoutClosingDisk(t *
 	ctx := context.Background()
 
 	now := time.Unix(1700000000, 0)
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-evict",
 		BlockSize: 4096,
@@ -57,7 +57,7 @@ func TestStep3_POSIXOverlay_FileDirXattrUnlinkRenameAndPersistenceAcrossReopen(t
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-posix",
 		BlockSize:   4096,
@@ -149,7 +149,7 @@ func TestStep3_POSIXOverlay_FileDirXattrUnlinkRenameAndPersistenceAcrossReopen(t
 
 	require.NoError(t, disk.Close())
 
-	reopened, err := OpenDisk(DiskOptions{
+	reopened, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		MaxPackSize: 16384,
 	})
@@ -181,7 +181,7 @@ func TestStep3_OverlayReads_WalkLayerChainAndMaskTombstonesInReadDirAndXattr(t *
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-overlay-mask",
 		BlockSize: 4096,
@@ -207,10 +207,10 @@ func TestStep3_OverlayReads_WalkLayerChainAndMaskTombstonesInReadDirAndXattr(t *
 	baseEntry := Entry{Ino: 10, Mode: ModeRegular | 0o644}
 
 	batch := disk.db.NewBatch()
-	require.NoError(t, batch.Set(LayerInodeKey(initCommit.LayerID, 10), EncodeLiveEnvelope(rawBaseIno), nil))
-	require.NoError(t, batch.Set(LayerEntryKey(initCommit.LayerID, RootIno, []byte("from-base.txt")), EncodeLiveEnvelope(EncodeEntry(baseEntry)), nil))
-	require.NoError(t, batch.Set(LayerXattrKey(initCommit.LayerID, 10, []byte("user.base")), EncodeLiveEnvelope([]byte("v1")), nil))
-	require.NoError(t, batch.Set(LayerXattrKey(initCommit.LayerID, 10, []byte("user.drop")), EncodeLiveEnvelope([]byte("old")), nil))
+	require.NoError(t, batch.Set(disk.keys.LayerInodeKey(initCommit.LayerID, 10), EncodeLiveEnvelope(rawBaseIno), nil))
+	require.NoError(t, batch.Set(disk.keys.LayerEntryKey(initCommit.LayerID, RootIno, []byte("from-base.txt")), EncodeLiveEnvelope(EncodeEntry(baseEntry)), nil))
+	require.NoError(t, batch.Set(disk.keys.LayerXattrKey(initCommit.LayerID, 10, []byte("user.base")), EncodeLiveEnvelope([]byte("v1")), nil))
+	require.NoError(t, batch.Set(disk.keys.LayerXattrKey(initCommit.LayerID, 10, []byte("user.drop")), EncodeLiveEnvelope([]byte("old")), nil))
 	require.NoError(t, batch.Commit(nil))
 	require.NoError(t, batch.Close())
 

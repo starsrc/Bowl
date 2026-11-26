@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -52,7 +51,7 @@ func TestStep30_QuotaAndAccounting_WriteOverwriteUnlinkTruncateFallocateOrphanAn
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step30-core",
 		MaxBytes:    16384,
@@ -160,7 +159,7 @@ func TestStep30_QuotaAndAccounting_WriteOverwriteUnlinkTruncateFallocateOrphanAn
 
 	require.NoError(t, disk.Close())
 
-	reopened, err := OpenDisk(DiskOptions{
+	reopened, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		MaxPackSize: 8192,
 	})
@@ -181,7 +180,7 @@ func TestStep30_GitOpsAndMergeAccounting_CommitForkOrphanMigrationResetDeletePru
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step30-git",
 		MaxBytes:    1 << 20,
@@ -296,7 +295,7 @@ func TestStep30_GitOpsAndMergeAccounting_CommitForkOrphanMigrationResetDeletePru
 
 	require.NoError(t, disk.Close())
 
-	reopened, err := OpenDisk(DiskOptions{Dir: dir})
+	reopened, err := openTestDisk(testDiskOptions{Dir: dir})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, reopened.Close())
@@ -309,7 +308,7 @@ func TestStep30_ConcurrentBranchActorsCASQuotaAndCommitFailureRollback(t *testin
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step30-concurrent",
 		MaxBytes:    16384,
@@ -418,7 +417,7 @@ func TestStep31_StatFSBranch_ReportsPerBranchLogicalUsedAndSharedDiskAvail(t *te
 	ctx := context.Background()
 
 	const totalQuota uint64 = 100 * 4096
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step31-statfs",
 		MaxBytes:    totalQuota,
@@ -491,7 +490,7 @@ func TestStep28_BackgroundGCWakeup_TriggersOnDeleteCommitPruneDeleteBranchAndRes
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:          dir,
 		DiskID:       "disk-step28-gc-wake",
 		MaxBytes:     1 << 20,
@@ -522,7 +521,7 @@ func TestStep28_BackgroundGCWakeup_TriggersOnDeleteCommitPruneDeleteBranchAndRes
 	require.NoError(t, err)
 	require.NoError(t, disk.DeleteCommit(ctx, c1.ID))
 
-	packsDir := filepath.Join(dir, "packs")
+	packsDir := disk.packs.dir
 	require.Eventually(t, func() bool {
 		_, statErr := os.Stat(packFilePath(packsDir, 1))
 		return errors.Is(statErr, os.ErrNotExist)
@@ -579,7 +578,7 @@ func TestStep29_ActivePackGC_InspectsConditionallySealsAndReclaimsLowWatermarkPa
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step29-active-gc",
 		MaxBytes:    1 << 20,
@@ -651,7 +650,7 @@ func TestStep29_ActivePackGC_PreservesConcurrentWriteAndInFlightBlockBetweenScan
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step29-race",
 		MaxBytes:    1 << 20,
@@ -731,7 +730,7 @@ func TestStep30_FastForwardMergeAndCommittedFileCoWTruncateFallocateAndReopen(t 
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step30-ff-cow",
 		MaxBytes:    1 << 20,
@@ -795,7 +794,7 @@ func TestStep30_FastForwardMergeAndCommittedFileCoWTruncateFallocateAndReopen(t 
 
 	require.NoError(t, disk.Close())
 
-	reopened, err := OpenDisk(DiskOptions{Dir: dir})
+	reopened, err := openTestDisk(testDiskOptions{Dir: dir})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, reopened.Close())

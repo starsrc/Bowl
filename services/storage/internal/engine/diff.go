@@ -14,6 +14,7 @@ import (
 
 type layerView struct {
 	r      pebbleReader
+	keys   diskKeys
 	layers []uint64
 }
 
@@ -21,7 +22,7 @@ func (v layerView) getInode(ino uint64) (Inode, bool, error) {
 	if v.r == nil || len(v.layers) == 0 {
 		return Inode{}, false, nil
 	}
-	inode, err := overlayGetInode(v.r, v.layers, ino)
+	inode, err := overlayGetInode(v.r, v.keys, v.layers, ino)
 	if errors.Is(err, ErrNotFound) {
 		return Inode{}, false, nil
 	}
@@ -35,7 +36,7 @@ func (v layerView) readDir(parent uint64) ([]DirEntry, error) {
 	if v.r == nil || len(v.layers) == 0 {
 		return nil, nil
 	}
-	return overlayReadDir(v.r, v.layers, parent)
+	return overlayReadDir(v.r, v.keys, v.layers, parent)
 }
 
 func (v layerView) readAllXattrs(ino uint64) (map[string][]byte, error) {
@@ -45,7 +46,7 @@ func (v layerView) readAllXattrs(ino uint64) (map[string][]byte, error) {
 	}
 	seen := make(map[string]struct{})
 	for _, layerID := range v.layers {
-		prefix := LayerXattrPrefix(layerID, ino)
+		prefix := v.keys.LayerXattrPrefix(layerID, ino)
 		iter, err := v.r.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
@@ -54,7 +55,7 @@ func (v layerView) readAllXattrs(ino uint64) (map[string][]byte, error) {
 			return nil, err
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, nameBytes, decKeyErr := DecodeLayerXattrKey(iter.Key())
+			_, _, nameBytes, decKeyErr := v.keys.DecodeLayerXattrKey(iter.Key())
 			if decKeyErr != nil {
 				_ = iter.Close()
 				return nil, decKeyErr
@@ -92,7 +93,7 @@ func (v layerView) readAllDataRefs(ino uint64) (map[uint64]BlobRef, error) {
 	}
 	seen := make(map[uint64]struct{})
 	for _, layerID := range v.layers {
-		prefix := LayerDataPrefix(layerID, ino)
+		prefix := v.keys.LayerDataPrefix(layerID, ino)
 		iter, err := v.r.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
@@ -101,7 +102,7 @@ func (v layerView) readAllDataRefs(ino uint64) (map[uint64]BlobRef, error) {
 			return nil, err
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, blkIdx, decKeyErr := DecodeLayerDataKey(iter.Key())
+			_, _, blkIdx, decKeyErr := v.keys.DecodeLayerDataKey(iter.Key())
 			if decKeyErr != nil {
 				_ = iter.Close()
 				return nil, decKeyErr
@@ -139,7 +140,7 @@ func (v layerView) scanParentDirs(ino uint64) ([]uint64, error) {
 	seen := make(map[uint64]struct{})
 	var parents []uint64
 	for _, layerID := range v.layers {
-		prefix := LayerParentPrefix(layerID, ino)
+		prefix := v.keys.LayerParentPrefix(layerID, ino)
 		iter, err := v.r.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
@@ -148,7 +149,7 @@ func (v layerView) scanParentDirs(ino uint64) ([]uint64, error) {
 			return nil, err
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, parentDirIno, decKeyErr := DecodeLayerParentKey(iter.Key())
+			_, _, parentDirIno, decKeyErr := v.keys.DecodeLayerParentKey(iter.Key())
 			if decKeyErr != nil {
 				_ = iter.Close()
 				return nil, decKeyErr
@@ -257,8 +258,9 @@ func discoverDirtySet(base, target, source layerView, targetIsBase bool) (*dirty
 
 	targetParentSeedDirs := make(map[uint64]struct{})
 
+	dk := base.keys
 	for _, ls := range deltaLayers {
-		start, end := LayerRangeBounds(ls.layerID)
+		start, end := dk.LayerRangeBounds(ls.layerID)
 		iter, err := ls.r.NewIter(&pebble.IterOptions{
 			LowerBound: start,
 			UpperBound: end,
@@ -268,40 +270,41 @@ func discoverDirtySet(base, target, source layerView, targetIsBase bool) (*dirty
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
 			k := iter.Key()
-			if len(k) < 16 {
+			sub, ok := dk.stripPrefix(k)
+			if !ok || len(sub) < 16 {
 				continue
 			}
 			switch {
-			case len(k) >= LayerEntryPrefixLen && bytes.Equal(k[10:17], layerEntryTagBytes):
-				_, parentIno, _, decErr := DecodeLayerEntryKey(k)
+			case len(sub) >= LayerEntryPrefixLen && bytes.Equal(sub[10:17], layerEntryTagBytes):
+				_, parentIno, _, decErr := dk.DecodeLayerEntryKey(k)
 				if decErr != nil {
 					_ = iter.Close()
 					return nil, decErr
 				}
 				ds.dirtyDirs[parentIno] = struct{}{}
-			case len(k) == LayerInodeKeyLen && bytes.Equal(k[10:17], layerInodeTagBytes):
-				_, ino, decErr := DecodeLayerInodeKey(k)
+			case len(sub) == LayerInodeKeyLen && bytes.Equal(sub[10:17], layerInodeTagBytes):
+				_, ino, decErr := dk.DecodeLayerInodeKey(k)
 				if decErr != nil {
 					_ = iter.Close()
 					return nil, decErr
 				}
 				ds.dirtyInos[ino] = struct{}{}
-			case len(k) >= LayerXattrPrefixLen && bytes.Equal(k[10:17], layerXattrTagBytes):
-				_, ino, _, decErr := DecodeLayerXattrKey(k)
+			case len(sub) >= LayerXattrPrefixLen && bytes.Equal(sub[10:17], layerXattrTagBytes):
+				_, ino, _, decErr := dk.DecodeLayerXattrKey(k)
 				if decErr != nil {
 					_ = iter.Close()
 					return nil, decErr
 				}
 				ds.dirtyInos[ino] = struct{}{}
-			case len(k) == LayerDataKeyLen && bytes.Equal(k[10:16], layerDataTagBytes):
-				_, ino, _, decErr := DecodeLayerDataKey(k)
+			case len(sub) == LayerDataKeyLen && bytes.Equal(sub[10:16], layerDataTagBytes):
+				_, ino, _, decErr := dk.DecodeLayerDataKey(k)
 				if decErr != nil {
 					_ = iter.Close()
 					return nil, decErr
 				}
 				ds.dirtyInos[ino] = struct{}{}
-			case len(k) == LayerParentKeyLen && bytes.Equal(k[10:18], layerParentTagBytes):
-				_, ino, parentDirIno, decErr := DecodeLayerParentKey(k)
+			case len(sub) == LayerParentKeyLen && bytes.Equal(sub[10:18], layerParentTagBytes):
+				_, ino, parentDirIno, decErr := dk.DecodeLayerParentKey(k)
 				if decErr != nil {
 					_ = iter.Close()
 					return nil, decErr
@@ -1955,36 +1958,37 @@ func (d *DiskStore) Diff(ctx context.Context, opts DiffOptions) (*DiffResult, er
 		return nil, err
 	}
 
+	dk := d.keys
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	srcBranch, err := readBranchMeta(snap, opts.SourceBranch)
+	srcBranch, err := readBranchMeta(snap, dk, opts.SourceBranch)
 	if err != nil {
 		return nil, err
 	}
-	tgtBranch, err := readBranchMeta(snap, opts.TargetBranch)
-	if err != nil {
-		return nil, err
-	}
-
-	lca, err := findLCA(snap, srcBranch.HeadCommitID, tgtBranch.HeadCommitID)
+	tgtBranch, err := readBranchMeta(snap, dk, opts.TargetBranch)
 	if err != nil {
 		return nil, err
 	}
 
-	_, baseLayers, err := resolveCommitLayers(snap, lca)
+	lca, err := findLCA(snap, dk, srcBranch.HeadCommitID, tgtBranch.HeadCommitID)
+	if err != nil {
+		return nil, err
+	}
+
+	_, baseLayers, err := resolveCommitLayers(snap, dk, lca)
 	if err != nil {
 		return nil, err
 	}
 	targetIsBase := tgtBranch.HeadCommitID == lca
 	targetLayers := baseLayers
 	if !targetIsBase {
-		_, targetLayers, err = resolveCommitLayers(snap, tgtBranch.HeadCommitID)
+		_, targetLayers, err = resolveCommitLayers(snap, dk, tgtBranch.HeadCommitID)
 		if err != nil {
 			return nil, err
 		}
 	}
-	_, sourceLayers, err := resolveCommitLayers(snap, srcBranch.HeadCommitID)
+	_, sourceLayers, err := resolveCommitLayers(snap, dk, srcBranch.HeadCommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -1993,9 +1997,9 @@ func (d *DiskStore) Diff(ctx context.Context, opts DiffOptions) (*DiffResult, er
 		baseCommitID:         lca,
 		targetCommitID:       tgtBranch.HeadCommitID,
 		sourceCommitID:       srcBranch.HeadCommitID,
-		baseView:             layerView{r: snap, layers: baseLayers},
-		targetView:           layerView{r: snap, layers: targetLayers},
-		sourceView:           layerView{r: snap, layers: sourceLayers},
+		baseView:             layerView{r: snap, keys: dk, layers: baseLayers},
+		targetView:           layerView{r: snap, keys: dk, layers: targetLayers},
+		sourceView:           layerView{r: snap, keys: dk, layers: sourceLayers},
 		targetIsBase:         targetIsBase,
 		includeTargetSummary: true,
 		pathPrefix:           opts.PathPrefix,
@@ -2013,26 +2017,27 @@ func (d *DiskStore) DiffCommits(ctx context.Context, opts DiffCommitsOptions) (*
 		return nil, ErrInvalid
 	}
 
+	dk := d.keys
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, baseLayers, err := resolveCommitLayers(snap, opts.BaseCommitID)
+	_, baseLayers, err := resolveCommitLayers(snap, dk, opts.BaseCommitID)
 	if err != nil {
 		return nil, err
 	}
-	_, sourceLayers, err := resolveCommitLayers(snap, opts.SourceCommitID)
+	_, sourceLayers, err := resolveCommitLayers(snap, dk, opts.SourceCommitID)
 	if err != nil {
 		return nil, err
 	}
 
-	baseView := layerView{r: snap, layers: baseLayers}
+	baseView := layerView{r: snap, keys: dk, layers: baseLayers}
 	return d.diffViews(ctx, diffRunParams{
 		baseCommitID:         opts.BaseCommitID,
 		targetCommitID:       opts.BaseCommitID,
 		sourceCommitID:       opts.SourceCommitID,
 		baseView:             baseView,
 		targetView:           baseView,
-		sourceView:           layerView{r: snap, layers: sourceLayers},
+		sourceView:           layerView{r: snap, keys: dk, layers: sourceLayers},
 		targetIsBase:         true,
 		includeTargetSummary: false,
 		pathPrefix:           opts.PathPrefix,
@@ -2050,14 +2055,15 @@ func (d *DiskStore) DiffWork(ctx context.Context, branch string, opts DiffWorkOp
 		return nil, err
 	}
 
+	dk := d.keys
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	bm, err := readBranchMeta(snap, branch)
+	bm, err := readBranchMeta(snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	_, headLayers, err := resolveCommitLayers(snap, bm.HeadCommitID)
+	_, headLayers, err := resolveCommitLayers(snap, dk, bm.HeadCommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -2069,14 +2075,14 @@ func (d *DiskStore) DiffWork(ctx context.Context, branch string, opts DiffWorkOp
 		sourceLayers = append(sourceLayers, headLayers...)
 	}
 
-	baseView := layerView{r: snap, layers: headLayers}
+	baseView := layerView{r: snap, keys: dk, layers: headLayers}
 	return d.diffViews(ctx, diffRunParams{
 		baseCommitID:         bm.HeadCommitID,
 		targetCommitID:       bm.HeadCommitID,
 		sourceCommitID:       0,
 		baseView:             baseView,
 		targetView:           baseView,
-		sourceView:           layerView{r: snap, layers: sourceLayers},
+		sourceView:           layerView{r: snap, keys: dk, layers: sourceLayers},
 		targetIsBase:         true,
 		includeTargetSummary: false,
 		pathPrefix:           opts.PathPrefix,

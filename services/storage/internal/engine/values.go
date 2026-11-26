@@ -58,6 +58,13 @@ type MountMeta struct {
 	ExpiresAt   int64
 }
 
+type MountBranchResult struct {
+	Mount           MountMeta
+	RootInode       Inode
+	UpdatedBranch   *BranchMeta
+	DeletedMountIDs []string
+}
+
 type EvictMountsResult struct {
 	EvictedCount    uint32
 	EvictedMountIDs []string

@@ -367,7 +367,7 @@ func (a *BranchActor) execCmd(batch *pebble.Batch, quota *tickQuotaTracker, cmd 
 	case branchOpMerge:
 		return a.execMerge(batch, branch, cmd.req)
 	case branchOpMount:
-		return a.execMountBranch(batch, quota, branch, cmd.req)
+		return a.execMountBranch(batch, quota, branch, layers, cmd.req)
 	case branchOpRenewMount:
 		return a.execRenewMount(batch, branch, cmd.req)
 	case branchOpEvictMount:

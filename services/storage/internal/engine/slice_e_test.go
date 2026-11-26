@@ -425,8 +425,9 @@ func TestStep11_Merge_DefaultFastForwardNoFastForwardAndUpToDateNoOp(t *testing.
 	cFeat, err := disk.Commit(ctx, "feat", "feat commit")
 	require.NoError(t, err)
 
-	mount, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	mountRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
+	mount := mountRes.Mount
 	staleCtx := WithWriterEpoch(ctx, mount.WriterEpoch)
 	clk.Advance(31 * time.Second)
 

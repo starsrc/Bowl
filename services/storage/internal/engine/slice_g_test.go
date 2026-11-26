@@ -149,12 +149,14 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	cFork, featBranch, err := disk.Fork(ctx, DefaultBranchName, "feat", "fork feat")
 	require.NoError(t, err)
 
-	expMount, err := disk.MountBranch(ctx, "feat", true, false, 10*time.Second)
+	expMountRes, err := disk.MountBranch(ctx, "feat", true, false, 10*time.Second)
 	require.NoError(t, err)
+	expMount := expMountRes.Mount
 	clk.Advance(15 * time.Second)
 
-	activeMount, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	activeMountRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
+	activeMount := activeMountRes.Mount
 
 	commits, err := disk.ListCommits()
 	require.NoError(t, err)
@@ -246,15 +248,17 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	mainBefore, err := disk.GetBranch(DefaultBranchName)
 	require.NoError(t, err)
 
-	ro1, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
+	ro1Res, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
 	require.NoError(t, err)
+	ro1 := ro1Res.Mount
 	require.True(t, ro1.ReadOnly)
 	require.Equal(t, uint64(0), ro1.WriterEpoch)
 	require.Equal(t, clk.Now().UnixNano(), ro1.MountedAt)
 	require.Equal(t, clk.Now().Add(30*time.Second).UnixNano(), ro1.ExpiresAt)
 
-	ro2, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
+	ro2Res, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
 	require.NoError(t, err)
+	ro2 := ro2Res.Mount
 	require.True(t, ro2.ReadOnly)
 	require.Equal(t, uint64(0), ro2.WriterEpoch)
 
@@ -262,8 +266,9 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	require.NoError(t, err)
 	require.Equal(t, mainBefore.WriterEpoch, mainAfterRO.WriterEpoch)
 
-	rw1, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	rw1Res, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
+	rw1 := rw1Res.Mount
 	require.False(t, rw1.ReadOnly)
 	require.Equal(t, mainBefore.WriterEpoch+1, rw1.WriterEpoch)
 
@@ -273,8 +278,9 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	require.NoError(t, err)
 	require.Equal(t, rw1.WriterEpoch, mainAfterReject.WriterEpoch)
 
-	featRW, err := disk.MountBranch(ctx, "feat", false, false, 20*time.Second)
+	featRWRes, err := disk.MountBranch(ctx, "feat", false, false, 20*time.Second)
 	require.NoError(t, err)
+	featRW := featRWRes.Mount
 	require.Equal(t, "feat", featRW.BranchName)
 	require.False(t, featRW.ReadOnly)
 
@@ -321,8 +327,9 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	_, err = disk.RenewMount(ctx, "feat", ro1.ID, true, 0, 30*time.Second)
 	require.ErrorIs(t, err, ErrNotFound)
 
-	rw2, err := disk.MountBranch(ctx, DefaultBranchName, false, true, 30*time.Second)
+	rw2Res, err := disk.MountBranch(ctx, DefaultBranchName, false, true, 30*time.Second)
 	require.NoError(t, err)
+	rw2 := rw2Res.Mount
 	require.Equal(t, rw1.WriterEpoch+1, rw2.WriterEpoch)
 	_, err = disk.GetMount(rw1.ID)
 	require.ErrorIs(t, err, ErrNotFound)
@@ -345,8 +352,9 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	_, err = disk.RenewMount(ctx, "feat", featRW.ID, false, featRW.WriterEpoch, 30*time.Second)
 	require.ErrorIs(t, err, ErrNotFound)
 
-	featRW2, err := disk.MountBranch(ctx, "feat", false, false, 30*time.Second)
+	featRW2Res, err := disk.MountBranch(ctx, "feat", false, false, 30*time.Second)
 	require.NoError(t, err)
+	featRW2 := featRW2Res.Mount
 	require.Equal(t, featRW.WriterEpoch+1, featRW2.WriterEpoch)
 	_, err = disk.GetMount(featRW.ID)
 	require.ErrorIs(t, err, ErrNotFound)
@@ -361,8 +369,9 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	_, err = disk.RenewMount(ctx, DefaultBranchName, ro1.ID, true, 0, 30*time.Second)
 	require.ErrorIs(t, err, ErrNotFound)
 
-	ro3, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
+	ro3Res, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
 	require.NoError(t, err)
+	ro3 := ro3Res.Mount
 	mainEpochBeforeROEvict := rw2.WriterEpoch
 
 	_, err = disk.EvictMounts(ctx, "feat", ro3.ID)
@@ -393,10 +402,12 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	_, err = disk.Create(WithWriterEpoch(ctx, rw2.WriterEpoch), DefaultBranchName, RootIno, "after-evict.txt", 0o644, 0, 0)
 	require.ErrorIs(t, err, ErrStaleEpoch)
 
-	mainRW3, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	mainRW3Res, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
-	mainRO4, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
+	mainRW3 := mainRW3Res.Mount
+	mainRO4Res, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
 	require.NoError(t, err)
+	mainRO4 := mainRO4Res.Mount
 
 	evictBranch, err := disk.EvictMounts(ctx, DefaultBranchName, "")
 	require.NoError(t, err)
@@ -411,10 +422,12 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	require.NoError(t, err)
 	require.True(t, featActiveStill)
 
-	mainRW4, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	mainRW4Res, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
-	expRO, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 5*time.Second)
+	mainRW4 := mainRW4Res.Mount
+	expRORes, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 5*time.Second)
 	require.NoError(t, err)
+	expRO := expRORes.Mount
 	clk.Advance(6 * time.Second)
 
 	evictAll, err := disk.EvictMounts(ctx, "", "")
@@ -458,10 +471,12 @@ func TestStep20_MountGates_DeleteBranchResetMergeForkCommitAndExpiredZombieFenci
 	cBase, err := disk.Commit(ctx, DefaultBranchName, "base")
 	require.NoError(t, err)
 
-	mainRW, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	mainRWRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
-	mainRO, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
+	mainRW := mainRWRes.Mount
+	mainRORes, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
 	require.NoError(t, err)
+	mainRO := mainRORes.Mount
 
 	rwCtx := WithWriterEpoch(ctx, mainRW.WriterEpoch)
 	_, err = disk.Write(rwCtx, DefaultBranchName, baseF.Ino, 0, []byte("v2"))
@@ -476,8 +491,9 @@ func TestStep20_MountGates_DeleteBranchResetMergeForkCommitAndExpiredZombieFenci
 	require.NoError(t, disk.Unmount(ctx, mainRW.ID))
 	require.NoError(t, disk.Unmount(ctx, mainRO.ID))
 
-	tempRO, err := disk.MountBranch(ctx, "temp", true, false, 20*time.Second)
+	tempRORes, err := disk.MountBranch(ctx, "temp", true, false, 20*time.Second)
 	require.NoError(t, err)
+	tempRO := tempRORes.Mount
 	require.ErrorIs(t, disk.DeleteBranch(ctx, "temp"), ErrDiskMounted)
 	require.NoError(t, disk.Unmount(ctx, tempRO.ID))
 
@@ -488,14 +504,16 @@ func TestStep20_MountGates_DeleteBranchResetMergeForkCommitAndExpiredZombieFenci
 	clk.Advance(21 * time.Second)
 	require.NoError(t, disk.DeleteBranch(ctx, "temp"))
 
-	resetRO, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 20*time.Second)
+	resetRORes, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 20*time.Second)
 	require.NoError(t, err)
+	resetRO := resetRORes.Mount
 	_, err = disk.Reset(ctx, DefaultBranchName, cBase.ID)
 	require.ErrorIs(t, err, ErrDiskMounted)
 	require.NoError(t, disk.Unmount(ctx, resetRO.ID))
 
-	zombieReset, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 20*time.Second)
+	zombieResetRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 20*time.Second)
 	require.NoError(t, err)
+	zombieReset := zombieResetRes.Mount
 	_, err = disk.Reset(ctx, DefaultBranchName, cBase.ID)
 	require.ErrorIs(t, err, ErrDiskMounted)
 
@@ -519,10 +537,12 @@ func TestStep20_MountGates_DeleteBranchResetMergeForkCommitAndExpiredZombieFenci
 	_, err = disk.Commit(ctx, "src", "src commit")
 	require.NoError(t, err)
 
-	tgtRW, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	tgtRWRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
-	srcRW, err := disk.MountBranch(ctx, "src", false, false, 30*time.Second)
+	tgtRW := tgtRWRes.Mount
+	srcRWRes, err := disk.MountBranch(ctx, "src", false, false, 30*time.Second)
 	require.NoError(t, err)
+	srcRW := srcRWRes.Mount
 
 	dryRes, err := disk.Merge(ctx, MergeOptions{
 		SourceBranch: "src",
@@ -539,8 +559,9 @@ func TestStep20_MountGates_DeleteBranchResetMergeForkCommitAndExpiredZombieFenci
 	require.ErrorIs(t, err, ErrDiskMounted)
 
 	require.NoError(t, disk.Unmount(ctx, tgtRW.ID))
-	tgtRO, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
+	tgtRORes, err := disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
 	require.NoError(t, err)
+	tgtRO := tgtRORes.Mount
 	_, err = disk.Merge(ctx, MergeOptions{
 		SourceBranch: "src",
 		TargetBranch: DefaultBranchName,
@@ -555,8 +576,9 @@ func TestStep20_MountGates_DeleteBranchResetMergeForkCommitAndExpiredZombieFenci
 	require.ErrorIs(t, err, ErrDiskMounted)
 
 	require.NoError(t, disk.Unmount(ctx, srcRW.ID))
-	srcRO, err := disk.MountBranch(ctx, "src", true, false, 30*time.Second)
+	srcRORes, err := disk.MountBranch(ctx, "src", true, false, 30*time.Second)
 	require.NoError(t, err)
+	srcRO := srcRORes.Mount
 
 	mergeRes, err := disk.Merge(ctx, MergeOptions{
 		SourceBranch: "src",
@@ -576,8 +598,9 @@ func TestStep20_MountGates_DeleteBranchResetMergeForkCommitAndExpiredZombieFenci
 	_, err = disk.Commit(ctx, "src2", "src2 commit")
 	require.NoError(t, err)
 
-	zombieMerge, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 20*time.Second)
+	zombieMergeRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 20*time.Second)
 	require.NoError(t, err)
+	zombieMerge := zombieMergeRes.Mount
 	clk.Advance(21 * time.Second)
 
 	mergeRes2, err := disk.Merge(ctx, MergeOptions{

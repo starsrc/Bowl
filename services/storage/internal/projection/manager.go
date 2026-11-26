@@ -106,8 +106,6 @@ type ControlManager struct {
 	closeDisk         func(*engine.DiskStore) error
 	getBranch         func(*engine.DiskStore, string) (engine.BranchMeta, error)
 	getCommit         func(*engine.DiskStore, uint64) (engine.CommitMeta, error)
-	getAttr           func(*engine.DiskStore, context.Context, string, uint64) (engine.Inode, error)
-	unmount           func(*engine.DiskStore, context.Context, string) error
 	mountLeaseTTL     time.Duration
 	syncWriteTimeout  time.Duration
 	reconcileInterval time.Duration
@@ -195,8 +193,6 @@ func NewControlManager(opts ManagerOptions) (*ControlManager, error) {
 		closeDisk:         (*engine.DiskStore).Close,
 		getBranch:         (*engine.DiskStore).GetBranch,
 		getCommit:         (*engine.DiskStore).GetCommit,
-		getAttr:           (*engine.DiskStore).GetAttr,
-		unmount:           (*engine.DiskStore).Unmount,
 		mountLeaseTTL:     leaseTTL,
 		syncWriteTimeout:  syncWriteTimeout,
 		reconcileInterval: reconcileInterval,
@@ -904,55 +900,37 @@ func (m *ControlManager) PruneCommits(ctx context.Context, diskID uuid.UUID) (in
 func (m *ControlManager) MountBranch(ctx context.Context, diskID uuid.UUID, branch string, readOnly, force bool) (MountBranchResult, error) {
 	var out MountBranchResult
 	err := m.withEntry(diskID, true, func(entry *diskEntry) error {
-		var deletedRWIDs []uuid.UUID
-		if !readOnly {
-			if existing, listErr := entry.store.ListMounts(branch, m.now()); listErr == nil {
-				for _, em := range existing {
-					if !em.ReadOnly {
-						if parsed, pErr := uuid.Parse(em.ID); pErr == nil && parsed != uuid.Nil {
-							deletedRWIDs = append(deletedRWIDs, parsed)
-						}
-					}
-				}
-			}
-		}
-
-		mm, mErr := entry.store.MountBranch(ctx, branch, readOnly, force, m.mountLeaseTTL)
+		res, mErr := entry.store.MountBranch(ctx, branch, readOnly, force, m.mountLeaseTTL)
 		if mErr != nil {
 			return mErr
 		}
-		rootInode, attrErr := m.getAttr(entry.store, ctx, branch, engine.RootIno)
-		if attrErr != nil {
-			unmountErr := m.unmount(entry.store, ctx, mm.ID)
-			if !readOnly || unmountErr != nil {
-				m.queue.markDirty(diskID, false)
-			}
-			return attrErr
-		}
-		rec, convErr := mountMetaToRecord(diskID, mm)
+		rec, convErr := mountMetaToRecord(diskID, res.Mount)
 		if convErr != nil {
 			m.queue.markDirty(diskID, false)
 			return convErr
 		}
 		out = MountBranchResult{
 			Mount:     rec,
-			RootInode: rootInode,
+			RootInode: res.RootInode,
 		}
 
-		if !readOnly {
-			if br, brErr := m.getBranch(entry.store, branch); brErr == nil {
-				brRec := branchMetaToRecord(diskID, br)
-				m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-					return store.UpsertMount(pgCtx, out.Mount, &brRec, deletedRWIDs)
-				})
-			} else {
-				m.queue.markDirty(diskID, false)
+		var deletedMountIDs []uuid.UUID
+		if len(res.DeletedMountIDs) > 0 {
+			deletedMountIDs = make([]uuid.UUID, 0, len(res.DeletedMountIDs))
+			for _, rawID := range res.DeletedMountIDs {
+				if parsed, pErr := uuid.Parse(rawID); pErr == nil && parsed != uuid.Nil {
+					deletedMountIDs = append(deletedMountIDs, parsed)
+				}
 			}
-		} else {
-			m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-				return store.UpsertMount(pgCtx, out.Mount, nil, nil)
-			})
 		}
+		var updatedBranch *BranchRecord
+		if res.UpdatedBranch != nil {
+			brRec := branchMetaToRecord(diskID, *res.UpdatedBranch)
+			updatedBranch = &brRec
+		}
+		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+			return store.UpsertMount(pgCtx, out.Mount, updatedBranch, deletedMountIDs)
+		})
 		return nil
 	})
 	if err != nil {

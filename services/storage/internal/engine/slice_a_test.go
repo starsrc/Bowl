@@ -160,14 +160,14 @@ func TestStep3_KeysAndSplitKey_SupportPrefixBloomAndTombstoneEnvelope(t *testing
 	require.Empty(t, val)
 }
 
-func TestStep4_PackActor_CoalescesConcurrentWritesAndServesLockFreeReads(t *testing.T) {
+func TestStep4_PackStore_SerializesConcurrentAppendsAndServesConcurrentReads(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ctx := context.Background()
 
 	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
-		DiskID:      "disk-coalesce",
+		DiskID:      "disk-packstore-sync",
 		MaxBytes:    1 << 20,
 		BlockSize:   4096,
 		MaxPackSize: 64 << 10,
@@ -184,10 +184,9 @@ func TestStep4_PackActor_CoalescesConcurrentWritesAndServesLockFreeReads(t *test
 
 	var wg sync.WaitGroup
 	for i := range workers {
-		payloads[i] = bytes.Repeat([]byte{byte(i + 1)}, 4096)
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+		idx := i
+		payloads[idx] = bytes.Repeat([]byte{byte(idx + 1)}, 4096)
+		wg.Go(func() {
 			gotRefs, appendErr := disk.packs.AppendBlocks(ctx, [][]byte{payloads[idx]})
 			if appendErr != nil {
 				errs[idx] = appendErr
@@ -195,17 +194,22 @@ func TestStep4_PackActor_CoalescesConcurrentWritesAndServesLockFreeReads(t *test
 			}
 			refs[idx] = gotRefs[0]
 			disk.packs.ReleaseInFlight(gotRefs)
-		}(i)
+		})
 	}
 	wg.Wait()
 
+	offsets := make(map[uint32]struct{}, workers)
 	for i := range workers {
 		require.NoError(t, errs[i])
 		require.Equal(t, uint64(1), refs[i].PackID)
+		require.Equal(t, uint32(4096), refs[i].Length)
+		offsets[refs[i].Offset] = struct{}{}
 		got, readErr := disk.packs.ReadBlock(refs[i])
 		require.NoError(t, readErr)
 		require.Equal(t, payloads[i], got)
 	}
+	require.Len(t, offsets, workers)
+	require.Equal(t, uint64(workers*4096), disk.PackPhysicalBytes())
 }
 
 func TestStep30_MetadataQuota_EnforcesDiskWideLimitAndReclaimsImmediatelyOnUnlink(t *testing.T) {

@@ -20,7 +20,7 @@ type DiskStore struct {
 	keys         diskKeys
 	dir          string
 	db           *pebble.DB
-	packs        *PackActor
+	packs        *PackStore
 	now          func() time.Time
 	blockSize    uint32
 	actorIdleTTL time.Duration

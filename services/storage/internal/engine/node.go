@@ -654,7 +654,7 @@ func (n *NodeStore) instantiateDiskStore(diskID uuid.UUID, meta DiskMeta, fresh 
 		}
 	}
 
-	packs, err := newPackActor(n.packsDir(diskID), n.maxPackSize, func() {
+	packs, err := newPackStore(n.packsDir(diskID), n.maxPackSize, func() {
 		n.markPackDirty(diskID, ds)
 	})
 	if err != nil {

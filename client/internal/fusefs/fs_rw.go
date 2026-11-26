@@ -157,7 +157,6 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	epoch := fs.cache.version()
 	if status = fs.CheckWritable(); status != fuse.OK {
 		return 0, status
 	}
@@ -198,7 +197,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 	if n, updatedInode, local, st := fs.tmpMgr.Write(input.NodeId, input.Offset, data, appendMode); local {
 		if st == fuse.OK && len(data) > 0 {
 			fs.caps.markAbsent(input.NodeId)
-			fs.recordInodeSpecial(input.NodeId, updatedInode)
+			fs.recordKnownInode(input.NodeId, updatedInode)
 		}
 		return n, st
 	}
@@ -219,32 +218,23 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 	switch {
 	case appendMode:
 		if flushErr := fs.flushAndResetInodeForHandle(opCtx, cancel, input.Fh, ino); flushErr != nil {
-			if !errors.Is(flushErr, rpc.ErrKernelInterrupted) && !errors.Is(flushErr, syscall.EINTR) {
-				fs.cache.invalidateInode(input.NodeId)
-			}
 			return 0, fs.stageErrToStatus(flushErr)
 		}
-		cached, st := fs.getInodeWithContext(context.WithoutCancel(opCtx), nil, input.NodeId)
+		inode, _, st := fs.getAttrInodeWithContext(context.WithoutCancel(opCtx), nil, input.NodeId)
 		if st != fuse.OK {
 			return 0, st
 		}
 		copyInput := *input
-		copyInput.Offset = cached.inode.GetAttr().GetSize()
+		copyInput.Offset = inode.GetAttr().GetSize()
 		input = &copyInput
 	case fs.stage == nil || syncMode || specialInode || !capKnownAbsent || dataLen == 0 || dataLen > MaxRPCChunkSize:
 		if flushErr := fs.flushAndResetInodeForHandle(opCtx, cancel, input.Fh, ino); flushErr != nil {
-			if !errors.Is(flushErr, rpc.ErrKernelInterrupted) && !errors.Is(flushErr, syscall.EINTR) {
-				fs.cache.invalidateInode(input.NodeId)
-			}
 			return 0, fs.stageErrToStatus(flushErr)
 		}
 	default:
 		fs.readAhead.InvalidateInode(ino)
-		if stWritten, handled, stErr := fs.stage.WriteForHandle(opCtx, cancel, input.Fh, ino, input.NodeId, input.Offset, data, epoch); handled {
+		if stWritten, handled, stErr := fs.stage.WriteForHandle(opCtx, cancel, input.Fh, ino, input.NodeId, input.Offset, data, 0); handled {
 			if stErr != nil {
-				if !errors.Is(stErr, rpc.ErrKernelInterrupted) && !errors.Is(stErr, syscall.EINTR) {
-					fs.cache.invalidateInode(input.NodeId)
-				}
 				return 0, fs.stageErrToStatus(stErr)
 			}
 			fs.readAhead.InvalidateInode(ino)
@@ -270,12 +260,10 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 			Epoch:  fs.cfg.Epoch,
 		}))
 		if err != nil {
-			fs.cache.invalidateInode(input.NodeId)
 			return 0, fs.ToStatus(err)
 		}
 		fs.markMetaDirty()
-		fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
-		fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), DefaultWriteAttrTimeoutSeconds)
+		fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
 		fs.caps.markAbsent(input.NodeId)
 		written = resp.Msg.GetSize()
 		fs.metrics.addStagePassthrough(uint64(written))
@@ -310,15 +298,13 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 		chunkCancel()
 		if err != nil {
 			fs.fenceIfStaleEpoch(err)
-			fs.cache.invalidateInode(input.NodeId)
 			if totalWritten > 0 {
 				return totalWritten, fuse.OK
 			}
 			return 0, fs.ToStatus(err)
 		}
 
-		fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
-		fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), DefaultWriteAttrTimeoutSeconds)
+		fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
 		fs.caps.markAbsent(input.NodeId)
 		n := resp.Msg.GetSize()
 		fs.markMetaDirty()

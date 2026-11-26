@@ -182,7 +182,7 @@ func TestTmpfile_SyncMode_UnlinkedLifecycle_RoutesAllFileOpsToServerAndReclaimsO
 	require.Zero(t, syncFS.Snapshot().TmpFile.ResidentBytes)
 
 	attr0 := mustGetAttr(t, syncFS, tmpOut.NodeId)
-	require.Zero(t, srv.getAttrCalls.Load(), "scene=tmpfile_cached_getattr want=0_rpcs got=%d", srv.getAttrCalls.Load())
+	require.Equal(t, int64(1), srv.getAttrCalls.Load(), "scene=tmpfile_getattr want=1_rpc got=%d", srv.getAttrCalls.Load())
 	require.Zero(t, attr0.Nlink)
 
 	mustWriteAt(t, syncFS, tmpOut.NodeId, tmpOut.Fh, 0, []byte("helloWORLD!"))

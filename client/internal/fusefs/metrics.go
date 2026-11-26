@@ -284,33 +284,11 @@ func (h *waitHist) constHistogram(desc *prometheus.Desc) prometheus.Metric {
 	return prometheus.MustNewConstHistogram(desc, cnt, sumSec, buckets)
 }
 
-type nsCacheKind uint8
-
-const (
-	nsCacheAttr nsCacheKind = iota
-	nsCacheEntry
-	nsCacheNegativeEntry
-	nsCacheReadDir
-	nsCacheReadlink
-	nsCacheKindCount
-)
-
-var nsCacheKindNames = [nsCacheKindCount]string{
-	nsCacheAttr:          "attr",
-	nsCacheEntry:         "entry",
-	nsCacheNegativeEntry: "negative_entry",
-	nsCacheReadDir:       "readdir",
-	nsCacheReadlink:      "readlink",
-}
-
 type stateSnapshotProvider interface {
 	collectSubsystemGauges() subsystemGauges
 }
 
 type subsystemGauges struct {
-	nsEntries               int
-	nsUsedWeight            int
-	nsCapacity              int
 	capEntries              int
 	tmpActiveFiles          int
 	tmpResidentByte         uint64
@@ -329,11 +307,6 @@ type subsystemGauges struct {
 type Metrics struct {
 	ops        [OpCount]opSlot
 	errnoTable [OpCount][errnoBucketCount]atomic.Uint64
-
-	nsHits          [nsCacheKindCount]atomic.Uint64
-	nsMisses        [nsCacheKindCount]atomic.Uint64
-	nsInvalidations atomic.Uint64
-	nsEvictions     atomic.Uint64
 
 	capHits               atomic.Uint64
 	capMisses             atomic.Uint64
@@ -381,13 +354,6 @@ type Metrics struct {
 	fuseInflightDesc   *prometheus.Desc
 	fuseOpErrorsDesc   *prometheus.Desc
 	fuseIOBytesDesc    *prometheus.Desc
-
-	nsHitsDesc          *prometheus.Desc
-	nsMissesDesc        *prometheus.Desc
-	nsInvalidationsDesc *prometheus.Desc
-	nsEvictionsDesc     *prometheus.Desc
-	nsEntriesDesc       *prometheus.Desc
-	nsWeightDesc        *prometheus.Desc
 
 	capHitsDesc               *prometheus.Desc
 	capMissesDesc             *prometheus.Desc
@@ -463,43 +429,6 @@ func NewMetrics() *Metrics {
 			"bowl_client_fuse_io_bytes_total",
 			"Total payload bytes transferred through FUSE Read and Write operations.",
 			[]string{"dir"},
-			nil,
-		),
-
-		nsHitsDesc: prometheus.NewDesc(
-			"bowl_client_nscache_hits_total",
-			"Total number of client NamespaceCache hits by lookup kind.",
-			[]string{"kind"},
-			nil,
-		),
-		nsMissesDesc: prometheus.NewDesc(
-			"bowl_client_nscache_misses_total",
-			"Total number of client NamespaceCache misses by lookup kind.",
-			[]string{"kind"},
-			nil,
-		),
-		nsInvalidationsDesc: prometheus.NewDesc(
-			"bowl_client_nscache_invalidations_total",
-			"Total number of client NamespaceCache invalidation operations.",
-			nil,
-			nil,
-		),
-		nsEvictionsDesc: prometheus.NewDesc(
-			"bowl_client_nscache_evictions_total",
-			"Total number of client NamespaceCache LRU capacity evictions.",
-			nil,
-			nil,
-		),
-		nsEntriesDesc: prometheus.NewDesc(
-			"bowl_client_nscache_entries",
-			"Current number of cached items in client NamespaceCache.",
-			nil,
-			nil,
-		),
-		nsWeightDesc: prometheus.NewDesc(
-			"bowl_client_nscache_weight",
-			"Current weighted usage and capacity of client NamespaceCache.",
-			[]string{"state"},
 			nil,
 		),
 
@@ -752,30 +681,6 @@ func (m *Metrics) endOp(op FuseOp, start time.Time, status fuse.Status, nBytes u
 	}
 }
 
-func (m *Metrics) incNSCacheHit(kind nsCacheKind) {
-	if m != nil && kind < nsCacheKindCount {
-		m.nsHits[kind].Add(1)
-	}
-}
-
-func (m *Metrics) incNSCacheMiss(kind nsCacheKind) {
-	if m != nil && kind < nsCacheKindCount {
-		m.nsMisses[kind].Add(1)
-	}
-}
-
-func (m *Metrics) incNSCacheInvalidation() {
-	if m != nil {
-		m.nsInvalidations.Add(1)
-	}
-}
-
-func (m *Metrics) incNSCacheEviction() {
-	if m != nil {
-		m.nsEvictions.Add(1)
-	}
-}
-
 func (m *Metrics) incCapHit() {
 	if m != nil {
 		m.capHits.Add(1)
@@ -960,13 +865,6 @@ func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- m.fuseOpErrorsDesc
 	ch <- m.fuseIOBytesDesc
 
-	ch <- m.nsHitsDesc
-	ch <- m.nsMissesDesc
-	ch <- m.nsInvalidationsDesc
-	ch <- m.nsEvictionsDesc
-	ch <- m.nsEntriesDesc
-	ch <- m.nsWeightDesc
-
 	ch <- m.capHitsDesc
 	ch <- m.capMissesDesc
 	ch <- m.capGrantsDesc
@@ -1075,17 +973,6 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 
 	gauges := m.collectGauges()
 
-	for k := range nsCacheKindCount {
-		label := nsCacheKindNames[k]
-		ch <- prometheus.MustNewConstMetric(m.nsHitsDesc, prometheus.CounterValue, float64(m.nsHits[k].Load()), label)
-		ch <- prometheus.MustNewConstMetric(m.nsMissesDesc, prometheus.CounterValue, float64(m.nsMisses[k].Load()), label)
-	}
-	ch <- prometheus.MustNewConstMetric(m.nsInvalidationsDesc, prometheus.CounterValue, float64(m.nsInvalidations.Load()))
-	ch <- prometheus.MustNewConstMetric(m.nsEvictionsDesc, prometheus.CounterValue, float64(m.nsEvictions.Load()))
-	ch <- prometheus.MustNewConstMetric(m.nsEntriesDesc, prometheus.GaugeValue, float64(gauges.nsEntries))
-	ch <- prometheus.MustNewConstMetric(m.nsWeightDesc, prometheus.GaugeValue, float64(gauges.nsUsedWeight), "used")
-	ch <- prometheus.MustNewConstMetric(m.nsWeightDesc, prometheus.GaugeValue, float64(gauges.nsCapacity), "capacity")
-
 	ch <- prometheus.MustNewConstMetric(m.capHitsDesc, prometheus.CounterValue, float64(m.capHits.Load()))
 	ch <- prometheus.MustNewConstMetric(m.capMissesDesc, prometheus.CounterValue, float64(m.capMisses.Load()))
 	ch <- prometheus.MustNewConstMetric(m.capGrantsDesc, prometheus.CounterValue, float64(m.capGrants.Load()))
@@ -1158,24 +1045,6 @@ type FUSESnapshot struct {
 	ReadBytes            uint64       `json:"read_bytes"`
 	WriteBytes           uint64       `json:"write_bytes"`
 	Ops                  []OpSnapshot `json:"ops"`
-}
-
-type NamespaceCacheStats struct {
-	AttrHits            uint64 `json:"attr_hits"`
-	AttrMisses          uint64 `json:"attr_misses"`
-	EntryHits           uint64 `json:"entry_hits"`
-	EntryMisses         uint64 `json:"entry_misses"`
-	NegativeEntryHits   uint64 `json:"negative_entry_hits"`
-	NegativeEntryMisses uint64 `json:"negative_entry_misses"`
-	ReadDirHits         uint64 `json:"readdir_hits"`
-	ReadDirMisses       uint64 `json:"readdir_misses"`
-	ReadlinkHits        uint64 `json:"readlink_hits"`
-	ReadlinkMisses      uint64 `json:"readlink_misses"`
-	Invalidations       uint64 `json:"invalidations"`
-	Evictions           uint64 `json:"evictions"`
-	Entries             int    `json:"entries"`
-	UsedWeight          int    `json:"used_weight"`
-	Capacity            int    `json:"capacity"`
 }
 
 type CapabilityCacheStats struct {
@@ -1251,7 +1120,6 @@ type Snapshot struct {
 	CPUUsageSeconds   float64              `json:"cpu_usage_seconds"`
 	MemoryBytes       uint64               `json:"memory_bytes"`
 	FUSE              FUSESnapshot         `json:"fuse"`
-	NamespaceCache    NamespaceCacheStats  `json:"namespace_cache"`
 	CapabilityCache   CapabilityCacheStats `json:"capability_cache"`
 	ReadAhead         ReadAheadStats       `json:"read_ahead"`
 	Stage             StageStats           `json:"stage"`
@@ -1357,23 +1225,6 @@ func (m *Metrics) Snapshot() Snapshot {
 			WriteBytes:           ops[OpWrite].Bytes + ops[OpWritev].Bytes + ops[OpCopyFileRange].Bytes,
 			Ops:                  ops,
 		},
-		NamespaceCache: NamespaceCacheStats{
-			AttrHits:            m.nsHits[nsCacheAttr].Load(),
-			AttrMisses:          m.nsMisses[nsCacheAttr].Load(),
-			EntryHits:           m.nsHits[nsCacheEntry].Load(),
-			EntryMisses:         m.nsMisses[nsCacheEntry].Load(),
-			NegativeEntryHits:   m.nsHits[nsCacheNegativeEntry].Load(),
-			NegativeEntryMisses: m.nsMisses[nsCacheNegativeEntry].Load(),
-			ReadDirHits:         m.nsHits[nsCacheReadDir].Load(),
-			ReadDirMisses:       m.nsMisses[nsCacheReadDir].Load(),
-			ReadlinkHits:        m.nsHits[nsCacheReadlink].Load(),
-			ReadlinkMisses:      m.nsMisses[nsCacheReadlink].Load(),
-			Invalidations:       m.nsInvalidations.Load(),
-			Evictions:           m.nsEvictions.Load(),
-			Entries:             gauges.nsEntries,
-			UsedWeight:          gauges.nsUsedWeight,
-			Capacity:            gauges.nsCapacity,
-		},
 		CapabilityCache: CapabilityCacheStats{
 			Hits:               m.capHits.Load(),
 			Misses:             m.capMisses.Load(),
@@ -1450,15 +1301,6 @@ func (s *Snapshot) FormatText() string {
 		s.FUSE.TotalCalls, s.FUSE.TotalErrors, s.FUSE.TotalInflight,
 		s.FUSE.TotalDurationSeconds, s.FUSE.ReadBytes, s.FUSE.WriteBytes,
 	)
-	fmt.Fprintf(&b, "NamespaceCache: entries=%d weight=%d/%d attr=%d/%d entry=%d/%d neg=%d/%d readdir=%d/%d readlink=%d/%d inv=%d evict=%d\n",
-		s.NamespaceCache.Entries, s.NamespaceCache.UsedWeight, s.NamespaceCache.Capacity,
-		s.NamespaceCache.AttrHits, s.NamespaceCache.AttrMisses,
-		s.NamespaceCache.EntryHits, s.NamespaceCache.EntryMisses,
-		s.NamespaceCache.NegativeEntryHits, s.NamespaceCache.NegativeEntryMisses,
-		s.NamespaceCache.ReadDirHits, s.NamespaceCache.ReadDirMisses,
-		s.NamespaceCache.ReadlinkHits, s.NamespaceCache.ReadlinkMisses,
-		s.NamespaceCache.Invalidations, s.NamespaceCache.Evictions,
-	)
 	fmt.Fprintf(&b, "CapabilityCache: entries=%d hits=%d misses=%d grants=%d epoch_inv=%d\n",
 		s.CapabilityCache.Entries, s.CapabilityCache.Hits, s.CapabilityCache.Misses,
 		s.CapabilityCache.Grants, s.CapabilityCache.EpochInvalidations,
@@ -1495,12 +1337,6 @@ func (s *Snapshot) FormatText() string {
 	return b.String()
 }
 
-var metaMutationOps = [...]FuseOp{
-	OpMkdir, OpMknod, OpRmdir, OpUnlink, OpRename,
-	OpSymlink, OpLink, OpCreate, OpSetAttr, OpFallocate,
-	OpSetXAttr, OpRemoveXAttr, OpFsync, OpFsyncDir,
-}
-
 func (s *Snapshot) FormatStatsFile() string {
 	var b strings.Builder
 	b.Grow(4096)
@@ -1524,42 +1360,6 @@ func (s *Snapshot) FormatStatsFile() string {
 		b.WriteByte('\n')
 	}
 
-	var metaCalls, metaDurNs uint64
-	var readCalls, readDurNs uint64
-	var writeCalls, writeDurNs uint64
-	var deleteCalls, deleteDurNs uint64
-
-	if len(s.FUSE.Ops) == OpCount {
-		for _, op := range metaMutationOps {
-			metaCalls += s.FUSE.Ops[op].Calls
-			metaDurNs += s.FUSE.Ops[op].DurationNanos
-		}
-		readCalls = s.FUSE.Ops[OpRead].Calls
-		readDurNs = s.FUSE.Ops[OpRead].DurationNanos
-		writeCalls = s.FUSE.Ops[OpWrite].Calls + s.FUSE.Ops[OpWritev].Calls + s.FUSE.Ops[OpCopyFileRange].Calls
-		writeDurNs = s.FUSE.Ops[OpWrite].DurationNanos + s.FUSE.Ops[OpWritev].DurationNanos + s.FUSE.Ops[OpCopyFileRange].DurationNanos
-		deleteCalls = s.FUSE.Ops[OpUnlink].Calls + s.FUSE.Ops[OpRmdir].Calls
-		deleteDurNs = s.FUSE.Ops[OpUnlink].DurationNanos + s.FUSE.Ops[OpRmdir].DurationNanos
-	}
-
-	writeF64("juicefs_uptime", s.UptimeSeconds)
-	writeF64("juicefs_cpu_usage", s.CPUUsageSeconds)
-	writeU64("juicefs_memory", s.MemoryBytes)
-	writeU64("juicefs_fuse_ops_durations_histogram_seconds_total", s.FUSE.TotalCalls)
-	writeF64("juicefs_fuse_ops_durations_histogram_seconds_sum", s.FUSE.TotalDurationSeconds)
-	writeU64("juicefs_transaction_durations_histogram_seconds_total", metaCalls)
-	writeF64("juicefs_transaction_durations_histogram_seconds_sum", float64(metaDurNs)*1e-9)
-	writeU64("juicefs_object_request_durations_histogram_seconds_PUT_total", writeCalls)
-	writeF64("juicefs_object_request_durations_histogram_seconds_PUT_sum", float64(writeDurNs)*1e-9)
-	writeU64("juicefs_object_request_durations_histogram_seconds_GET_total", readCalls)
-	writeF64("juicefs_object_request_durations_histogram_seconds_GET_sum", float64(readDurNs)*1e-9)
-	writeU64("juicefs_object_request_durations_histogram_seconds_DELETE_total", deleteCalls)
-	writeF64("juicefs_object_request_durations_histogram_seconds_DELETE_sum", float64(deleteDurNs)*1e-9)
-	writeU64("juicefs_blockcache_write_hist_seconds_total", s.Stage.StagedCalls)
-	writeF64("juicefs_blockcache_write_hist_seconds_sum", s.Stage.BackpressureWaitSeconds)
-	writeU64("juicefs_blockcache_read_hist_seconds_total", s.ReadAhead.Hits)
-	writeF64("juicefs_blockcache_read_hist_seconds_sum", s.ReadAhead.WaitSeconds)
-
 	writeF64("bowl_client_uptime_seconds", s.UptimeSeconds)
 	writeF64("bowl_client_cpu_usage_seconds", s.CPUUsageSeconds)
 	writeU64("bowl_client_memory_bytes", s.MemoryBytes)
@@ -1582,20 +1382,6 @@ func (s *Snapshot) FormatStatsFile() string {
 			writeU64("bowl_client_fuse_op_errors_"+op.Op, op.Errors)
 		}
 	}
-
-	writeU64("bowl_client_nscache_attr_hits_total", s.NamespaceCache.AttrHits)
-	writeU64("bowl_client_nscache_attr_misses_total", s.NamespaceCache.AttrMisses)
-	writeU64("bowl_client_nscache_entry_hits_total", s.NamespaceCache.EntryHits)
-	writeU64("bowl_client_nscache_entry_misses_total", s.NamespaceCache.EntryMisses)
-	writeU64("bowl_client_nscache_negative_entry_hits_total", s.NamespaceCache.NegativeEntryHits)
-	writeU64("bowl_client_nscache_negative_entry_misses_total", s.NamespaceCache.NegativeEntryMisses)
-	writeU64("bowl_client_nscache_readdir_hits_total", s.NamespaceCache.ReadDirHits)
-	writeU64("bowl_client_nscache_readdir_misses_total", s.NamespaceCache.ReadDirMisses)
-	writeU64("bowl_client_nscache_readlink_hits_total", s.NamespaceCache.ReadlinkHits)
-	writeU64("bowl_client_nscache_readlink_misses_total", s.NamespaceCache.ReadlinkMisses)
-	writeU64("bowl_client_nscache_invalidations_total", s.NamespaceCache.Invalidations)
-	writeU64("bowl_client_nscache_evictions_total", s.NamespaceCache.Evictions)
-	writeI64("bowl_client_nscache_entries", int64(s.NamespaceCache.Entries))
 
 	writeU64("bowl_client_capcache_hits_total", s.CapabilityCache.Hits)
 	writeU64("bowl_client_capcache_misses_total", s.CapabilityCache.Misses)

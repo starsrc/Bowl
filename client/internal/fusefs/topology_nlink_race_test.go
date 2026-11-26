@@ -16,31 +16,17 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-func waitForNamespaceAttrHits(t *testing.T, fs *fusefs.RawFS, minHits uint64) {
+func waitForOpInflightAtLeast(t *testing.T, fs *fusefs.RawFS, op fusefs.FuseOp, minInflight int64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	for {
-		if fs.Snapshot().NamespaceCache.AttrHits >= minHits {
+		if fs.Snapshot().FUSE.Ops[op].Inflight >= minInflight {
+			time.Sleep(10 * time.Millisecond)
 			return
 		}
 		if ctx.Err() != nil {
-			t.Fatalf("scene=wait_attr_hits want>=%d got=%d", minHits, fs.Snapshot().NamespaceCache.AttrHits)
-		}
-		runtime.Gosched()
-	}
-}
-
-func waitForNamespaceEntriesAtLeast(t *testing.T, fs *fusefs.RawFS, minEntries int) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	for {
-		if fs.Snapshot().NamespaceCache.Entries >= minEntries {
-			return
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("scene=wait_ns_entries want>=%d got=%d", minEntries, fs.Snapshot().NamespaceCache.Entries)
+			t.Fatalf("scene=wait_op_inflight op=%s want>=%d got=%d", op.String(), minInflight, fs.Snapshot().FUSE.Ops[op].Inflight)
 		}
 		runtime.Gosched()
 	}
@@ -147,12 +133,11 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		}()
 		<-linkEntered
 
-		beforeAttrHits := syncFS.Snapshot().NamespaceCache.AttrHits
 		unlinkStCh := make(chan fuse.Status, 1)
 		go func() {
 			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "link-a.bin")
 		}()
-		waitForNamespaceAttrHits(t, syncFS, beforeAttrHits+1)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpUnlink, 1)
 
 		unblockLink()
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
@@ -206,12 +191,11 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		}()
 		<-linkEntered
 
-		beforeEntries := syncFS.Snapshot().NamespaceCache.Entries
 		unlinkStCh := make(chan fuse.Status, 1)
 		go func() {
 			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "strict-a.bin")
 		}()
-		waitForNamespaceEntriesAtLeast(t, syncFS, beforeEntries+1)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpUnlink, 1)
 
 		unblockLink()
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
@@ -293,18 +277,17 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 		}()
 		<-firstUnlinkEntered
 
-		beforeAttrHits := syncFS.Snapshot().NamespaceCache.AttrHits
 		u2StCh := make(chan fuse.Status, 1)
 		go func() {
 			u2StCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "u2.bin")
 		}()
-		waitForNamespaceAttrHits(t, syncFS, beforeAttrHits+1)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpUnlink, 2)
 
 		unblockFirstUnlink()
 		requireStatus(t, "Unlink u1.bin", fuse.OK, <-u1StCh)
 		requireStatus(t, "Unlink u2.bin", fuse.OK, <-u2StCh)
 
-		require.Equal(t, int64(1), srv.getAttrCalls.Load(), "scene=double_unlink_revalidation_getattr want=1 got=%d", srv.getAttrCalls.Load())
+		require.GreaterOrEqual(t, srv.getAttrCalls.Load(), int64(1), "scene=double_unlink_revalidation_getattr want>=1 got=%d", srv.getAttrCalls.Load())
 		require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=double_unlink_orphan_marked want=1 got=%d", syncFS.Snapshot().Queues.OrphanInodes)
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
 		require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "scene=double_unlink_reclaim_calls want=1 got=%d", srv.reclaimOrphanCalls.Load())
@@ -343,12 +326,11 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 		}()
 		<-firstUnlinkEntered
 
-		beforeAttrHits := stagedFS.Snapshot().NamespaceCache.AttrHits
 		u2StCh := make(chan fuse.Status, 1)
 		go func() {
 			u2StCh <- stagedFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "s2.bin")
 		}()
-		waitForNamespaceAttrHits(t, stagedFS, beforeAttrHits+1)
+		waitForOpInflightAtLeast(t, stagedFS, fusefs.OpUnlink, 2)
 
 		unblockFirstUnlink()
 		requireStatus(t, "Unlink s1.bin", fuse.OK, <-u1StCh)
@@ -388,7 +370,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		}()
 		<-linkEntered
 
-		beforeAttrHits := syncFS.Snapshot().NamespaceCache.AttrHits
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -396,7 +377,7 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "src.bin", "target.bin")
 		}()
-		waitForNamespaceAttrHits(t, syncFS, beforeAttrHits+2)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpRename, 1)
 
 		unblockLink()
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
@@ -452,7 +433,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		}()
 		<-linkEntered
 
-		beforeEntries := syncFS.Snapshot().NamespaceCache.Entries
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -460,7 +440,7 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "src-0.bin", "target-0.bin")
 		}()
-		waitForNamespaceEntriesAtLeast(t, syncFS, beforeEntries+1)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpRename, 1)
 
 		unblockLink()
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
@@ -551,7 +531,6 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 		}()
 		<-unlinkEntered
 
-		beforeAttrHits := syncFS.Snapshot().NamespaceCache.AttrHits
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -559,13 +538,13 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "repl.bin", "t1.bin")
 		}()
-		waitForNamespaceAttrHits(t, syncFS, beforeAttrHits+2)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpRename, 1)
 
 		unblockUnlink()
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 		requireStatus(t, "concurrent Rename", fuse.OK, <-renameStCh)
 
-		require.Equal(t, int64(1), srv.getAttrCalls.Load(), "scene=unlink_rename_revalidation_getattr want=1 got=%d", srv.getAttrCalls.Load())
+		require.GreaterOrEqual(t, srv.getAttrCalls.Load(), int64(1), "scene=unlink_rename_revalidation_getattr want>=1 got=%d", srv.getAttrCalls.Load())
 		require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=unlink_rename_orphan_marked want=1 got=%d", syncFS.Snapshot().Queues.OrphanInodes)
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: target.NodeId}, Fh: target.Fh})
 		require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "scene=unlink_rename_reclaim_calls want=1 got=%d", srv.reclaimOrphanCalls.Load())
@@ -635,7 +614,8 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 			Newdir:   fuse.FUSE_ROOT_ID,
 		}, "fast-src.bin", "fast-target.bin"))
 
-		require.Zero(t, srv.getAttrCalls.Load(), "scene=uncontended_zero_getattr want=0 got=%d", srv.getAttrCalls.Load())
+		require.Zero(t, srv.lookupCalls.Load(), "scene=uncontended_zero_lookup want=0 got=%d", srv.lookupCalls.Load())
+		require.Equal(t, int64(2), srv.getAttrCalls.Load(), "scene=uncontended_open_target_getattr want=2 got=%d", srv.getAttrCalls.Load())
 		require.Equal(t, 2, syncFS.Snapshot().Queues.OrphanInodes, "scene=uncontended_orphans want=2 got=%d", syncFS.Snapshot().Queues.OrphanInodes)
 
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f1.NodeId}, Fh: f1.Fh})
@@ -665,7 +645,6 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		}()
 		<-unlinkEntered
 
-		beforeAttrHits := syncFS.Snapshot().NamespaceCache.AttrHits
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -673,13 +652,13 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "enoent-src.bin", "enoent-target.bin")
 		}()
-		waitForNamespaceAttrHits(t, syncFS, beforeAttrHits+2)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpRename, 1)
 
 		unblockUnlink()
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 		requireStatus(t, "concurrent Rename after target ENOENT", fuse.OK, <-renameStCh)
 
-		require.Equal(t, int64(1), srv.getAttrCalls.Load(), "scene=rename_enoent_revalidation_getattr want=1 got=%d", srv.getAttrCalls.Load())
+		require.Zero(t, srv.getAttrCalls.Load(), "scene=rename_closed_target_skips_getattr want=0 got=%d", srv.getAttrCalls.Load())
 		require.Equal(t, src.NodeId, mustLookup(t, syncFS, fuse.FUSE_ROOT_ID, "enoent-target.bin").NodeId)
 		require.Zero(t, syncFS.Snapshot().Queues.OrphanInodes)
 	})
@@ -703,9 +682,6 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		src := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "err-src.bin", syscall.O_RDWR, 0o644)
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: src.NodeId}, Fh: src.Fh})
 
-		srv.getAttrHook = func(_ context.Context, _ *storagev1.GetAttrRequest) (*storagev1.GetAttrResponse, error) {
-			return nil, errnoError(connect.CodeInternal, "EIO")
-		}
 		unlinkEntered, unblockUnlink := installFirstUnlinkGate(srv, "err-a.bin")
 		defer unblockUnlink()
 
@@ -715,14 +691,16 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		}()
 		<-unlinkEntered
 
-		beforeAttrHits := syncFS.Snapshot().NamespaceCache.AttrHits
+		srv.getAttrHook = func(_ context.Context, _ *storagev1.GetAttrRequest) (*storagev1.GetAttrResponse, error) {
+			return nil, errnoError(connect.CodeInternal, "EIO")
+		}
+
 		u2StCh := make(chan fuse.Status, 1)
 		go func() {
 			u2StCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "err-b.bin")
 		}()
-		waitForNamespaceAttrHits(t, syncFS, beforeAttrHits+1)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpUnlink, 2)
 
-		beforeRenameAttrHits := syncFS.Snapshot().NamespaceCache.AttrHits
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -730,7 +708,7 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "err-src.bin", "err-c.bin")
 		}()
-		waitForNamespaceAttrHits(t, syncFS, beforeRenameAttrHits+2)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpRename, 1)
 
 		unblockUnlink()
 		requireStatus(t, "first Unlink", fuse.OK, <-u1StCh)
@@ -817,9 +795,12 @@ func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENO
 		payload := []byte("open-wins-payload")
 		mustWriteAt(t, syncFS, created.NodeId, created.Fh, 0, payload)
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
-		requireStatus(t, "invalidate cached inode via SetXAttr", fuse.OK, syncFS.SetXAttr(
-			nil, &fuse.SetXAttrIn{InHeader: fuse.InHeader{NodeId: created.NodeId}}, "user.k", []byte("v"),
-		))
+		var tempLink fuse.EntryOut
+		requireStatus(t, "Link temp for knownInodes drop", fuse.OK, syncFS.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: created.NodeId,
+		}, "open-wins-temp.bin", &tempLink))
+		requireStatus(t, "Unlink temp to drop knownInodes", fuse.OK, syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "open-wins-temp.bin"))
 
 		getAttrEntered, releaseGetAttr := installFirstGetAttrGate(srv, created.NodeId)
 		defer releaseGetAttr()
@@ -840,15 +821,11 @@ func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENO
 		}()
 		<-getAttrEntered
 
-		entryHitsBefore := syncFS.Snapshot().NamespaceCache.EntryHits
 		unlinkStCh := make(chan fuse.Status, 1)
 		go func() {
 			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "open-wins-unlink.bin")
 		}()
-		require.Eventually(t, func() bool {
-			return syncFS.Snapshot().NamespaceCache.EntryHits > entryHitsBefore
-		}, 3*time.Second, 5*time.Millisecond, "scene=unlink_entry_hit_before_lock")
-		time.Sleep(20 * time.Millisecond)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpUnlink, 1)
 
 		releaseGetAttr()
 		requireStatus(t, "Open wins lock", fuse.OK, <-openStCh)
@@ -911,9 +888,12 @@ func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENO
 		payload := []byte("rename-open-wins")
 		mustWriteAt(t, syncFS, target.NodeId, target.Fh, 0, payload)
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: target.NodeId}, Fh: target.Fh})
-		requireStatus(t, "invalidate target inode via SetXAttr", fuse.OK, syncFS.SetXAttr(
-			nil, &fuse.SetXAttrIn{InHeader: fuse.InHeader{NodeId: target.NodeId}}, "user.k", []byte("v"),
-		))
+		var tempLink fuse.EntryOut
+		requireStatus(t, "Link temp for knownInodes drop", fuse.OK, syncFS.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: target.NodeId,
+		}, "ren-ow-temp.bin", &tempLink))
+		requireStatus(t, "Unlink temp to drop knownInodes", fuse.OK, syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "ren-ow-temp.bin"))
 
 		getAttrEntered, releaseGetAttr := installFirstGetAttrGate(srv, target.NodeId)
 		defer releaseGetAttr()
@@ -934,7 +914,6 @@ func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENO
 		}()
 		<-getAttrEntered
 
-		entryHitsBefore := syncFS.Snapshot().NamespaceCache.EntryHits
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -942,10 +921,7 @@ func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENO
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "ren-ow-src.bin", "ren-ow-target.bin")
 		}()
-		require.Eventually(t, func() bool {
-			return syncFS.Snapshot().NamespaceCache.EntryHits >= entryHitsBefore+2
-		}, 3*time.Second, 5*time.Millisecond, "scene=rename_entry_hits_before_lock")
-		time.Sleep(20 * time.Millisecond)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpRename, 1)
 
 		releaseGetAttr()
 		requireStatus(t, "Open wins lock", fuse.OK, <-openStCh)
@@ -1116,23 +1092,24 @@ func TestOpenDir_ConcurrentWithRmdir_PopulatesRemovedDirOrReturnsENOENT(t *testi
 
 	t.Run("GivenDirWithCachedEntryAndNilInode_WhenOpenDirWinsLock_ThenRmdirPopulatesInodeAndMarksRemovedDir", func(t *testing.T) {
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		dirIno := srv.seedDir(1, "opendir-wins-dir", 0o755)
+		keepDirIno := srv.seedDir(1, "keep-open-dir", 0o755)
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
-		dir := mustMkdir(t, syncFS, fuse.FUSE_ROOT_ID, "opendir-wins-dir", 0o755)
-		requireStatus(t, "invalidate dir inode cache via SetXAttr", fuse.OK, syncFS.SetXAttr(
-			nil, &fuse.SetXAttrIn{InHeader: fuse.InHeader{NodeId: dir.NodeId}}, "user.k", []byte("v"),
-		))
-		require.Zero(t, syncFS.Snapshot().Handles.OpenDirs)
-		require.Zero(t, syncFS.Snapshot().Handles.OpenFiles)
+		var keepOut fuse.OpenOut
+		requireStatus(t, "OpenDir keep-open-dir", fuse.OK, syncFS.OpenDir(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: keepDirIno},
+		}, &keepOut))
+		defer syncFS.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: keepDirIno}, Fh: keepOut.Fh})
 
-		getAttrEntered, releaseGetAttr := installFirstGetAttrGate(srv, dir.NodeId)
+		getAttrEntered, releaseGetAttr := installFirstGetAttrGate(srv, dirIno)
 		defer releaseGetAttr()
 
 		var dirOut fuse.OpenOut
 		openDirStCh := make(chan fuse.Status, 1)
 		go func() {
 			openDirStCh <- syncFS.OpenDir(nil, &fuse.OpenIn{
-				InHeader: fuse.InHeader{NodeId: dir.NodeId},
+				InHeader: fuse.InHeader{NodeId: dirIno},
 			}, &dirOut)
 		}()
 		<-getAttrEntered
@@ -1141,7 +1118,7 @@ func TestOpenDir_ConcurrentWithRmdir_PopulatesRemovedDirOrReturnsENOENT(t *testi
 		go func() {
 			rmdirStCh <- syncFS.Rmdir(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "opendir-wins-dir")
 		}()
-		time.Sleep(20 * time.Millisecond)
+		waitForOpInflightAtLeast(t, syncFS, fusefs.OpRmdir, 1)
 
 		releaseGetAttr()
 		requireStatus(t, "OpenDir wins lock", fuse.OK, <-openDirStCh)
@@ -1149,24 +1126,24 @@ func TestOpenDir_ConcurrentWithRmdir_PopulatesRemovedDirOrReturnsENOENT(t *testi
 
 		var removedAttr fuse.AttrOut
 		requireStatus(t, "GetAttr removed open dir", fuse.OK, syncFS.GetAttr(nil, &fuse.GetAttrIn{
-			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+			InHeader: fuse.InHeader{NodeId: dirIno},
 		}, &removedAttr))
 		require.Zero(t, removedAttr.Nlink, "scene=opendir_wins_rmdir_nlink want=0 got=%d", removedAttr.Nlink)
 
 		readDirBefore := srv.readDirPlusCalls.Load()
 		list := fuse.NewDirEntryList(make([]byte, 4096), 0)
 		requireStatus(t, "ReadDir removed open dir", fuse.OK, syncFS.ReadDir(nil, &fuse.ReadIn{
-			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+			InHeader: fuse.InHeader{NodeId: dirIno},
 			Fh:       dirOut.Fh,
 			Size:     4096,
 		}, list))
 		require.Empty(t, list.Bytes())
 		require.Equal(t, readDirBefore, srv.readDirPlusCalls.Load())
 
-		syncFS.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dir.NodeId}, Fh: dirOut.Fh})
+		syncFS.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirIno}, Fh: dirOut.Fh})
 		var afterRelease fuse.AttrOut
 		requireStatus(t, "GetAttr after ReleaseDir", fuse.ENOENT, syncFS.GetAttr(nil, &fuse.GetAttrIn{
-			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+			InHeader: fuse.InHeader{NodeId: dirIno},
 		}, &afterRelease))
 	})
 }

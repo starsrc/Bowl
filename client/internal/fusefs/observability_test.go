@@ -177,13 +177,23 @@ func TestMetrics与Prometheus与Snapshot_验证38个FUSE操作与26桶直方图�
 		require.NoError(t, jsonErr)
 		require.Contains(t, string(jsonBytes), `"fuse"`)
 		require.NotContains(t, string(jsonBytes), `"dirty_inodes"`)
+		require.NotContains(t, string(jsonBytes), `"namespace_cache"`)
 		require.Contains(t, snap.FormatText(), "FUSE")
 		require.NotContains(t, snap.FormatText(), "dirty=")
-		require.Contains(t, snap.FormatStatsFile(), "bowl_client_fuse_ops_total")
-		require.NotContains(t, snap.FormatStatsFile(), "bowl_client_queue_dirty_inodes")
+		require.NotContains(t, snap.FormatText(), "NamespaceCache:")
+		statsFile := snap.FormatStatsFile()
+		require.Contains(t, statsFile, "bowl_client_fuse_ops_total")
+		require.NotContains(t, statsFile, "bowl_client_queue_dirty_inodes")
+		require.NotContains(t, statsFile, "juicefs_")
+		require.NotContains(t, statsFile, "bowl_client_nscache_")
 
 		reg := prometheus.NewRegistry()
 		require.NoError(t, reg.Register(fs.Collector()))
+		families, gatherErr := reg.Gather()
+		require.NoError(t, gatherErr)
+		for _, mf := range families {
+			require.False(t, strings.HasPrefix(mf.GetName(), "bowl_client_nscache_"), "unexpected legacy metric %s", mf.GetName())
+		}
 		durMF := findMetricFamily(t, reg, "bowl_client_fuse_op_duration_seconds")
 		require.NotEmpty(t, durMF.GetMetric())
 		require.Len(t, durMF.GetMetric()[0].GetHistogram().GetBucket(), 26, "FUSE 操作直方图必须精确为 26 桶")
@@ -196,16 +206,14 @@ func TestMetrics与Prometheus与Snapshot_验证38个FUSE操作与26桶直方图�
 	})
 }
 
-func TestVirtualStatsFile_校验stats与jfsStats只读读取越界EOF及全量写与元操作错误码(t *testing.T) {
+func TestVirtualStatsFile_校验stats只读读取越界EOF与jfsStats不拦截及全量写与元操作错误码(t *testing.T) {
 
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	fs := newTestRawFS(t, srv, withStatsFile(true))
 
 	var eStats, eJFS fuse.EntryOut
 	requireStatus(t, "Lookup .stats", fuse.OK, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, ".stats", &eStats))
-	requireStatus(t, "Lookup .jfs.stats", fuse.OK, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, ".jfs.stats", &eJFS))
 	require.Equal(t, fusefs.VirtualStatsIno, eStats.NodeId)
-	require.Equal(t, fusefs.VirtualStatsIno, eJFS.NodeId)
 
 	var attrOut fuse.AttrOut
 	requireStatus(t, "GetAttr VirtualStatsIno", fuse.OK, fs.GetAttr(nil, &fuse.GetAttrIn{InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno}}, &attrOut))
@@ -216,6 +224,8 @@ func TestVirtualStatsFile_校验stats与jfsStats只读读取越界EOF及全量�
 
 	statsData := mustReadAt(t, fs, fusefs.VirtualStatsIno, openOut.Fh, 0, 64<<10)
 	require.Contains(t, string(statsData), "bowl_client_fuse_ops_total")
+	require.NotContains(t, string(statsData), "juicefs_")
+	require.NotContains(t, string(statsData), "bowl_client_nscache_")
 
 	eofRes, eofSt := fs.Read(nil, &fuse.ReadIn{
 		InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno},
@@ -252,6 +262,38 @@ func TestVirtualStatsFile_校验stats与jfsStats只读读取越界EOF及全量�
 
 	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno}, Fh: openOut.Fh})
 	require.Zero(t, srv.lookupCalls.Load()+srv.getAttrCalls.Load()+srv.readCalls.Load(), "虚拟统计文件不得产生任何远端存储 RPC")
+
+	requireStatus(t, "Lookup .jfs.stats not intercepted", fuse.ENOENT, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, ".jfs.stats", &eJFS))
+	require.Equal(t, int64(1), srv.lookupCalls.Load())
+}
+
+func TestStep19_VirtualStatsFile_SameHandleRepeatedOffsetZeroReadReturnsIdenticalSnapshot(t *testing.T) {
+	srv := newFakeStorage(t, withTTL(1.0, 1.0))
+	fs := newTestRawFS(t, srv, withStatsFile(true))
+
+	var openOut fuse.OpenOut
+	requireStatus(t, "Open .stats", fuse.OK, fs.Open(nil, &fuse.OpenIn{
+		InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno},
+		Flags:    uint32(syscall.O_RDONLY),
+	}, &openOut))
+
+	first := mustReadAt(t, fs, fusefs.VirtualStatsIno, openOut.Fh, 0, 64<<10)
+	require.NotEmpty(t, first)
+	require.Contains(t, string(first), "bowl_client_fuse_read_bytes_total 0\n")
+
+	second := mustReadAt(t, fs, fusefs.VirtualStatsIno, openOut.Fh, 0, 64<<10)
+	require.Equal(t, first, second)
+
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno}, Fh: openOut.Fh})
+
+	var openOut2 fuse.OpenOut
+	requireStatus(t, "Reopen .stats", fuse.OK, fs.Open(nil, &fuse.OpenIn{
+		InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno},
+		Flags:    uint32(syscall.O_RDONLY),
+	}, &openOut2))
+	fresh := mustReadAt(t, fs, fusefs.VirtualStatsIno, openOut2.Fh, 0, 64<<10)
+	require.NotContains(t, string(fresh), "bowl_client_fuse_read_bytes_total 0\n")
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno}, Fh: openOut2.Fh})
 }
 
 func makeStageBPGateHook(targetInflight int32, entered chan<- struct{}, gate <-chan struct{}) func(context.Context, *storagev1.WriteRequest) (uint32, error) {
@@ -321,7 +363,7 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		require.Equal(t, codes.Error, mkdirSpans[0].Status.Code, "写入拒绝等系统错误必须将 Span 标记为 Error")
 	})
 
-	t.Run("600条目大目录ReadDirPlus多页拉取共享根Span唯一TraceID", func(t *testing.T) {
+	t.Run("600条目大目录ReadDirPlus单页拉取共享根Span唯一TraceID", func(t *testing.T) {
 
 		tp, exp := newTestTracerProvider(t)
 		srv := newFakeStorage(t, withTTL(0, 0))
@@ -336,10 +378,10 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		}, fuse.NewDirEntryList(buf, 0))
 		fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Fh: dh.Fh})
 
-		requireStatus(t, "ReadDirPlus 首页加载全目录", fuse.OK, st)
+		requireStatus(t, "ReadDirPlus 单页拉取", fuse.OK, st)
 		rdpRPCs := srv.spansFor("ReadDirPlus")
-		require.Len(t, rdpRPCs, 2, "600 条目应分 512+88 两页拉取")
-		rdpTraceID := mustAllSpansShareSameTraceID(t, rdpRPCs, "ReadDirPlus 分页")
+		require.Len(t, rdpRPCs, 1, "单次 ReadDirPlus 仅拉取单页 512 条目")
+		rdpTraceID := mustAllSpansShareSameTraceID(t, rdpRPCs, "ReadDirPlus 单页")
 		rdpRootSpans := findSpansByName(exp.GetSpans(), "fuse.ReadDirPlus")
 		require.NotEmpty(t, rdpRootSpans)
 		require.Equal(t, rdpTraceID, rdpRootSpans[0].SpanContext.TraceID())

@@ -20,7 +20,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -29,7 +28,16 @@ import (
 
 const DefaultBranch = "main"
 
+const MaxFilenameBytes = 255
+
 const DefaultReleaseRetryInterval = 200 * time.Millisecond
+
+const (
+	DefaultReleaseQueueMaxSize = 1024
+	DefaultReleaseMaxAttempts  = 10
+	releaseRetryInitialBackoff = time.Second
+	releaseRetryMaxBackoff     = 30 * time.Second
+)
 
 const DefaultRPCTimeout = 30 * time.Second
 
@@ -65,6 +73,9 @@ type Config struct {
 	DiskID                   string
 	Branch                   string
 	Epoch                    uint64
+	MountID                  string
+	LeaseTTLSeconds          uint32
+	NowFn                    func() time.Time
 	RootIno                  uint64
 	RootInode                *storagev1.Inode
 	EntryTimeoutSeconds      float64
@@ -111,9 +122,10 @@ func (c *Config) IsStaged() bool {
 }
 
 type reclaimRetryItem struct {
-	ino      uint64
-	spanCtx  trace.SpanContext
-	attempts int
+	ino         uint64
+	spanCtx     trace.SpanContext
+	attempts    int
+	nextRetryAt time.Time
 }
 
 type UnmountProgress struct {
@@ -131,13 +143,18 @@ type unmountProgressState struct {
 	total         uint64
 }
 
+type knownInodeInfo struct {
+	isDir     bool
+	isSpecial bool
+}
+
 type RawFS struct {
 	fuse.RawFileSystem
 
-	client  storagev1connect.StorageServiceClient
-	handles *HandleTable
-	cache   *NamespaceCache
-	caps    *capabilityCache
+	client   storagev1connect.StorageServiceClient
+	handles  *HandleTable
+	dentries *dentryIndex
+	caps     *capabilityCache
 
 	lifecycleMu sync.RWMutex
 
@@ -159,21 +176,24 @@ type RawFS struct {
 
 	releaseMu       sync.Mutex
 	releaseQueue    []reclaimRetryItem
+	releaseInos     map[uint64]struct{}
 	releaseCtx      context.Context
 	releaseCancel   context.CancelFunc
 	releaseLoopDone chan struct{}
 	releaseStarted  bool
 	releaseClosed   bool
 
-	lastOrphanWarnUnixNano atomic.Int64
-	fuseSysfsDir           atomic.Pointer[string]
+	lastOrphanWarnUnixNano     atomic.Int64
+	lastOrphanDropWarnUnixNano atomic.Int64
+	nowFn                      func() time.Time
+	fuseSysfsDir               atomic.Pointer[string]
 
 	readAhead          *ReadAheadCoordinator
 	stage              *StageCoordinator
 	stageSession       *StageDirSession
 	ephemeralStageRoot string
-	specialMu          sync.RWMutex
-	specialInodes      map[uint64]bool
+	knownMu            sync.RWMutex
+	knownInodes        map[uint64]knownInodeInfo
 	unmountMu          sync.Mutex
 	unmountState       unmountProgressState
 	unmountDeadline    time.Time
@@ -183,6 +203,10 @@ type RawFS struct {
 	fenceReason  string
 	fenceCh      chan struct{}
 	onFence      func(status fuse.Status, reason string)
+
+	leaseMu        sync.Mutex
+	leaseActive    bool
+	leaseExpiresAt time.Time
 }
 
 func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
@@ -260,45 +284,49 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 		}
 	}
 
+	if nowFn == nil {
+		nowFn = cfg.NowFn
+	}
+	var dentries *dentryIndex
+	if !cfg.IsReadOnly() {
+		dentries = newDentryIndex()
+	}
 	releaseCtx, releaseCancel := context.WithCancel(context.Background())
 	fs := &RawFS{
 		RawFileSystem:      fuse.NewDefaultRawFileSystem(),
 		client:             client,
-		cache:              NewNamespaceCache(DefaultNamespaceCacheCapacity),
+		dentries:           dentries,
 		caps:               newCapabilityCache(),
 		orphanInodes:       make(map[uint64]struct{}),
 		orphanSpans:        make(map[uint64]trace.SpanContext),
 		statsSnapshots:     make(map[uint64][]byte),
-		specialInodes:      make(map[uint64]bool),
+		knownInodes:        make(map[uint64]knownInodeInfo),
 		tmpMgr:             NewTmpFileManager(cfg.RootIno, instanceDir),
 		cfg:                cfg,
 		metrics:            metrics,
 		releaseCtx:         releaseCtx,
 		releaseCancel:      releaseCancel,
+		releaseInos:        make(map[uint64]struct{}),
+		nowFn:              nowFn,
 		readAhead:          NewReadAheadCoordinator(),
 		stageSession:       session,
 		ephemeralStageRoot: ephemeralRoot,
 		fenceCh:            make(chan struct{}),
 		onFence:            cfg.OnFence,
 	}
-	fs.cache.configure(fuse.FUSE_ROOT_ID, cfg.EntryTimeoutSeconds, cfg.AttrTimeoutSeconds)
+	if cfg.MountID != "" {
+		fs.leaseActive = true
+		fs.leaseExpiresAt = fs.now().Add(time.Duration(cfg.LeaseTTLSeconds) * time.Second)
+	}
 	if cfg.IsReadOnly() {
-		fs.cache.configureReadOnly(nowFn)
 		fs.readAhead.configureReadOnly(cfg.AttrTimeoutSeconds, nowFn)
 	}
 	if cfg.RootInode != nil && cfg.RootInode.GetAttr() != nil {
-		fs.cache.putInode(fuse.FUSE_ROOT_ID, cfg.RootInode, cfg.EntryTimeoutSeconds, cfg.AttrTimeoutSeconds)
+		fs.recordKnownInode(fuse.FUSE_ROOT_ID, cfg.RootInode)
+	} else {
+		fs.knownInodes[fuse.FUSE_ROOT_ID] = knownInodeInfo{isDir: true}
 	}
 	if cfg.IsStaged() {
-		var onStage func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
-		if cfg.AttrTimeoutSeconds > 0 {
-			onStage = func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp) {
-				if fs.IsFenced() {
-					return
-				}
-				fs.cache.stageWriteInodeAt(cacheEpoch, nodeID, endOffset, ts)
-			}
-		}
 		fs.stage = NewStageCoordinator(
 			instanceDir,
 			cfg.StageSize,
@@ -388,8 +416,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 				return finalInode, nil
 			},
 			StageHooks{
-				OnStage: onStage,
-				OnCommit: func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr, preserveMeta, capPresent bool) {
+				OnCommit: func(nodeID, ino, _ uint64, inode *storagev1.Inode, _ uint64, _, preserveMeta, capPresent bool) {
 					if fs.IsFenced() {
 						return
 					}
@@ -399,19 +426,13 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 						return
 					}
 					if inode != nil {
-						fs.recordInodeSpecial(nodeID, inode)
-					}
-					if refreshAttr && inode != nil {
-						fs.cache.refreshInodeFromWriteAt(cacheEpoch, nodeID, inode, minSize, DefaultWriteAttrTimeoutSeconds)
+						fs.recordKnownInode(nodeID, inode)
 					}
 					if capPresent {
 						fs.caps.markPresent(nodeID)
 					} else {
 						fs.caps.markAbsent(nodeID)
 					}
-				},
-				OnError: func(nodeID uint64) {
-					fs.cache.invalidateInode(nodeID)
 				},
 			},
 		)
@@ -429,7 +450,6 @@ func (fs *RawFS) bindMetrics(m *Metrics) {
 	}
 	fs.metrics = m
 	m.bindProvider(fs)
-	fs.cache.bindMetrics(m)
 	fs.caps.bindMetrics(m)
 	fs.tmpMgr.bindMetrics(m)
 	fs.readAhead.bindMetrics(m)
@@ -465,50 +485,53 @@ func isSpecialAttr(inode *storagev1.Inode) bool {
 		attr.GetMode()&(syscall.S_ISUID|syscall.S_ISGID) != 0
 }
 
-func (fs *RawFS) recordInodeSpecial(nodeID uint64, inode *storagev1.Inode) {
-	if inode == nil || inode.GetAttr() == nil {
+func (fs *RawFS) recordKnownInode(nodeID uint64, inode *storagev1.Inode) {
+	if nodeID == 0 || inode == nil || inode.GetAttr() == nil {
 		return
 	}
-	special := isSpecialAttr(inode)
-	fs.specialMu.Lock()
-	if fs.specialInodes == nil {
-		fs.specialInodes = make(map[uint64]bool)
+	info := knownInodeInfo{
+		isDir:     inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR,
+		isSpecial: isSpecialAttr(inode),
 	}
-	fs.specialInodes[nodeID] = special
-	fs.specialMu.Unlock()
+	fs.knownMu.Lock()
+	if fs.knownInodes == nil {
+		fs.knownInodes = make(map[uint64]knownInodeInfo)
+	}
+	fs.knownInodes[nodeID] = info
+	fs.knownMu.Unlock()
 }
 
-func (fs *RawFS) setInodeSpecialFlag(nodeID uint64, special bool) {
-	fs.specialMu.Lock()
-	if fs.specialInodes == nil {
-		fs.specialInodes = make(map[uint64]bool)
-	}
-	fs.specialInodes[nodeID] = special
-	fs.specialMu.Unlock()
+func (fs *RawFS) lookupKnownInode(nodeID uint64) (knownInodeInfo, bool) {
+	fs.knownMu.RLock()
+	info, ok := fs.knownInodes[nodeID]
+	fs.knownMu.RUnlock()
+	return info, ok
 }
 
-func (fs *RawFS) forgetInodeSpecial(nodeID uint64) {
-	fs.specialMu.Lock()
-	delete(fs.specialInodes, nodeID)
-	fs.specialMu.Unlock()
+func (fs *RawFS) setKnownInodeSpecial(nodeID uint64, special bool) {
+	fs.knownMu.Lock()
+	if info, ok := fs.knownInodes[nodeID]; ok {
+		info.isSpecial = special
+		fs.knownInodes[nodeID] = info
+	}
+	fs.knownMu.Unlock()
+}
+
+func (fs *RawFS) forgetKnownInode(nodeID uint64) {
+	fs.knownMu.Lock()
+	delete(fs.knownInodes, nodeID)
+	fs.knownMu.Unlock()
+}
+
+func (fs *RawFS) clearKnownInodes() {
+	fs.knownMu.Lock()
+	clear(fs.knownInodes)
+	fs.knownMu.Unlock()
 }
 
 func (fs *RawFS) isInodeSpecial(nodeID uint64) bool {
-	fs.specialMu.RLock()
-	special, ok := fs.specialInodes[nodeID]
-	fs.specialMu.RUnlock()
-	if ok {
-		return special
-	}
-	if cached, hit := fs.cache.inodeReadOnly(nodeID); hit && cached.inode != nil && cached.inode.GetAttr() != nil {
-		special = isSpecialAttr(cached.inode)
-		fs.specialMu.Lock()
-		if fs.specialInodes == nil {
-			fs.specialInodes = make(map[uint64]bool)
-		}
-		fs.specialInodes[nodeID] = special
-		fs.specialMu.Unlock()
-		return special
+	if info, ok := fs.lookupKnownInode(nodeID); ok {
+		return info.isSpecial
 	}
 	return true
 }
@@ -590,7 +613,6 @@ func (fs *RawFS) Snapshot() Snapshot {
 }
 
 func (fs *RawFS) collectSubsystemGauges() subsystemGauges {
-	nsEntries, nsUsed, nsCap := fs.cache.stats()
 	openFiles, openDirs := fs.handles.stats()
 	tmpActive := fs.tmpMgr.activeLocalFiles()
 	tmpResBytes := uint64(max(int64(0), fs.metrics.tmpResidentBytes.Load()))
@@ -606,9 +628,6 @@ func (fs *RawFS) collectSubsystemGauges() subsystemGauges {
 	}
 
 	return subsystemGauges{
-		nsEntries:               nsEntries,
-		nsUsedWeight:            nsUsed,
-		nsCapacity:              nsCap,
 		capEntries:              fs.caps.count(),
 		stagePendingChunks:      stagePending,
 		stageUsedBytes:          stageUsed,
@@ -931,12 +950,10 @@ func (fs *RawFS) resetFencedUnmountProgress() {
 
 func (fs *RawFS) cleanupLocalStateOnUnmountLocked() {
 	fs.handles.clear()
-	fs.cache.clear()
+	fs.dentries.clear()
 	fs.caps.reset()
 	fs.tmpMgr.Clear()
-	fs.specialMu.Lock()
-	clear(fs.specialInodes)
-	fs.specialMu.Unlock()
+	fs.clearKnownInodes()
 	fs.stateMu.Lock()
 	clear(fs.orphanInodes)
 	clear(fs.orphanSpans)
@@ -944,6 +961,7 @@ func (fs *RawFS) cleanupLocalStateOnUnmountLocked() {
 	fs.stateMu.Unlock()
 	fs.releaseMu.Lock()
 	fs.releaseQueue = nil
+	clear(fs.releaseInos)
 	fs.releaseMu.Unlock()
 	if fs.stageSession != nil {
 		_ = fs.stageSession.Close()
@@ -1019,12 +1037,31 @@ func (fs *RawFS) hasUnsyncedMeta() bool {
 	return fs.metaDirtySeq.Load() > fs.metaSyncedSeq.Load()
 }
 
+func (fs *RawFS) now() time.Time {
+	if fs != nil && fs.nowFn != nil {
+		return fs.nowFn()
+	}
+	return time.Now()
+}
+
+func releaseRetryBackoff(attempts int) time.Duration {
+	if attempts <= 1 {
+		return releaseRetryInitialBackoff
+	}
+	shift := min(attempts-1, 5)
+	backoff := releaseRetryInitialBackoff << shift
+	if backoff > releaseRetryMaxBackoff {
+		return releaseRetryMaxBackoff
+	}
+	return backoff
+}
+
 func shouldRetryReclaim(err error) bool {
 	if err == nil {
 		return false
 	}
 	switch connect.CodeOf(err) {
-	case connect.CodeUnavailable, connect.CodeDeadlineExceeded, connect.CodeResourceExhausted, connect.CodeAborted, connect.CodeInternal:
+	case connect.CodeUnavailable, connect.CodeDeadlineExceeded, connect.CodeInternal:
 		return true
 	default:
 		return errors.Is(err, context.DeadlineExceeded)
@@ -1045,7 +1082,7 @@ func (fs *RawFS) releaseQueueDepth() int {
 }
 
 func (fs *RawFS) warnOrphanBacklog(ctx context.Context, ino uint64, attempts, queueDepth int, err error) {
-	now := time.Now().UnixNano()
+	now := fs.now().UnixNano()
 	last := fs.lastOrphanWarnUnixNano.Load()
 	if last != 0 && now-last < int64(orphanWarnMinInterval) {
 		return
@@ -1061,6 +1098,26 @@ func (fs *RawFS) warnOrphanBacklog(ctx context.Context, ino uint64, attempts, qu
 		"attempts", attempts,
 		"queue_depth", queueDepth,
 		"error", err,
+	)
+}
+
+func (fs *RawFS) warnOrphanDropped(ctx context.Context, ino uint64, attempts, queueDepth int, reason string) {
+	now := fs.now().UnixNano()
+	last := fs.lastOrphanDropWarnUnixNano.Load()
+	if last != 0 && now-last < int64(orphanWarnMinInterval) {
+		return
+	}
+	if !fs.lastOrphanDropWarnUnixNano.CompareAndSwap(last, now) {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	fs.logger().WarnContext(ctx, "orphan_reclaim_dropped",
+		"ino", ino,
+		"attempts", attempts,
+		"queue_depth", queueDepth,
+		"reason", reason,
 	)
 }
 
@@ -1114,11 +1171,27 @@ func (fs *RawFS) reclaimOrphan(ctx context.Context, ino uint64) {
 		return
 	}
 	item.attempts = 1
+	item.nextRetryAt = fs.now().Add(releaseRetryBackoff(item.attempts))
 	fs.releaseMu.Lock()
 	if fs.releaseClosed {
 		fs.releaseMu.Unlock()
 		return
 	}
+	if _, dup := fs.releaseInos[serverIno]; dup {
+		fs.releaseMu.Unlock()
+		return
+	}
+	if len(fs.releaseInos) >= DefaultReleaseQueueMaxSize {
+		qDepth := len(fs.releaseQueue)
+		fs.releaseMu.Unlock()
+		logCtx := ctx
+		if !trace.SpanContextFromContext(logCtx).IsValid() && sc.IsValid() {
+			logCtx = trace.ContextWithSpanContext(context.Background(), sc)
+		}
+		fs.warnOrphanDropped(logCtx, serverIno, item.attempts, qDepth, "queue_full")
+		return
+	}
+	fs.releaseInos[serverIno] = struct{}{}
 	fs.releaseQueue = append(fs.releaseQueue, item)
 	qDepth := len(fs.releaseQueue)
 	if !fs.releaseStarted {
@@ -1184,36 +1257,72 @@ func (fs *RawFS) releaseRetryLoop() {
 		case <-fs.releaseCtx.Done():
 			return
 		case <-ticker.C:
-			fs.drainReleaseQueueOnce(fs.releaseCtx)
+			fs.drainReleaseQueueOnce(fs.releaseCtx, false)
 		}
 	}
 }
 
-func (fs *RawFS) drainReleaseQueueOnce(ctx context.Context) {
+func (fs *RawFS) drainReleaseQueueOnce(ctx context.Context, ignoreBackoff bool) {
+	now := fs.now()
 	fs.releaseMu.Lock()
-	queue := fs.releaseQueue
-	fs.releaseQueue = nil
+	var due []reclaimRetryItem
+	var pending []reclaimRetryItem
+	for _, item := range fs.releaseQueue {
+		if !ignoreBackoff && now.Before(item.nextRetryAt) {
+			pending = append(pending, item)
+		} else {
+			due = append(due, item)
+		}
+	}
+	fs.releaseQueue = pending
 	fs.releaseMu.Unlock()
-	for _, item := range queue {
+
+	for _, item := range due {
 		if ctx.Err() != nil {
 			fs.releaseMu.Lock()
-			fs.releaseQueue = append(fs.releaseQueue, item)
+			if !fs.IsFenced() && (!fs.releaseClosed || ignoreBackoff) {
+				fs.releaseQueue = append(fs.releaseQueue, item)
+			} else {
+				delete(fs.releaseInos, item.ino)
+			}
 			fs.releaseMu.Unlock()
 			continue
 		}
-		if !fs.tryReclaim(ctx, &item, true) {
-			item.attempts++
+		if fs.tryReclaim(ctx, &item, true) {
 			fs.releaseMu.Lock()
-			fs.releaseQueue = append(fs.releaseQueue, item)
+			delete(fs.releaseInos, item.ino)
+			fs.releaseMu.Unlock()
+			continue
+		}
+		item.attempts++
+		if item.attempts >= DefaultReleaseMaxAttempts {
+			fs.releaseMu.Lock()
+			delete(fs.releaseInos, item.ino)
 			qDepth := len(fs.releaseQueue)
 			fs.releaseMu.Unlock()
-			if qDepth >= fs.orphanBacklogThreshold() {
-				logCtx := ctx
-				if !trace.SpanContextFromContext(logCtx).IsValid() && item.spanCtx.IsValid() {
-					logCtx = trace.ContextWithSpanContext(context.Background(), item.spanCtx)
-				}
-				fs.warnOrphanBacklog(logCtx, item.ino, item.attempts, qDepth, nil)
+			logCtx := ctx
+			if !trace.SpanContextFromContext(logCtx).IsValid() && item.spanCtx.IsValid() {
+				logCtx = trace.ContextWithSpanContext(context.Background(), item.spanCtx)
 			}
+			fs.warnOrphanDropped(logCtx, item.ino, item.attempts, qDepth, "max_attempts")
+			continue
+		}
+		item.nextRetryAt = fs.now().Add(releaseRetryBackoff(item.attempts))
+		fs.releaseMu.Lock()
+		if fs.IsFenced() {
+			delete(fs.releaseInos, item.ino)
+			fs.releaseMu.Unlock()
+			continue
+		}
+		fs.releaseQueue = append(fs.releaseQueue, item)
+		qDepth := len(fs.releaseQueue)
+		fs.releaseMu.Unlock()
+		if qDepth >= fs.orphanBacklogThreshold() {
+			logCtx := ctx
+			if !trace.SpanContextFromContext(logCtx).IsValid() && item.spanCtx.IsValid() {
+				logCtx = trace.ContextWithSpanContext(context.Background(), item.spanCtx)
+			}
+			fs.warnOrphanBacklog(logCtx, item.ino, item.attempts, qDepth, nil)
 		}
 	}
 }
@@ -1222,6 +1331,7 @@ func (fs *RawFS) stopAndDiscardReleaseQueue() {
 	fs.releaseMu.Lock()
 	fs.releaseClosed = true
 	fs.releaseQueue = nil
+	clear(fs.releaseInos)
 	started, done := fs.releaseStarted, fs.releaseLoopDone
 	fs.releaseMu.Unlock()
 	fs.releaseCancel()
@@ -1247,7 +1357,7 @@ func (fs *RawFS) stopAndDrainReleaseQueue(parentCtx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(parentCtx, DefaultUnmountReleaseTimeout)
 	defer cancel()
-	fs.drainReleaseQueueOnce(ctx)
+	fs.drainReleaseQueueOnce(ctx, true)
 }
 
 func (fs *RawFS) FillAttr(out *fuse.Attr, ino *storagev1.Inode) {

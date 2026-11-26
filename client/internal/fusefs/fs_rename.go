@@ -50,40 +50,26 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	defer fs.lifecycleMu.RUnlock()
 
 	seq0 := fs.topologySeq.Load()
-	source, _ := fs.cache.entry(input.NodeId, oldName)
-	var sourceAttr *storagev1.Inode
-	if source != 0 {
-		if cached, ok := fs.cache.peekInode(source); ok {
-			sourceAttr = cached.inode
-		}
-	}
-	target, targetKnown := fs.cache.entry(input.Newdir, newName)
+	source, sourceKnown := fs.dentries.get(input.NodeId, oldName)
+	target, targetKnown := fs.dentries.get(input.Newdir, newName)
 	var targetAttr *storagev1.Inode
-	if target != 0 {
-		if cached, ok := fs.cache.peekInode(target); ok {
-			targetAttr = cached.inode
-		}
-	}
 
-	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending()
-	if needLookup {
-		old, oldStatus := fs.lookupInodeWithContext(opCtx, cancel, input.NodeId, oldName)
+	anyActive := fs.handles.AnyOpenFiles() || fs.handles.AnyOpenDirs() || fs.stage.HasAnyPending()
+	if !sourceKnown && fs.stage.HasAnyPending() {
+		oldInode, _, _, oldStatus := fs.lookupInodeWithContext(opCtx, cancel, input.NodeId, oldName)
 		if oldStatus != fuse.OK {
 			return oldStatus
 		}
-		sourceAttr = old.inode
-		source = fs.ToKernelIno(sourceAttr.GetIno())
-		cached, targetStatus := fs.lookupInodeWithContext(opCtx, cancel, input.Newdir, newName)
+		source = fs.ToKernelIno(oldInode.GetIno())
+	}
+	if !targetKnown && input.Flags&renameNoReplace == 0 && anyActive {
+		tgtInode, _, _, targetStatus := fs.lookupInodeWithContext(opCtx, cancel, input.Newdir, newName)
 		if targetStatus != fuse.OK && targetStatus != fuse.ENOENT {
 			return targetStatus
 		}
-		targetKnown = true
 		if targetStatus == fuse.OK {
-			targetAttr = cached.inode
+			targetAttr = tgtInode
 			target = fs.ToKernelIno(targetAttr.GetIno())
-		} else {
-			target = 0
-			targetAttr = nil
 		}
 	}
 
@@ -112,17 +98,15 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		unlock := fs.inodeLocks.lock(target)
 		defer unlock()
 		if target != source && input.Flags&(renameExchange|renameNoReplace) == 0 {
-			needRevalidate := fs.topologySeq.Load() != seq0 &&
-				(fs.handles.AnyOpen() || fs.stage.HasAnyPending())
-			needOpenTargetAttr := fs.handles.IsOpen(target) && (targetAttr == nil || targetAttr.GetAttr() == nil)
-			if needRevalidate || needOpenTargetAttr {
-				refreshed, refSt := fs.getInodeWithContext(barrierCtx, nil, target)
+			targetOpenOrStaged := fs.handles.IsOpen(target) || (hasTargetServerIno && fs.stage.HasPending(targetServerIno))
+			needRevalidate := fs.topologySeq.Load() != seq0 && targetOpenOrStaged
+			if targetOpenOrStaged && (targetAttr == nil || targetAttr.GetAttr() == nil || needRevalidate) {
+				refreshed, _, refSt := fs.getAttrInodeWithContext(barrierCtx, nil, target)
 				switch refSt {
 				case fuse.OK:
-					targetAttr = refreshed.inode
+					targetAttr = refreshed
 				case fuse.ENOENT:
 					targetAttr = nil
-					targetKnown = false
 				default:
 					return refSt
 				}
@@ -150,7 +134,6 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
-	epoch := fs.cache.version()
 	_, err := fs.client.Rename(ctx, connect.NewRequest(&storagev1.RenameRequest{
 		OldParentIno:       oldParentIno,
 		OldName:            []byte(oldName),
@@ -167,155 +150,47 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	}
 	fs.markMetaDirty()
 
-	oldDelta, oldKnown, newDelta, newKnown := renameParentNlinkDeltas(
-		input.NodeId, input.Newdir, oldName, newName, input.Flags,
-		source, sourceAttr, target, targetKnown, targetAttr,
-	)
-	if oldKnown {
-		fs.cache.invalidateDirListingTouchParentNowAt(epoch, input.NodeId, oldDelta)
-	} else {
-		fs.cache.invalidateDirListingDropParent(input.NodeId)
-	}
-	if input.Newdir != input.NodeId {
-		if newKnown {
-			fs.cache.invalidateDirListingTouchParentNowAt(epoch, input.Newdir, newDelta)
-		} else {
-			fs.cache.invalidateDirListingDropParent(input.Newdir)
-		}
-	}
 	if input.Flags&renameExchange != 0 {
-
 		if target != 0 {
-			fs.cache.putEntryAt(epoch, input.NodeId, oldName, target)
+			fs.dentries.put(input.NodeId, oldName, target)
 		} else {
-			fs.cache.removeEntry(input.NodeId, oldName)
+			fs.dentries.deleteName(input.NodeId, oldName)
 		}
 		if source != 0 {
-			fs.cache.putEntryAt(epoch, input.Newdir, newName, source)
+			fs.dentries.put(input.Newdir, newName, source)
 		} else {
-			fs.cache.removeEntry(input.Newdir, newName)
+			fs.dentries.deleteName(input.Newdir, newName)
 		}
 	} else {
-
 		if input.Flags&renameWhiteout != 0 {
-			fs.cache.removeEntry(input.NodeId, oldName)
+			fs.dentries.deleteName(input.NodeId, oldName)
 		} else if input.NodeId != input.Newdir || oldName != newName {
-			fs.cache.putEntryAt(epoch, input.NodeId, oldName, 0)
+			fs.dentries.deleteName(input.NodeId, oldName)
 		}
 		if source != 0 {
-			fs.cache.putEntryAt(epoch, input.Newdir, newName, source)
+			fs.dentries.put(input.Newdir, newName, source)
 		} else {
-			fs.cache.removeEntry(input.Newdir, newName)
+			fs.dentries.deleteName(input.Newdir, newName)
 		}
 	}
-	sourceTypeKnown := source != 0 && sourceAttr != nil && sourceAttr.GetAttr() != nil
-	sourceIsDir := sourceTypeKnown && sourceAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
-	dstTypeKnown := target != 0 && targetAttr != nil && targetAttr.GetAttr() != nil
-	dstIsDir := dstTypeKnown && targetAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
-	if source != 0 {
-		fs.cache.invalidateInode(source)
-	}
-	if target != 0 && target != source {
-		if input.Flags&renameExchange == 0 && dstIsDir {
-			fs.handles.MarkRemovedDir(target, targetAttr)
-		}
-		fs.cache.invalidateInode(target)
-		if input.Flags&renameExchange == 0 && (dstIsDir || (!dstTypeKnown && (!sourceTypeKnown || sourceIsDir))) {
-			fs.cache.invalidateDir(target)
-		}
-	}
-	if input.NodeId != input.Newdir {
-		if source == 0 {
-			fs.cache.invalidateChildParents(input.NodeId)
-		}
-		if input.Flags&renameExchange != 0 && target == 0 {
-			fs.cache.invalidateChildParents(input.Newdir)
-		}
-	}
+
 	fs.topologySeq.Add(1)
-	if target != 0 && target != source && input.Flags&renameExchange == 0 &&
-		targetAttr != nil && targetAttr.GetAttr() != nil && targetAttr.GetAttr().GetNlink() == 1 {
-		if targetOpen {
-			fs.markOrphanWithContext(opCtx, target)
-		} else if hasTargetServerIno {
-			fs.stage.DiscardInode(targetServerIno)
+	if target != 0 && target != source && input.Flags&renameExchange == 0 {
+		fs.forgetKnownInode(target)
+		if targetIsDir {
+			fs.handles.MarkRemovedDir(target, targetAttr)
+			fs.dentries.forgetChild(target)
+		}
+		if targetAttr != nil && targetAttr.GetAttr() != nil && targetAttr.GetAttr().GetNlink() == 1 {
+			if targetOpen {
+				fs.markOrphanWithContext(opCtx, target)
+			} else if hasTargetServerIno {
+				fs.stage.DiscardInode(targetServerIno)
+				fs.readAhead.InvalidateInode(targetServerIno)
+			}
+		} else if !targetOpen && hasTargetServerIno {
 			fs.readAhead.InvalidateInode(targetServerIno)
-			fs.forgetInodeSpecial(target)
 		}
 	}
 	return fuse.OK
-}
-
-func renameParentNlinkDeltas(
-	oldDir, newDir uint64,
-	oldName, newName string,
-	flags uint32,
-	source uint64,
-	sourceAttr *storagev1.Inode,
-	target uint64,
-	targetKnown bool,
-	targetAttr *storagev1.Inode,
-) (oldDelta int32, oldKnown bool, newDelta int32, newKnown bool) {
-	sameParent := oldDir == newDir
-	if (sameParent && oldName == newName) || (source != 0 && target != 0 && source == target) {
-		return 0, true, 0, true
-	}
-
-	srcTypeKnown := source != 0 && sourceAttr != nil && sourceAttr.GetAttr() != nil
-	srcIsDir := srcTypeKnown && sourceAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
-
-	if flags&renameExchange != 0 {
-		if sameParent {
-			return 0, true, 0, true
-		}
-		dstTypeKnown := target != 0 && targetAttr != nil && targetAttr.GetAttr() != nil
-		if !srcTypeKnown || !dstTypeKnown {
-			return 0, false, 0, false
-		}
-		dstIsDir := targetAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
-		if srcIsDir == dstIsDir {
-			return 0, true, 0, true
-		}
-		if srcIsDir {
-			return -1, true, 1, true
-		}
-		return 1, true, -1, true
-	}
-
-	var targetExistenceKnown, hasTarget bool
-	switch {
-	case flags&renameNoReplace != 0:
-		targetExistenceKnown = true
-	case targetKnown && target == 0:
-		targetExistenceKnown = true
-	case targetKnown && target != 0:
-		targetExistenceKnown = true
-		hasTarget = true
-	}
-
-	if !srcTypeKnown {
-		if sameParent && targetExistenceKnown && !hasTarget {
-			return 0, true, 0, true
-		}
-		return 0, false, 0, false
-	}
-	if !srcIsDir {
-		return 0, true, 0, true
-	}
-	if sameParent {
-		if !targetExistenceKnown {
-			return 0, false, 0, false
-		}
-		if hasTarget {
-			return -1, true, 0, true
-		}
-		return 0, true, 0, true
-	}
-	if !targetExistenceKnown {
-		return -1, true, 0, false
-	}
-	if hasTarget {
-		return -1, true, 0, true
-	}
-	return -1, true, 1, true
 }

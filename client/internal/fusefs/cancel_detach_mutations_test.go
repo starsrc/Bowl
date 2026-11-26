@@ -363,10 +363,11 @@ func TestStep70_PreRPCLookupsAndIdempotentOps_RemainInterruptibleByCancel(t *tes
 
 	t.Run("Rmdir_PreRPCLookup_InterruptibleWithEINTR", func(t *testing.T) {
 		srv := newFakeStorage(t, withTTL(0, 0))
-		keepIno := srv.seedFile(1, "keep-open-rmd.txt", 0o644, nil)
+		keepDirIno := srv.seedDir(1, "keep-open-rmd-dir", 0o755)
 		srv.seedDir(1, "rmd-target", 0o755)
 		fs := newTestRawFS(t, srv, withDirectIO(false))
-		opened := mustOpenFile(t, fs, keepIno, syscall.O_RDONLY)
+		var openedDir fuse.OpenOut
+		requireStatus(t, "OpenDir keep-open-rmd-dir", fuse.OK, fs.OpenDir(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: keepDirIno}}, &openedDir))
 
 		cancelCh := make(chan struct{})
 		srv.lookupHook = func(ctx context.Context, _ *storagev1.LookupRequest) (*storagev1.LookupResponse, error) {
@@ -377,7 +378,7 @@ func TestStep70_PreRPCLookupsAndIdempotentOps_RemainInterruptibleByCancel(t *tes
 
 		requireStatus(t, "Rmdir pre-RPC Lookup canceled", fuse.EINTR, st)
 		require.Zero(t, srv.rmdirCalls.Load())
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: keepIno}, Fh: opened.Fh})
+		fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: keepDirIno}, Fh: openedDir.Fh})
 	})
 
 	t.Run("Fsync_IdempotentRPC_RemainsInterruptibleWithEINTR", func(t *testing.T) {

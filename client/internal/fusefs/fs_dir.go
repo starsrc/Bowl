@@ -7,7 +7,6 @@ import (
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
@@ -31,11 +30,23 @@ func (fs *RawFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.O
 		unlock := fs.inodeLocks.rlock(input.NodeId)
 		defer unlock()
 	}
-	cached, status := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
+	if !fs.IsFenced() {
+		if info, ok := fs.lookupKnownInode(input.NodeId); ok {
+			if !info.isDir {
+				return fuse.Status(syscall.ENOTDIR)
+			}
+			fh, st := fs.openHandle(input.NodeId, input.Flags, true)
+			if st == fuse.OK {
+				out.Fh = fh
+			}
+			return st
+		}
+	}
+	inode, _, status := fs.getAttrInodeWithContext(opCtx, cancel, input.NodeId)
 	if status != fuse.OK {
 		return status
 	}
-	if cached.inode.GetAttr().GetMode()&syscall.S_IFMT != syscall.S_IFDIR {
+	if inode.GetAttr().GetMode()&syscall.S_IFMT != syscall.S_IFDIR {
 		return fuse.Status(syscall.ENOTDIR)
 	}
 	fh, status := fs.openHandle(input.NodeId, input.Flags, true)
@@ -45,77 +56,44 @@ func (fs *RawFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.O
 	return status
 }
 
-func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{}, input *fuse.ReadIn) (cachedDir, fuse.Status) {
+func (fs *RawFS) readDirPage(parentCtx context.Context, cancel <-chan struct{}, input *fuse.ReadIn) ([]*storagev1.DirEntryPlus, fuse.Status) {
 	if _, status := fs.checkedHandle(input.NodeId, input.Fh, true); status != fuse.OK {
-		return cachedDir{}, status
+		return nil, status
 	}
 	if _, removed := fs.handles.RemovedDir(input.NodeId); removed {
-		return cachedDir{}, fuse.OK
-	}
-	if !fs.IsFenced() {
-		if cached, ok := fs.cache.dir(input.NodeId); ok {
-			return cached, fuse.OK
-		}
+		return nil, fuse.OK
 	}
 	ino, status := fs.ToServerIno(input.NodeId)
 	if status != fuse.OK {
-		return cachedDir{}, status
+		return nil, status
 	}
-	epoch, generation := fs.cache.snapshot()
 	ctx, done := fs.RPCContextFrom(parentCtx, cancel)
 	defer done()
-	offset := input.Offset
-	var entries []*storagev1.DirEntryPlus
-	firstPage := true
-	for {
-		reqCtx := ctx
-		if !firstPage {
-			reqCtx = rpc.WithRequestID(ctx, fs.NextRequestID())
-		}
-		firstPage = false
-		resp, err := fs.client.ReadDirPlus(reqCtx, connect.NewRequest(&storagev1.ReadDirPlusRequest{
-			Ino:    ino,
-			Offset: offset,
-			Limit:  512,
-			DiskId: fs.cfg.DiskID,
-			Branch: fs.cfg.Branch,
-		}))
-		fenced := fs.IsFenced()
-		if !fenced && fs.cache.version() != epoch {
-			return cachedDir{}, fuse.Status(syscall.ESTALE)
-		}
-		if err != nil {
-			return cachedDir{}, fs.ToStatus(err)
-		}
-		page := resp.Msg.GetEntries()
-		for _, e := range page {
-			if e.GetNextOffset() <= offset {
-				return cachedDir{}, fuse.EIO
-			}
-			offset = e.GetNextOffset()
-			serverEntryIno := e.GetIno()
-			if !fenced && e.GetInode() != nil {
-				if fs.cfg.IsReadOnly() {
-					fs.readAhead.ObserveInode(serverEntryIno, e.GetInode())
-				}
-				fs.stage.OverlayInode(serverEntryIno, e.GetInode())
-			}
-			e.Ino = fs.ToKernelIno(serverEntryIno)
-		}
-		if !fenced && fs.cfg.IsReadOnly() {
-			fs.cache.refreshExistingInodesFromReadDirAt(epoch, page)
-		}
-		entries = append(entries, page...)
-		if input.Offset != 0 || len(entries)+1 > fs.cache.capacity {
-			return cachedDir{entries: entries}, fuse.OK
-		}
-		if len(page) < 512 {
-			if !fenced {
-				fs.cache.putDirAtIf(generation, epoch, input.NodeId, entries)
-			}
-			return cachedDir{entries: entries}, fuse.OK
-		}
+	resp, err := fs.client.ReadDirPlus(ctx, connect.NewRequest(&storagev1.ReadDirPlusRequest{
+		Ino:    ino,
+		Offset: input.Offset,
+		Limit:  512,
+		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
+	}))
+	if err != nil {
+		return nil, fs.ToStatus(err)
 	}
+	fenced := fs.IsFenced()
+	prevOffset := input.Offset
+	page := resp.Msg.GetEntries()
+	for _, e := range page {
+		if e.GetNextOffset() <= prevOffset {
+			return nil, fuse.EIO
+		}
+		prevOffset = e.GetNextOffset()
+		serverEntryIno := e.GetIno()
+		if !fenced && e.GetInode() != nil {
+			fs.stage.OverlayInode(serverEntryIno, e.GetInode())
+		}
+		e.Ino = fs.ToKernelIno(serverEntryIno)
+	}
+	return page, fuse.OK
 }
 
 func (fs *RawFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) (status fuse.Status) {
@@ -128,11 +106,11 @@ func (fs *RawFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.D
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	res, status := fs.readDirEntries(opCtx, cancel, input)
+	entries, status := fs.readDirPage(opCtx, cancel, input)
 	if status != fuse.OK {
 		return status
 	}
-	for _, entry := range res.entries {
+	for _, entry := range entries {
 		if entry.GetNextOffset() <= input.Offset {
 			continue
 		}
@@ -157,11 +135,12 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	res, status := fs.readDirEntries(opCtx, cancel, input)
+	entries, status := fs.readDirPage(opCtx, cancel, input)
 	if status != fuse.OK {
 		return status
 	}
-	for i, entry := range res.entries {
+	fenced := fs.IsFenced()
+	for _, entry := range entries {
 		if entry.GetNextOffset() <= input.Offset {
 			continue
 		}
@@ -179,12 +158,11 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 		} else {
 			entryTTL := entry.GetEntryTimeoutSeconds()
 			attrTTL := entry.GetAttrTimeoutSeconds()
-			if fs.IsFenced() {
+			if fenced {
 				entryTTL = 0
 				attrTTL = 0
-			} else if res.fromCache && fs.cfg.IsReadOnly() {
-				entryTTL = min(entryTTL, remainingSeconds(res.entryExpiryAt(i), res.nowNano))
-				attrTTL = min(attrTTL, remainingSeconds(res.attrExpiryAt(i), res.nowNano))
+			} else if entry.GetInode() != nil {
+				fs.stage.ObserveServerInode(entry.GetInode().GetIno(), entry.GetInode(), false)
 			}
 			fs.FillEntryOut(eo, entry.GetInode(), entryTTL, attrTTL)
 			if entry.GetInode() != nil {
@@ -192,6 +170,10 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 			}
 			eo.NodeId = fs.tmpMgr.ObserveKernelLookup(entry.GetIno())
 			eo.Ino = eo.NodeId
+			if !fenced {
+				fs.recordKnownInode(eo.NodeId, entry.GetInode())
+				fs.dentries.put(input.NodeId, name, eo.NodeId)
+			}
 		}
 	}
 	return fuse.OK
@@ -211,7 +193,6 @@ func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status f
 		return st
 	}
 	if _, removed := fs.handles.RemovedDir(input.NodeId); removed {
-
 		return fuse.OK
 	}
 	ino, status := fs.ToServerIno(input.NodeId)

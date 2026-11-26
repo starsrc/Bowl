@@ -79,7 +79,7 @@ func setupTestObsAndMux(t *testing.T) (*clientRuntime, *http.ServeMux) {
 	})
 	t.Cleanup(rawFS.OnUnmount)
 	require.NoError(t, obs.RegisterCollector(rawFS.Collector()))
-	return obs, newAdminMux(obs, rawFS, nil)
+	return obs, newAdminMux(obs, rawFS)
 }
 
 func TestStats_GivenHelpAndInvalidFlags_ReturnsExpectedExitCodes(t *testing.T) {
@@ -301,7 +301,7 @@ func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponses
 	mux.ServeHTTP(badRec, badReq)
 	require.Equal(t, http.StatusBadRequest, badRec.Code)
 
-	disabled, startErr := startAdminServer("off", obs, nil, nil)
+	disabled, startErr := startAdminServer("off", obs, nil)
 	require.NoError(t, startErr)
 	require.Nil(t, disabled)
 	require.Equal(t, "off", disabled.addr())
@@ -332,7 +332,7 @@ func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringSt
 	require.NotContains(t, rawStats, "total")
 	require.NotContains(t, rawStats, "unmount")
 
-	nilMux := newAdminMux(obs, nil, nil)
+	nilMux := newAdminMux(obs, nil)
 	nilReq := httptest.NewRequest(http.MethodGet, "/debug/unmount", http.NoBody)
 	nilRec := httptest.NewRecorder()
 	nilMux.ServeHTTP(nilRec, nilReq)
@@ -468,18 +468,17 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 
 func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpectedStatus(t *testing.T) {
 	obs, _ := setupTestObsAndMux(t)
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	rawFS := fusefs.NewRawFS(nil, fusefs.Config{
-		DiskID:  testDiskID1,
-		RootIno: 1,
+		DiskID:          testDiskID1,
+		RootIno:         1,
+		MountID:         "01950000-0000-7000-9000-000000000010",
+		LeaseTTLSeconds: 30,
+		NowFn:           func() time.Time { return now },
 	})
 	t.Cleanup(rawFS.OnUnmount)
 
-	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
-	tracker := newMountLeaseTracker(mountLeaseInfo{
-		mountID:         "01950000-0000-7000-9000-000000000010",
-		leaseTTLSeconds: 30,
-	}, func() time.Time { return now })
-	mux := newAdminMux(obs, rawFS, tracker)
+	mux := newAdminMux(obs, rawFS)
 
 	queryReadyz := func(m *http.ServeMux) (int, string) {
 		req := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody)
@@ -496,7 +495,7 @@ func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpe
 	require.Equal(t, http.StatusServiceUnavailable, code, "body=%s", body)
 	require.Contains(t, body, "mount_lease")
 
-	tracker.refresh(30)
+	rawFS.RefreshMountLease(30)
 	code, body = queryReadyz(mux)
 	require.Equal(t, http.StatusOK, code, "body=%s", body)
 
@@ -505,10 +504,13 @@ func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpe
 	require.Equal(t, http.StatusServiceUnavailable, code, "body=%s", body)
 	require.Contains(t, body, "writer epoch superseded")
 
-	leaseFreeFS := fusefs.NewRawFS(nil, fusefs.Config{DiskID: testDiskID1, RootIno: 1})
+	leaseFreeFS := fusefs.NewRawFS(nil, fusefs.Config{
+		DiskID:  testDiskID1,
+		RootIno: 1,
+		NowFn:   func() time.Time { return now },
+	})
 	t.Cleanup(leaseFreeFS.OnUnmount)
-	leaseFreeTracker := newMountLeaseTracker(mountLeaseInfo{}, func() time.Time { return now })
-	leaseFreeMux := newAdminMux(obs, leaseFreeFS, leaseFreeTracker)
+	leaseFreeMux := newAdminMux(obs, leaseFreeFS)
 	code, body = queryReadyz(leaseFreeMux)
 	require.Equal(t, http.StatusOK, code, "body=%s", body)
 }

@@ -11,14 +11,13 @@ const VirtualStatsIno uint64 = (uint64(1) << 63) - 1
 
 const (
 	virtualStatsName     = ".stats"
-	virtualJFSStatsName  = ".jfs.stats"
 	virtualStatsAttrSize = 64 * 1024
 )
 
 func (fs *RawFS) isVirtualStatsName(parent uint64, name string) bool {
 	return fs.cfg.EnableStatsFile &&
 		parent == fuse.FUSE_ROOT_ID &&
-		(name == virtualStatsName || name == virtualJFSStatsName)
+		name == virtualStatsName
 }
 
 func (fs *RawFS) isVirtualStatsIno(ino uint64) bool {
@@ -87,16 +86,15 @@ func (fs *RawFS) readVirtualStats(input *fuse.ReadIn, buf []byte) (fuse.ReadResu
 		return nil, fuse.EBADF
 	}
 
-	var snap []byte
-	if input.Offset > 0 {
-		fs.stateMu.Lock()
-		snap = fs.statsSnapshots[input.Fh]
-		fs.stateMu.Unlock()
-	}
+	fs.stateMu.Lock()
+	snap := fs.statsSnapshots[input.Fh]
+	fs.stateMu.Unlock()
 	if snap == nil {
 		snap = fs.metrics.FormatStatsFile()
 		fs.stateMu.Lock()
-		if _, stillOpen := fs.handles.Get(input.Fh); stillOpen {
+		if existing := fs.statsSnapshots[input.Fh]; existing != nil {
+			snap = existing
+		} else if _, stillOpen := fs.handles.Get(input.Fh); stillOpen {
 			fs.statsSnapshots[input.Fh] = snap
 		}
 		fs.stateMu.Unlock()

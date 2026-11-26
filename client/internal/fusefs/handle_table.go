@@ -5,6 +5,7 @@ import (
 	"sync"
 	"syscall"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -169,6 +170,18 @@ func (t *HandleTable) AnyOpen() bool {
 	return len(t.handles) != 0
 }
 
+func (t *HandleTable) AnyOpenFiles() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.openFiles != 0
+}
+
+func (t *HandleTable) AnyOpenDirs() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.openDirs != 0
+}
+
 func (t *HandleTable) clear() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -202,7 +215,7 @@ func (t *HandleTable) MarkRemovedDir(ino uint64, inode *storagev1.Inode) {
 	if t.counts[ino] == 0 {
 		return
 	}
-	removed := cloneInode(inode)
+	removed := proto.CloneOf(inode)
 	removed.Attr.Nlink = 0
 	removed.Attr.Ctime = timestamppb.Now()
 	t.removedDirs[ino] = removed

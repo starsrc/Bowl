@@ -138,8 +138,8 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 		}, &uncachedOut))
 		getAttrAfterUncached := srv.getAttrCalls.Load()
 
-		require.Equal(t, getAttrBefore, getAttrAfterCached, "cached SGID parent must issue zero GetAttr RPCs")
-		require.Equal(t, getAttrBefore+1, getAttrAfterUncached, "cache-miss SGID parent must issue one GetAttr RPC")
+		require.Equal(t, getAttrBefore+1, getAttrAfterCached, "SGID parent check issues one GetAttr RPC")
+		require.Equal(t, getAttrBefore+2, getAttrAfterUncached, "second SGID parent check issues one GetAttr RPC")
 		require.Equal(t, uint32(2000), cachedOut.Gid, "cached SGID parent must inherit gid=2000")
 		require.Equal(t, uint32(3000), uncachedOut.Gid, "uncached SGID parent must inherit gid=3000")
 		require.Zero(t, cachedOut.Mode&syscall.S_ISGID, "regular O_TMPFILE must not inherit S_ISGID mode bit")
@@ -210,6 +210,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 			Mode:     0o644,
 		}, &tmpOut))
 		nodeID := tmpOut.NodeId
+		getAttrAfterTmpfile := srv.getAttrCalls.Load()
 
 		emptyListSz, emptyListSt := fs.ListXAttr(nil, &fuse.InHeader{NodeId: nodeID}, nil)
 		requireStatus(t, "empty ListXAttr", fuse.OK, emptyListSt)
@@ -315,7 +316,8 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 		_, afterRmCapSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", make([]byte, 16))
 		requireStatus(t, "get security.capability after remove", fuse.Status(syscall.ENODATA), afterRmCapSt)
 
-		require.Zero(t, srv.setXattrCalls.Load()+srv.getXattrCalls.Load()+srv.listXattrCalls.Load()+srv.removeXattrCalls.Load()+srv.getAttrCalls.Load()+srv.setAttrCalls.Load())
+		require.Zero(t, srv.setXattrCalls.Load()+srv.getXattrCalls.Load()+srv.listXattrCalls.Load()+srv.removeXattrCalls.Load()+srv.setAttrCalls.Load())
+		require.Equal(t, getAttrAfterTmpfile, srv.getAttrCalls.Load())
 
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
 		fs.Forget(nodeID, 1)
@@ -363,6 +365,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 			Mode:     0o644,
 		}, &tmpOut))
 		nodeID := tmpOut.NodeId
+		getAttrAfterTmpfile := srv.getAttrCalls.Load()
 
 		var ioOut fuse.IoctlOut
 		requireStatus(t, "unsupported ioctl", fuse.Status(syscall.ENOTTY), fs.Ioctl(nil, &fuse.IoctlIn{
@@ -429,7 +432,8 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 		}, nil, &ioOut, fsxOut))
 		require.Equal(t, fusefs.FS_XFLAG_APPEND, binary.LittleEndian.Uint32(fsxOut[:4]))
 
-		require.Zero(t, srv.getAttrCalls.Load()+srv.setAttrCalls.Load())
+		require.Zero(t, srv.setAttrCalls.Load())
+		require.Equal(t, getAttrAfterTmpfile, srv.getAttrCalls.Load())
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
 		fs.Forget(nodeID, 1)
 	})
@@ -445,6 +449,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 			Mode:     0o644,
 		}, &tmpOut))
 		nodeID := tmpOut.NodeId
+		getAttrAfterTmpfile := srv.getAttrCalls.Load()
 		mustWriteAt(t, fs, nodeID, tmpOut.Fh, 0, []byte("hello"))
 		appHandle := mustOpenFile(t, fs, nodeID, syscall.O_RDWR|syscall.O_APPEND)
 
@@ -526,7 +531,8 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 		mustWriteAt(t, fs, nodeID, tmpOut.Fh, 13, []byte("!"))
 		requireBytesMatch(t, "content after unfreeze", []byte("hello-eof-app!"), mustReadAt(t, fs, nodeID, tmpOut.Fh, 0, 14))
 
-		require.Zero(t, srv.getAttrCalls.Load()+srv.setAttrCalls.Load()+srv.writeCalls.Load()+srv.fallocateCalls.Load())
+		require.Zero(t, srv.setAttrCalls.Load()+srv.writeCalls.Load()+srv.fallocateCalls.Load())
+		require.Equal(t, getAttrAfterTmpfile, srv.getAttrCalls.Load())
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: appHandle.Fh})
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
 		fs.Forget(nodeID, 1)
@@ -1242,7 +1248,6 @@ func TestStagedTmpfile_LinkPromotion_WhenFencedBeforePromote_ReturnsEBUSYAndSkip
 	require.Zero(t, snap.TmpFile.Promotes, "scene=fenced_linktmp_promotes want=0 got=%d", snap.TmpFile.Promotes)
 	require.Zero(t, snap.TmpFile.ActiveFiles, "scene=fenced_linktmp_active_files want=0 got=%d", snap.TmpFile.ActiveFiles)
 	require.Zero(t, snap.TmpFile.ResidentBytes, "scene=fenced_linktmp_resident_bytes want=0 got=%d", snap.TmpFile.ResidentBytes)
-	require.Zero(t, snap.NamespaceCache.Entries, "scene=fenced_linktmp_cache_entries want=0 got=%d", snap.NamespaceCache.Entries)
 
 	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
 	fs.Forget(nodeID, 1)

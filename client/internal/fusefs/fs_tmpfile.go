@@ -77,11 +77,11 @@ func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse
 	if _, removed := fs.handles.RemovedDir(input.NodeId); removed {
 		return fuse.ENOENT
 	}
-	parent, st := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
+	parent, _, st := fs.getAttrInodeWithContext(opCtx, cancel, input.NodeId)
 	if st != fuse.OK {
 		return st
 	}
-	parentAttr := parent.inode.GetAttr()
+	parentAttr := parent.GetAttr()
 	if parentAttr == nil {
 		return fuse.EIO
 	}
@@ -102,7 +102,7 @@ func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse
 		return status
 	}
 	fs.caps.markAbsent(ino)
-	fs.recordInodeSpecial(ino, inode)
+	fs.recordKnownInode(ino, inode)
 	fs.FillEntryOut(&out.EntryOut, inode, 0, 0)
 	out.Fh = fh
 	if fs.cfg.DirectIO {
@@ -112,7 +112,6 @@ func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse
 }
 
 func (fs *RawFS) tmpfileSync(opCtx context.Context, parentIno uint64, input *fuse.CreateIn, out *fuse.CreateOut) fuse.Status {
-	epoch := fs.cache.version()
 	detachedCtx := context.WithoutCancel(opCtx)
 	ctx, cancelFunc := fs.RPCContextFrom(detachedCtx, nil)
 	defer cancelFunc()
@@ -143,8 +142,7 @@ func (fs *RawFS) tmpfileSync(opCtx context.Context, parentIno uint64, input *fus
 	}
 	fs.markOrphanWithContext(opCtx, ino)
 	fs.caps.markAbsent(ino)
-	fs.recordInodeSpecial(ino, inode)
-	fs.cache.putInodeAt(epoch, ino, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	fs.recordKnownInode(ino, inode)
 	fs.FillEntryOut(&out.EntryOut, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	out.Fh = fh
 	if fs.cfg.DirectIO {
@@ -166,10 +164,9 @@ func (fs *RawFS) Forget(nodeID, nlookup uint64) {
 	defer fs.lifecycleMu.RUnlock()
 	serverIno, st := fs.ToServerIno(nodeID)
 	fs.caps.forget(nodeID)
-	fs.forgetInodeSpecial(nodeID)
-	if fs.tmpMgr.OnForget(nodeID, nlookup, fs.handles.IsOpen) {
-		fs.cache.invalidateInode(nodeID)
-	}
+	fs.forgetKnownInode(nodeID)
+	fs.dentries.forgetChild(nodeID)
+	fs.tmpMgr.OnForget(nodeID, nlookup, fs.handles.IsOpen)
 	if st == fuse.OK && !fs.handles.IsOpen(nodeID) {
 		fs.stage.RemoveIdleInode(serverIno)
 	}
@@ -184,8 +181,7 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, input *fuse.LinkIn, filename
 	detachedCtx := context.WithoutCancel(parentCtx)
 	ctx, done := fs.RPCContextFrom(detachedCtx, nil)
 	defer done()
-	epoch := fs.cache.version()
-	mat := fs.newTmpMaterializer(epoch)
+	mat := fs.newTmpMaterializer(0)
 	res, handled, status := fs.tmpMgr.Link(
 		ctx, input.Oldnodeid, input.NodeId, filename, fs.handles.IsOpen(input.Oldnodeid), mat, out,
 	)
@@ -201,14 +197,8 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, input *fuse.LinkIn, filename
 	} else {
 		fs.caps.markAbsent(input.Oldnodeid)
 	}
-	fs.recordInodeSpecial(input.Oldnodeid, res.Inode)
-	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, res.Inode, 0, res.AttrTimeout)
-	fs.cache.putEntryAt(epoch, input.NodeId, filename, input.Oldnodeid)
-	if res.Inode != nil && res.Inode.GetAttr() != nil {
-		fs.cache.putInodeAt(epoch, input.Oldnodeid, res.Inode, res.EntryTimeout, res.AttrTimeout)
-	} else {
-		fs.cache.invalidateInode(input.Oldnodeid)
-	}
+	fs.recordKnownInode(input.Oldnodeid, res.Inode)
+	fs.dentries.put(input.NodeId, filename, input.Oldnodeid)
 	fs.topologySeq.Add(1)
 	return fuse.OK, true
 }

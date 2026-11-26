@@ -60,6 +60,7 @@ func TestIsIdempotentProcedure_GivenWhitelistAndMutatingProcedures_ReturnsExpect
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceRenewMountProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceUnmountBranchProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListMountsProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceReclaimOrphanProcedure))
 
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceMountBranchProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceEvictMountsProcedure))

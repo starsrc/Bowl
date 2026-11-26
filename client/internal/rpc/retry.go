@@ -81,6 +81,7 @@ var idempotentProcedures = map[string]struct{}{
 	storagev1connect.StorageServiceGetXattrProcedure:       {},
 	storagev1connect.StorageServiceListXattrProcedure:      {},
 	storagev1connect.StorageServiceStatFSProcedure:         {},
+	storagev1connect.StorageServiceReclaimOrphanProcedure:  {},
 }
 
 func IsIdempotentProcedure(procedure string) bool {

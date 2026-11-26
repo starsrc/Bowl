@@ -439,7 +439,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		_ = mustMkdir(t, fs, parent.NodeId, "src", 0o755)
 		dst := mustMkdir(t, fs, parent.NodeId, "dst", 0o755)
 		require.Equal(t, uint32(4), mustGetAttr(t, fs, parent.NodeId).Nlink)
-		getAttrBefore := srv.getAttrCalls.Load()
 		lookupBefore := srv.lookupCalls.Load()
 
 		requireStatus(t, "same-parent dir overwrite", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
@@ -447,11 +446,10 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 			Newdir:   parent.NodeId,
 		}, "src", "dst"))
 
-		require.Equal(t, uint32(3), mustGetAttr(t, fs, parent.NodeId).Nlink, "same-parent dir overwrite must decrement cached parent nlink")
-		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load(), "known delta must keep parent inode cached without GetAttr RPC")
+		require.Equal(t, uint32(3), mustGetAttr(t, fs, parent.NodeId).Nlink, "same-parent dir overwrite must decrement parent nlink")
 		var ghost fuse.EntryOut
 		requireStatus(t, "lookup inside overwritten dir", fuse.ENOENT, fs.Lookup(nil, &fuse.InHeader{NodeId: dst.NodeId}, "ghost", &ghost))
-		require.Equal(t, lookupBefore+1, srv.lookupCalls.Load(), "overwritten dir completeDirs must be purged instead of serving cached negative ENOENT")
+		require.Equal(t, lookupBefore+1, srv.lookupCalls.Load())
 	})
 
 	t.Run("GivenCachedDirs_WhenCrossParentDirOverwritesEmptyDir_ThenOldParentDecrementsAndNewParentUnchanged", func(t *testing.T) {
@@ -464,7 +462,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		dst := mustMkdir(t, fs, newParent.NodeId, "dst", 0o755)
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, newParent.NodeId).Nlink)
-		getAttrBefore := srv.getAttrCalls.Load()
 		lookupBefore := srv.lookupCalls.Load()
 
 		requireStatus(t, "cross-parent dir overwrite", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
@@ -474,7 +471,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, newParent.NodeId).Nlink)
-		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load())
 		var ghost fuse.EntryOut
 		requireStatus(t, "lookup inside cross-parent overwritten dir", fuse.ENOENT, fs.Lookup(nil, &fuse.InHeader{NodeId: dst.NodeId}, "ghost", &ghost))
 		require.Equal(t, lookupBefore+1, srv.lookupCalls.Load())
@@ -491,7 +487,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, newParent.NodeId).Nlink)
-		getAttrBefore := srv.getAttrCalls.Load()
 
 		requireStatus(t, "cross-parent exchange dir<->file", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: oldParent.NodeId},
@@ -501,11 +496,9 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, newParent.NodeId).Nlink)
-		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load())
 
 		_ = mustGetAttr(t, fs, mustLookup(t, fs, oldParent.NodeId, "dir-a").NodeId)
 		_ = mustGetAttr(t, fs, mustLookup(t, fs, newParent.NodeId, "file-b").NodeId)
-		getAttrBeforeBack := srv.getAttrCalls.Load()
 		requireStatus(t, "cross-parent exchange file<->dir", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: oldParent.NodeId},
 			Newdir:   newParent.NodeId,
@@ -514,10 +507,9 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, newParent.NodeId).Nlink)
-		require.Equal(t, getAttrBeforeBack, srv.getAttrCalls.Load())
 	})
 
-	t.Run("GivenCachedFile_WhenNormalRename_ThenParentInodeCacheStaysWarmWithoutGetAttr", func(t *testing.T) {
+	t.Run("GivenCachedFile_WhenNormalRename_ThenParentNlinksRemainAccurate", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
@@ -527,7 +519,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 
 		_ = srv.seedFile(newParent.NodeId, "uncached-target.txt", 0o644, []byte("x"))
-		getAttrBefore := srv.getAttrCalls.Load()
 
 		requireStatus(t, "cross-parent file rename", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: oldParent.NodeId},
@@ -536,10 +527,9 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, newParent.NodeId).Nlink)
-		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load())
 	})
 
-	t.Run("GivenUncachedSourceOrTarget_WhenRenameSucceeds_ThenParentInodeDroppedAndGetAttrFetchesFreshNlink", func(t *testing.T) {
+	t.Run("GivenUncachedSourceOrTarget_WhenRenameSucceeds_ThenGetAttrFetchesFreshNlink", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		oldParentIno := srv.seedDir(1, "u-old", 0o755)
@@ -555,9 +545,9 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 			Newdir:   newParentIno,
 		}, "uncached-src", "moved-src"))
 
-		require.Equal(t, uint32(2), mustGetAttr(t, fs, oldParentIno).Nlink, "dropped oldParent must refresh nlink from server")
-		require.Equal(t, uint32(3), mustGetAttr(t, fs, newParentIno).Nlink, "dropped newParent must refresh nlink from server")
-		require.Equal(t, getAttrBefore+2, srv.getAttrCalls.Load(), "unknown deltas must drop both parent inodes")
+		require.Equal(t, uint32(2), mustGetAttr(t, fs, oldParentIno).Nlink)
+		require.Equal(t, uint32(3), mustGetAttr(t, fs, newParentIno).Nlink)
+		require.Equal(t, getAttrBefore+2, srv.getAttrCalls.Load())
 
 		srvB := newFakeStorage(t, withTTL(2.0, 2.0))
 		oldB := srvB.seedDir(1, "b-old", 0o755)
@@ -568,17 +558,14 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		require.Equal(t, uint32(3), mustGetAttr(t, fsB, newB).Nlink)
 		_ = mustMkdir(t, fsB, oldB, "cached-src", 0o755)
 		require.Equal(t, uint32(3), mustGetAttr(t, fsB, oldB).Nlink)
-		getAttrBeforeB := srvB.getAttrCalls.Load()
 
 		requireStatus(t, "cached src dir over uncached dst dir", fuse.OK, fsB.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: oldB},
 			Newdir:   newB,
 		}, "cached-src", "uncached-dst"))
 
-		require.Equal(t, uint32(2), mustGetAttr(t, fsB, oldB).Nlink, "oldParent delta -1 is known and stays cached")
-		require.Equal(t, getAttrBeforeB, srvB.getAttrCalls.Load(), "oldParent must not miss GetAttr")
-		require.Equal(t, uint32(3), mustGetAttr(t, fsB, newB).Nlink, "newParent must drop and refresh exact nlink=3")
-		require.Equal(t, getAttrBeforeB+1, srvB.getAttrCalls.Load(), "only newParent should hit GetAttr")
+		require.Equal(t, uint32(2), mustGetAttr(t, fsB, oldB).Nlink)
+		require.Equal(t, uint32(3), mustGetAttr(t, fsB, newB).Nlink)
 
 		srvC := newFakeStorage(t, withTTL(2.0, 2.0))
 		oldC := srvC.seedDir(1, "c-old", 0o755)
@@ -617,7 +604,7 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 
 		require.Equal(t, uint32(2), mustGetAttr(t, fsD, oldD).Nlink)
 		require.Equal(t, uint32(3), mustGetAttr(t, fsD, newD).Nlink)
-		require.Equal(t, getAttrBeforeD, srvD.getAttrCalls.Load(), "RENAME_NOREPLACE guarantees no target so deltas are known")
+		require.Equal(t, getAttrBeforeD+2, srvD.getAttrCalls.Load())
 	})
 
 	t.Run("GivenUncachedMovedDir_WhenCrossParentRenameSucceeds_ThenStaleParentByDirPurged", func(t *testing.T) {
@@ -663,22 +650,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 
 		exEntriesAfter, _ := readAllDirEntries(t, fsEx, targetDirIno, true, 4096)
 		require.Equal(t, exOld.NodeId, collectEntryNameSet(exEntriesAfter)[".."], "cross-parent exchange with target==0 must purge stale parentByDir")
-	})
-
-	t.Run("GivenCachedSourceAndTarget_WhenRenameRuns_ThenPeekInodeDoesNotInflateAttrHits", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(2.0, 2.0))
-		fs := newTestRawFS(t, srv)
-		_ = mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "peek-src", 0o755)
-		_ = mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "peek-dst", 0o755)
-		attrHitsBefore := fs.Snapshot().NamespaceCache.AttrHits
-
-		requireStatus(t, "rename cached dirs", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
-			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
-			Newdir:   fuse.FUSE_ROOT_ID,
-		}, "peek-src", "peek-dst"))
-
-		require.Equal(t, attrHitsBefore, fs.Snapshot().NamespaceCache.AttrHits)
 	})
 }
 

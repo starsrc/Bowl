@@ -8,8 +8,6 @@ vars:
   TAG: '{{.TAG | default "latest"}}'
   PROTO_DIR: proto
   GEN_DIR: gen
-  STORAGE_DB_DSN: '{{.STORAGE_DB_DSN | default "postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable"}}'
-  STORAGE_MIGRATIONS_DIR: services/storage/db/migrations
   CLIENT_DOCKERFILE: client/Dockerfile.test
   CLIENT_TEST_IMAGE: '{{.CLIENT_TEST_IMAGE | default "bowl-client-test"}}'
 
@@ -164,18 +162,3 @@ tasks:
       - golangci-lint run ./...
       - cd services/storage && golangci-lint run --config ../../.golangci.yml ./...
       - cd client && GOOS=linux CGO_ENABLED=0 golangci-lint run --config ../.golangci.yml ./...
-
-  goose:storage:up:
-    desc: "执行 storage 服务的 goose 向上迁移 (Up)"
-    cmds:
-      - goose -dir {{.STORAGE_MIGRATIONS_DIR}} postgres "{{.STORAGE_DB_DSN}}" up {{.CLI_ARGS}}
-
-  goose:storage:down:
-    desc: "回滚 storage 服务的最近一次 goose 迁移 (Down)"
-    cmds:
-      - goose -dir {{.STORAGE_MIGRATIONS_DIR}} postgres "{{.STORAGE_DB_DSN}}" down {{.CLI_ARGS}}
-
-  goose:storage:status:
-    desc: "打印 storage 服务的 goose 迁移状态 (Status)"
-    cmds:
-      - goose -dir {{.STORAGE_MIGRATIONS_DIR}} postgres "{{.STORAGE_DB_DSN}}" status {{.CLI_ARGS}}

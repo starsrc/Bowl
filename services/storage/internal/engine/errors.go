@@ -104,8 +104,18 @@ const (
 type CommitKind uint8
 
 const (
-	CommitKindInit   CommitKind = 1
-	CommitKindManual CommitKind = 2
-	CommitKindFork   CommitKind = 3
-	CommitKindMerge  CommitKind = 4
+	CommitKindUnspecified CommitKind = 0
+	CommitKindInit        CommitKind = 1
+	CommitKindManual      CommitKind = 2
+	CommitKindFork        CommitKind = 3
+	CommitKindMerge       CommitKind = 4
 )
+
+func isValidCommitKindFilter(k CommitKind) bool {
+	switch k {
+	case CommitKindUnspecified, CommitKindInit, CommitKindManual, CommitKindFork, CommitKindMerge:
+		return true
+	default:
+		return false
+	}
+}

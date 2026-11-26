@@ -14,7 +14,7 @@ func TestStep9_TwoParentMergeCommit_PersistsAcrossReopenLinearReadAndSecondMerge
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step9-merge",
 		MaxBytes:    16 << 20,
@@ -50,12 +50,12 @@ func TestStep9_TwoParentMergeCommit_PersistsAcrossReopenLinearReadAndSecondMerge
 	require.NoError(t, err)
 
 	snapBefore := disk.db.NewSnapshot()
-	_, c4Layers, err := resolveCommitLayers(snapBefore, c4.ID)
+	_, c4Layers, err := resolveCommitLayers(snapBefore, disk.keys, c4.ID)
 	require.NoError(t, err)
-	c4Ref0, ok, err := overlayGetDataRef(snapBefore, c4Layers, featFile.Ino, 0)
+	c4Ref0, ok, err := overlayGetDataRef(snapBefore, disk.keys, c4Layers, featFile.Ino, 0)
 	require.NoError(t, err)
 	require.True(t, ok)
-	c4Ref1, ok, err := overlayGetDataRef(snapBefore, c4Layers, featFile.Ino, 1)
+	c4Ref1, ok, err := overlayGetDataRef(snapBefore, disk.keys, c4Layers, featFile.Ino, 1)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.NoError(t, snapBefore.Close())
@@ -87,15 +87,15 @@ func TestStep9_TwoParentMergeCommit_PersistsAcrossReopenLinearReadAndSecondMerge
 	require.Positive(t, c5.LayerID)
 
 	snapAfter := disk.db.NewSnapshot()
-	_, mainLayers, err := resolveBranchLayers(snapAfter, DefaultBranchName)
+	_, mainLayers, err := resolveBranchLayers(snapAfter, disk.keys, DefaultBranchName)
 	require.NoError(t, err)
 	require.NotContains(t, mainLayers, c4.LayerID)
 	require.Contains(t, mainLayers, c5.LayerID)
-	c5Ref0, ok, err := overlayGetDataRef(snapAfter, []uint64{c5.LayerID}, featFile.Ino, 0)
+	c5Ref0, ok, err := overlayGetDataRef(snapAfter, disk.keys, []uint64{c5.LayerID}, featFile.Ino, 0)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, c4Ref0, c5Ref0)
-	c5Ref1, ok, err := overlayGetDataRef(snapAfter, []uint64{c5.LayerID}, featFile.Ino, 1)
+	c5Ref1, ok, err := overlayGetDataRef(snapAfter, disk.keys, []uint64{c5.LayerID}, featFile.Ino, 1)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, c4Ref1, c5Ref1)
@@ -103,7 +103,7 @@ func TestStep9_TwoParentMergeCommit_PersistsAcrossReopenLinearReadAndSecondMerge
 
 	require.NoError(t, disk.Close())
 
-	reopened, err := OpenDisk(DiskOptions{
+	reopened, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		MaxPackSize: 1 << 20,
 	})
@@ -175,7 +175,7 @@ func TestStep9_DualParentReachability_DeleteCommitPruneAndGCProtectMergedSourceA
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-step9-gc",
 		MaxBytes:    1 << 20,
@@ -248,7 +248,7 @@ func TestStep10_Merge_RejectsDirtySourceOrTargetWithoutMutatingEitherBranch(t *t
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step10-dirty",
 		BlockSize: 4096,
@@ -322,7 +322,7 @@ func TestStep10_DiffDiffCommitsAndDiffWork_SeparateCommittedAndUncommittedViews(
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step10-diff",
 		BlockSize: 4096,
@@ -404,7 +404,7 @@ func TestStep11_Merge_DefaultFastForwardNoFastForwardAndUpToDateNoOp(t *testing.
 
 	clk := newStepClock(time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC))
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step11-ff",
 		BlockSize: 4096,
@@ -515,7 +515,7 @@ func TestStep12_CrissCrossMergeDAG_ReturnsErrAmbiguousLCAOnDiffAndMerge(t *testi
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step12-crisscross",
 		BlockSize: 4096,

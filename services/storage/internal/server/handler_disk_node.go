@@ -10,7 +10,6 @@ import (
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 func parseRequiredUUID(raw string) (uuid.UUID, error) {
@@ -26,6 +25,10 @@ func parseOptionalUUID(raw *string) (uuid.UUID, error) {
 		return uuid.Nil, nil
 	}
 	return parseRequiredUUID(*raw)
+}
+
+func toProtoTimeFromNano(ns int64) *timestamppb.Timestamp {
+	return timestamppb.New(time.Unix(0, ns).UTC().Truncate(time.Microsecond))
 }
 
 func toProtoAttribute(inode engine.Inode) *storagev1.InodeAttribute {
@@ -67,86 +70,86 @@ func toProtoInode(inode engine.Inode) *storagev1.Inode {
 	}
 }
 
-func toProtoDisk(d projection.DiskRecord) *storagev1.Disk {
+func toProtoDisk(d engine.DiskInfo) *storagev1.Disk {
 	return &storagev1.Disk{
-		DiskId:        d.DiskID.String(),
+		DiskId:        d.DiskID,
 		Name:          d.Name,
 		DefaultBranch: d.DefaultBranch,
 		MaxBytes:      d.MaxBytes,
 		UsedBytes:     d.UsedBytes,
-		CreatedAt:     timestamppb.New(d.CreatedAt),
-		UpdatedAt:     timestamppb.New(d.UpdatedAt),
+		CreatedAt:     toProtoTimeFromNano(d.CreatedAt),
+		UpdatedAt:     toProtoTimeFromNano(d.UpdatedAt),
 	}
 }
 
-func toProtoBranch(b projection.BranchRecord) *storagev1.Branch {
+func toProtoBranch(diskID uuid.UUID, b engine.BranchMeta) *storagev1.Branch {
 	return &storagev1.Branch{
-		DiskId:       b.DiskID.String(),
+		DiskId:       diskID.String(),
 		Name:         b.Name,
 		HeadCommitId: b.HeadCommitID,
 		WriterEpoch:  b.WriterEpoch,
-		CreatedAt:    timestamppb.New(b.CreatedAt),
-		UpdatedAt:    timestamppb.New(b.UpdatedAt),
+		CreatedAt:    toProtoTimeFromNano(b.CreatedAt),
+		UpdatedAt:    toProtoTimeFromNano(b.UpdatedAt),
 	}
 }
 
-func toProtoCommitKind(kind string) storagev1.CommitKind {
+func toProtoCommitKind(kind engine.CommitKind) storagev1.CommitKind {
 	switch kind {
-	case projection.CommitKindInit:
+	case engine.CommitKindInit:
 		return storagev1.CommitKind_COMMIT_KIND_INIT
-	case projection.CommitKindManual:
+	case engine.CommitKindManual:
 		return storagev1.CommitKind_COMMIT_KIND_MANUAL
-	case projection.CommitKindFork:
+	case engine.CommitKindFork:
 		return storagev1.CommitKind_COMMIT_KIND_FORK
-	case projection.CommitKindMerge:
+	case engine.CommitKindMerge:
 		return storagev1.CommitKind_COMMIT_KIND_MERGE
 	default:
 		return storagev1.CommitKind_COMMIT_KIND_UNSPECIFIED
 	}
 }
 
-func toProjectionCommitKind(kind storagev1.CommitKind) (string, error) {
+func toEngineCommitKind(kind storagev1.CommitKind) (engine.CommitKind, error) {
 	switch kind {
 	case storagev1.CommitKind_COMMIT_KIND_UNSPECIFIED:
-		return "", nil
+		return engine.CommitKindUnspecified, nil
 	case storagev1.CommitKind_COMMIT_KIND_INIT:
-		return projection.CommitKindInit, nil
+		return engine.CommitKindInit, nil
 	case storagev1.CommitKind_COMMIT_KIND_MANUAL:
-		return projection.CommitKindManual, nil
+		return engine.CommitKindManual, nil
 	case storagev1.CommitKind_COMMIT_KIND_FORK:
-		return projection.CommitKindFork, nil
+		return engine.CommitKindFork, nil
 	case storagev1.CommitKind_COMMIT_KIND_MERGE:
-		return projection.CommitKindMerge, nil
+		return engine.CommitKindMerge, nil
 	default:
-		return "", projection.ErrInvalidArgument
+		return engine.CommitKindUnspecified, engine.ErrInvalid
 	}
 }
 
-func toProtoCommit(c projection.CommitRecord) *storagev1.Commit {
+func toProtoCommit(diskID uuid.UUID, c engine.CommitMeta) *storagev1.Commit {
 	return &storagev1.Commit{
-		DiskId:        c.DiskID.String(),
-		CommitId:      c.CommitID,
+		DiskId:        diskID.String(),
+		CommitId:      c.ID,
 		ParentId:      c.ParentID,
 		MergeParentId: c.MergeParentID,
 		Kind:          toProtoCommitKind(c.Kind),
 		Message:       c.Message,
-		CreatedAt:     timestamppb.New(c.CreatedAt),
+		CreatedAt:     toProtoTimeFromNano(c.CreatedAt),
 	}
 }
 
-func toProtoMountLease(m projection.MountRecord) *storagev1.MountLease {
+func toProtoMountLease(m engine.MountMeta) *storagev1.MountLease {
 	return &storagev1.MountLease{
-		MountId:   m.MountID.String(),
+		MountId:   m.ID,
 		Branch:    m.BranchName,
 		ReadOnly:  m.ReadOnly,
 		Epoch:     m.WriterEpoch,
-		MountedAt: timestamppb.New(m.MountedAt),
-		ExpiresAt: timestamppb.New(m.ExpiresAt),
+		MountedAt: toProtoTimeFromNano(m.MountedAt),
+		ExpiresAt: toProtoTimeFromNano(m.ExpiresAt),
 	}
 }
 
 func (s *Server) CreateDisk(ctx context.Context, req *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error) {
-	disk, err := s.manager.CreateDisk(ctx, req.Msg.Name, req.Msg.MaxBytes)
+	disk, err := s.node.CreateDisk(ctx, req.Msg.Name, req.Msg.MaxBytes)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -160,7 +163,7 @@ func (s *Server) GetDisk(ctx context.Context, req *connect.Request[storagev1.Get
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	disk, err := s.manager.GetDisk(ctx, diskID)
+	disk, err := s.node.GetDisk(ctx, diskID)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -170,7 +173,7 @@ func (s *Server) GetDisk(ctx context.Context, req *connect.Request[storagev1.Get
 }
 
 func (s *Server) ListDisks(ctx context.Context, req *connect.Request[storagev1.ListDisksRequest]) (*connect.Response[storagev1.ListDisksResponse], error) {
-	page, err := s.manager.ListDisks(ctx, projection.ListDisksQuery{
+	page, err := s.node.ListDisks(ctx, engine.ListDisksQuery{
 		PageSize:  req.Msg.PageSize,
 		PageToken: req.Msg.PageToken,
 	})
@@ -192,7 +195,7 @@ func (s *Server) UpdateDisk(ctx context.Context, req *connect.Request[storagev1.
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	disk, err := s.manager.UpdateDisk(ctx, diskID, req.Msg.Name, req.Msg.MaxBytes)
+	disk, err := s.node.UpdateDisk(ctx, diskID, req.Msg.Name, req.Msg.MaxBytes)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -206,7 +209,7 @@ func (s *Server) DeleteDisk(ctx context.Context, req *connect.Request[storagev1.
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if err = s.manager.DeleteDisk(ctx, diskID); err != nil {
+	if err = s.node.DeleteDisk(ctx, diskID); err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.DeleteDiskResponse{}), nil
@@ -217,7 +220,7 @@ func (s *Server) MountBranch(ctx context.Context, req *connect.Request[storagev1
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	res, err := s.manager.MountBranch(ctx, diskID, req.Msg.Branch, req.Msg.ReadOnly, req.Msg.Force)
+	res, err := s.node.MountBranch(ctx, diskID, req.Msg.Branch, req.Msg.ReadOnly, req.Msg.Force)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -226,7 +229,7 @@ func (s *Server) MountBranch(ctx context.Context, req *connect.Request[storagev1
 		RootInode:           toProtoInode(res.RootInode),
 		EntryTimeoutSeconds: s.entryTimeoutForMode(res.RootInode.Mode),
 		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
-		MountId:             res.Mount.MountID.String(),
+		MountId:             res.Mount.ID,
 		LeaseTtlSeconds:     s.leaseTTLSeconds(),
 	}), nil
 }
@@ -240,7 +243,7 @@ func (s *Server) RenewMount(ctx context.Context, req *connect.Request[storagev1.
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if _, err = s.manager.RenewMount(ctx, diskID, req.Msg.Branch, mountID, req.Msg.ReadOnly, req.Msg.Epoch); err != nil {
+	if _, err = s.node.RenewMount(ctx, diskID, req.Msg.Branch, mountID, req.Msg.ReadOnly, req.Msg.Epoch); err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.RenewMountResponse{
@@ -257,7 +260,7 @@ func (s *Server) UnmountBranch(ctx context.Context, req *connect.Request[storage
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if err = s.manager.UnmountBranch(ctx, diskID, mountID); err != nil {
+	if err = s.node.UnmountBranch(ctx, diskID, mountID); err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.UnmountBranchResponse{}), nil
@@ -268,7 +271,7 @@ func (s *Server) ListMounts(ctx context.Context, req *connect.Request[storagev1.
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	leases, err := s.manager.ListMounts(ctx, diskID, req.Msg.Branch)
+	leases, err := s.node.ListMounts(ctx, diskID, req.Msg.Branch)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -290,13 +293,13 @@ func (s *Server) EvictMounts(ctx context.Context, req *connect.Request[storagev1
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	res, err := s.manager.EvictMounts(ctx, diskID, req.Msg.Branch, mountID)
+	res, err := s.node.EvictMounts(ctx, diskID, req.Msg.Branch, mountID)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	updatedBranches := make([]*storagev1.Branch, 0, len(res.UpdatedBranches))
 	for _, br := range res.UpdatedBranches {
-		updatedBranches = append(updatedBranches, toProtoBranch(br))
+		updatedBranches = append(updatedBranches, toProtoBranch(diskID, br))
 	}
 	return connect.NewResponse(&storagev1.EvictMountsResponse{
 		EvictedCount:    res.EvictedCount,
@@ -310,7 +313,7 @@ func (s *Server) StatFS(ctx context.Context, req *connect.Request[storagev1.Stat
 		return nil, toConnectError(err)
 	}
 	var res engine.StatFSResult
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		if _, attrErr := ds.GetAttr(ctx, req.Msg.Branch, req.Msg.Ino); attrErr != nil {
 			return attrErr
 		}
@@ -342,7 +345,7 @@ func (s *Server) Lookup(ctx context.Context, req *connect.Request[storagev1.Look
 		return nil, toConnectError(err)
 	}
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var lErr error
 		_, inode, lErr = ds.Lookup(ctx, req.Msg.Branch, req.Msg.ParentIno, string(req.Msg.Name))
 		return lErr
@@ -363,7 +366,7 @@ func (s *Server) GetAttr(ctx context.Context, req *connect.Request[storagev1.Get
 		return nil, toConnectError(err)
 	}
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var gErr error
 		inode, gErr = ds.GetAttr(ctx, req.Msg.Branch, req.Msg.Ino)
 		return gErr
@@ -403,7 +406,7 @@ func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.Set
 
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.Epoch)
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var sErr error
 		inode, sErr = ds.SetAttr(epochCtx, req.Msg.Branch, req.Msg.Ino, input)
 		return sErr
@@ -424,7 +427,7 @@ func (s *Server) Mknod(ctx context.Context, req *connect.Request[storagev1.Mknod
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.Epoch)
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var mErr error
 		inode, mErr = ds.Mknod(epochCtx, req.Msg.Branch, req.Msg.ParentIno, string(req.Msg.Name), req.Msg.Mode, req.Msg.Uid, req.Msg.Gid, req.Msg.Rdev)
 		return mErr
@@ -446,7 +449,7 @@ func (s *Server) Mkdir(ctx context.Context, req *connect.Request[storagev1.Mkdir
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.Epoch)
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var mErr error
 		inode, mErr = ds.Mkdir(epochCtx, req.Msg.Branch, req.Msg.ParentIno, string(req.Msg.Name), req.Msg.Mode, req.Msg.Uid, req.Msg.Gid)
 		return mErr
@@ -468,7 +471,7 @@ func (s *Server) Symlink(ctx context.Context, req *connect.Request[storagev1.Sym
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.Epoch)
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var sErr error
 		inode, sErr = ds.Symlink(epochCtx, req.Msg.Branch, req.Msg.ParentIno, string(req.Msg.Name), string(req.Msg.Target), req.Msg.Uid, req.Msg.Gid)
 		return sErr
@@ -489,7 +492,7 @@ func (s *Server) Readlink(ctx context.Context, req *connect.Request[storagev1.Re
 		return nil, toConnectError(err)
 	}
 	var target []byte
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var rErr error
 		target, rErr = ds.Readlink(ctx, req.Msg.Branch, req.Msg.Ino)
 		return rErr

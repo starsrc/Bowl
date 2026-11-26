@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,13 +22,13 @@ type gcCallOutcome struct {
 	err   error
 }
 
-func setupSealedPackDivergedDisk(t *testing.T, diskID string, keepPayload []byte) (disk *DiskStore, dir string, featKeepIno uint64) {
+func setupSealedPackDivergedDisk(t *testing.T, diskID string, keepPayload []byte) (disk *testDisk, dir string, featKeepIno uint64) {
 	t.Helper()
 	dir = t.TempDir()
 	ctx := context.Background()
 
 	var err error
-	disk, err = OpenDisk(DiskOptions{
+	disk, err = openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      diskID,
 		MaxBytes:    1 << 20,
@@ -72,7 +71,7 @@ func TestGCMerge_SealedPackGCRacingWithThreeWayMerge(t *testing.T) {
 	ctx := context.Background()
 	keepPayload := bytes.Repeat([]byte{0xa1}, 4096)
 
-	disk, dir, featKeepIno := setupSealedPackDivergedDisk(t, "disk-gc-merge-sealed", keepPayload)
+	disk, _, featKeepIno := setupSealedPackDivergedDisk(t, "disk-gc-merge-sealed", keepPayload)
 
 	mergeEntered := make(chan struct{})
 	mergeOutcomeCh := make(chan mergeCallOutcome, 1)
@@ -125,7 +124,7 @@ func TestGCMerge_SealedPackGCRacingWithThreeWayMerge(t *testing.T) {
 	require.NotNil(t, mergeOut.res)
 	require.False(t, mergeOut.res.FastForward)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	mainKeepEntry, _, err := disk.Lookup(ctx, DefaultBranchName, RootIno, "keep.bin")
@@ -144,7 +143,7 @@ func TestGCMerge_InFlightThreeWayMergeSerializesRunGC(t *testing.T) {
 	ctx := context.Background()
 	keepPayload := bytes.Repeat([]byte{0xd4}, 4096)
 
-	disk, dir, featKeepIno := setupSealedPackDivergedDisk(t, "disk-gc-merge-reverse", keepPayload)
+	disk, _, featKeepIno := setupSealedPackDivergedDisk(t, "disk-gc-merge-reverse", keepPayload)
 
 	mergeEntered := make(chan struct{})
 	releaseMerge := make(chan struct{})
@@ -207,7 +206,7 @@ func TestGCMerge_InFlightThreeWayMergeSerializesRunGC(t *testing.T) {
 	require.Equal(t, 1, gcOut.stats.PacksDeleted)
 	require.Equal(t, 2, gcOut.stats.BlocksRelocated)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	mainKeepEntry, _, err := disk.Lookup(ctx, DefaultBranchName, RootIno, "keep.bin")
@@ -228,7 +227,7 @@ func TestGCMerge_ActivePackGCRacingWithThreeWayMerge(t *testing.T) {
 	keepPayload := bytes.Repeat([]byte{0xe5}, 4096)
 	mainPayload := bytes.Repeat([]byte{0xf6}, 4096)
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-gc-merge-active",
 		MaxBytes:    1 << 20,
@@ -338,7 +337,7 @@ func TestGCMerge_ActivePackGCRacingWithThreeWayMerge(t *testing.T) {
 	require.False(t, mergeOut.res.FastForward)
 	require.False(t, mergeRacedSeal.Load())
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	mainKeepEntry, _, err := disk.Lookup(ctx, DefaultBranchName, RootIno, "keep.bin")
@@ -357,7 +356,7 @@ func TestGCMerge_MergeContextCancelledWhileRunGCHoldsLock(t *testing.T) {
 	ctx := context.Background()
 	keepPayload := bytes.Repeat([]byte{0x5a}, 4096)
 
-	disk, dir, featKeepIno := setupSealedPackDivergedDisk(t, "disk-gc-merge-ctx-merge", keepPayload)
+	disk, _, featKeepIno := setupSealedPackDivergedDisk(t, "disk-gc-merge-ctx-merge", keepPayload)
 
 	gcEntered := make(chan struct{})
 	releaseGC := make(chan struct{})
@@ -407,7 +406,7 @@ func TestGCMerge_MergeContextCancelledWhileRunGCHoldsLock(t *testing.T) {
 	require.NoError(t, gcOut.err)
 	require.Equal(t, 1, gcOut.stats.PacksDeleted)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	gotFeat, err := disk.Read(ctx, "feat", featKeepIno, 0, 4096)
@@ -483,7 +482,7 @@ func TestGCMerge_AlreadyCancelledContextFailsFast(t *testing.T) {
 	ctx := context.Background()
 	keepPayload := bytes.Repeat([]byte{0x7c}, 4096)
 
-	disk, dir, _ := setupSealedPackDivergedDisk(t, "disk-gc-merge-precancel", keepPayload)
+	disk, _, _ := setupSealedPackDivergedDisk(t, "disk-gc-merge-precancel", keepPayload)
 
 	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()
@@ -501,7 +500,7 @@ func TestGCMerge_AlreadyCancelledContextFailsFast(t *testing.T) {
 		require.Zero(t, gcStats.PacksDeleted)
 	}
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.NoError(t, statErr)
 
 	_, _, err := disk.Lookup(ctx, DefaultBranchName, RootIno, "keep.bin")

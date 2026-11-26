@@ -16,7 +16,7 @@ func TestStep2_BranchAddressing_ForkCreatesFirstClassNamedBranchAndIsolatesWrite
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-fork-iso",
 		BlockSize: 4096,
@@ -74,7 +74,7 @@ func TestStep3_CommitAndFork_CleanForkProducesZeroLayerPureMetadataCommit(t *tes
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-clean-fork",
 		BlockSize: 4096,
@@ -120,7 +120,7 @@ func TestStep5_MultiBranch_ParallelBranchActorsCommitAndCoalesceConcurrently(t *
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-parallel",
 		BlockSize:   4096,
@@ -193,7 +193,7 @@ func TestStep8_Reset_RollsBackWorkingLayerFencesStaleEpochAndAllowsUndoReset(t *
 
 	clk := newStepClock(time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC))
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-reset",
 		BlockSize: 4096,
@@ -259,7 +259,7 @@ func TestStep8_DeleteCommitAndPruneCommits_ProtectsReachableCommitsAndReclaimsUn
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-prune",
 		BlockSize: 4096,
@@ -324,7 +324,7 @@ func TestStep8_CommitAndPruneCommits_ConcurrentNeverDeletesLiveCommit(t *testing
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-commit-prune-race",
 		BlockSize: 4096,

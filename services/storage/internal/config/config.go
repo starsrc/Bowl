@@ -10,7 +10,6 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/starsrc/pkg/observability"
-	"github.com/starsrc/pkg/tx"
 )
 
 const DefaultServerReadMaxBytes = 8 * 1024 * 1024
@@ -45,8 +44,6 @@ func normalizeOTLPEnvVars() {
 
 type ObservabilityConfig = observability.EnvConfig
 
-type DBPoolConfig = tx.PoolConfig
-
 type noDefaultMetricsObsConfig struct {
 	*ObservabilityConfig
 }
@@ -69,7 +66,6 @@ func NewObservabilityConfig(cfg *ObservabilityConfig) observability.Config {
 type Config struct {
 	ServerConfig
 	observability.EnvConfig
-	tx.PoolConfig
 	Meta MetaConfig
 }
 
@@ -99,10 +95,6 @@ func (c *Config) Validate() error {
 
 	if err := c.EnvConfig.Validate(); err != nil {
 		return fmt.Errorf("validate observability config: %w", err)
-	}
-
-	if err := c.PoolConfig.Validate(); err != nil {
-		return fmt.Errorf("validate db pool config: %w", err)
 	}
 
 	if err := c.Meta.Validate(); err != nil {

@@ -35,13 +35,7 @@ loki.source.docker "bowl" {
 local.file_match "pebble_events" {
 	path_targets = [
 		{
-			__path__   = "/var/lib/bowl/data/disks/*/pebble_events.log",
-			service    = "storage-service",
-			component  = "pebble",
-			log_source = "pebble_events",
-		},
-		{
-			__path__   = "/var/lib/bowl/data/snapshots/*/pebble_events.log",
+			__path__   = "/var/lib/bowl/data/pebble/pebble_events.log",
 			service    = "storage-service",
 			component  = "pebble",
 			log_source = "pebble_events",

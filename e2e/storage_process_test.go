@@ -4,9 +4,7 @@ package e2e_test
 
 import (
 	"bytes"
-	"cmp"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -29,7 +27,6 @@ import (
 )
 
 const (
-	defaultStorageTestDSN   = "postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable"
 	storageBuildTimeout     = 5 * time.Minute
 	storageLifecycleTimeout = 90 * time.Second
 )
@@ -49,10 +46,6 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
-}
-
-func storageTestDSN() string {
-	return cmp.Or(os.Getenv("BOWL_TEST_POSTGRES_DSN"), defaultStorageTestDSN)
 }
 
 func buildStorageBinary(t *testing.T) string {
@@ -95,14 +88,13 @@ func freeTCPPortPair(t *testing.T) (pubPort, adminPort int) {
 	return pubPort, adminPort
 }
 
-func storageProcessEnv(publicPort, internalPort int, dataDir, dsn string, extra ...string) []string {
+func storageProcessEnv(publicPort, internalPort int, dataDir string, extra ...string) []string {
 	base := []string{
 		"SERVER_HOST=127.0.0.1",
 		"SERVER_PORT=" + strconv.Itoa(publicPort),
 		"INTERNAL_SERVER_HOST=127.0.0.1",
 		"INTERNAL_SERVER_PORT=" + strconv.Itoa(internalPort),
 		"STORAGE_DATA_DIR=" + dataDir,
-		"DB_DSN=" + dsn,
 	}
 	return append(base, extra...)
 }
@@ -133,7 +125,6 @@ func startStorageDaemon(t *testing.T, binary, dataDir string) (pubURL, adminURL 
 			pubPort,
 			adminPort,
 			dataDir,
-			storageTestDSN(),
 			"METRICS_ENABLED=true",
 			"PPROF_ENABLED=true",
 			"LOG_FORMAT=json",
@@ -153,7 +144,7 @@ func startStorageDaemon(t *testing.T, binary, dataDir string) (pubURL, adminURL 
 	pubURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(pubPort))
 	adminURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adminPort))
 	readyBody := waitHTTPStatus(t, adminURL+"/readyz", http.StatusOK)
-	require.Contains(t, readyBody, `"postgres":"ok"`, "admin /readyz must report PostgreSQL ready")
+	require.Contains(t, readyBody, `"storage":"ok"`, "admin /readyz must report storage ready")
 
 	stopAndWait = func() int {
 		require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
@@ -199,13 +190,6 @@ func getHTTPStatusAndBody(t *testing.T, rawURL string, wantStatus int) string {
 func TestStorageProcess_RejectsInvalidStartupConfig(t *testing.T) {
 	binary := buildStorageBinary(t)
 
-	t.Run("missing DSN", func(t *testing.T) {
-		pubPort, adminPort := freeTCPPortPair(t)
-		exitCode, output := runStorageProcessExpectFailure(t, binary, storageProcessEnv(pubPort, adminPort, t.TempDir(), ""))
-		require.NotZero(t, exitCode, "missing DB_DSN must exit non-zero: %s", output)
-		require.Contains(t, output, "DB_DSN")
-	})
-
 	t.Run("port already in use", func(t *testing.T) {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		require.NoError(t, err)
@@ -213,17 +197,17 @@ func TestStorageProcess_RejectsInvalidStartupConfig(t *testing.T) {
 		tcpAddr, ok := listener.Addr().(*net.TCPAddr)
 		require.True(t, ok)
 		adminPort := freeTCPPort(t)
-		exitCode, output := runStorageProcessExpectFailure(t, binary, storageProcessEnv(tcpAddr.Port, adminPort, t.TempDir(), storageTestDSN()))
+		exitCode, output := runStorageProcessExpectFailure(t, binary, storageProcessEnv(tcpAddr.Port, adminPort, t.TempDir()))
 		require.NotZero(t, exitCode, "port conflict must exit non-zero: %s", output)
 		require.Contains(t, output, "address already in use")
 	})
 
-	t.Run("unreachable postgres", func(t *testing.T) {
+	t.Run("unwritable data dir", func(t *testing.T) {
 		pubPort, adminPort := freeTCPPortPair(t)
-		closedPGPort := freeTCPPort(t)
-		unreachableDSN := fmt.Sprintf("postgres://postgres:postgres@127.0.0.1:%d/bowl?sslmode=disable&connect_timeout=2", closedPGPort)
-		exitCode, output := runStorageProcessExpectFailure(t, binary, storageProcessEnv(pubPort, adminPort, t.TempDir(), unreachableDSN))
-		require.NotZero(t, exitCode, "unreachable PostgreSQL must fail fast on boot: %s", output)
+		filePath := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(filePath, []byte("block"), 0o600))
+		exitCode, output := runStorageProcessExpectFailure(t, binary, storageProcessEnv(pubPort, adminPort, filePath))
+		require.NotZero(t, exitCode, "unwritable STORAGE_DATA_DIR must exit non-zero: %s", output)
 	})
 }
 
@@ -238,7 +222,7 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	healthBody := getHTTPStatusAndBody(t, adminURL1+"/healthz", http.StatusOK)
 	require.Contains(t, healthBody, `"status":"ok"`)
 	readyBody := getHTTPStatusAndBody(t, adminURL1+"/readyz", http.StatusOK)
-	require.Contains(t, readyBody, `"postgres":"ok"`)
+	require.Contains(t, readyBody, `"storage":"ok"`)
 	_ = getHTTPStatusAndBody(t, adminURL1+"/debug/pprof/cmdline", http.StatusOK)
 
 	_ = getHTTPStatusAndBody(t, pubURL1+"/healthz", http.StatusNotFound)

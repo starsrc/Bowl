@@ -55,7 +55,7 @@ func TestStorageLive_ProbesAndMetricsReachable(t *testing.T) {
 	require.Contains(t, healthBody, `"status":"ok"`)
 
 	readyBody := getHTTPStatusAndBody(t, adminAddr+"/readyz", http.StatusOK)
-	require.Contains(t, readyBody, `"postgres":"ok"`)
+	require.Contains(t, readyBody, `"storage":"ok"`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -2,54 +2,6 @@ name: bowl
 
 services:
   # ==============================================================================
-  # Database Service (PostgreSQL 18)
-  # ==============================================================================
-  postgres:
-    image: postgres:18-alpine
-    container_name: bowl-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-bowl}
-    ports:
-      - "127.0.0.1:${POSTGRES_PORT:-9432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-bowl}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-    networks:
-      - bowl-net
-
-  # ==============================================================================
-  # Database Migration Service (Goose)
-  # ==============================================================================
-  migration:
-    image: bowl-storage-migration:latest
-    build:
-      context: ../..
-      dockerfile: services/storage/Dockerfile.migration
-    container_name: bowl-storage-migration
-    command:
-      - "-dir"
-      - "/migrations"
-      - "postgres"
-      - "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-bowl}?sslmode=disable"
-      - "up"
-    volumes:
-      - ../../services/storage/db/migrations:/migrations:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: "no"
-    networks:
-      - bowl-net
-
-  # ==============================================================================
   # Storage Service (ConnectRPC)
   # ==============================================================================
   storage-service:
@@ -61,8 +13,6 @@ services:
     restart: unless-stopped
     env_file:
       - ./storage.env
-    environment:
-      DB_DSN: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-bowl}?sslmode=disable"
     ports:
       - "${STORAGE_PORT:-9000}:9000"
       - "127.0.0.1:${STORAGE_ADMIN_PORT:-9090}:9090"
@@ -75,10 +25,6 @@ services:
       retries: 15
       start_period: 3s
     depends_on:
-      postgres:
-        condition: service_healthy
-      migration:
-        condition: service_completed_successfully
       jaeger:
         condition: service_started
       alloy:
@@ -196,7 +142,6 @@ services:
       - bowl-net
 
 volumes:
-  postgres_data:
   storage_data:
   prometheus_data:
   loki_data:

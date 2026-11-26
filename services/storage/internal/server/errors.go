@@ -11,7 +11,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/starsrc/bowl/services/storage/internal/engine"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 const ErrorDomain = "bowl.storage"
@@ -31,7 +30,6 @@ var errorMappings = []errorMapping{
 	{sentinel: engine.ErrAmbiguousLCA, code: codes.FailedPrecondition, reason: "EINVAL"},
 	{sentinel: engine.ErrDiskMounted, code: codes.Aborted, reason: "EBUSY"},
 	{sentinel: engine.ErrNotFound, code: codes.NotFound, reason: "ENOENT"},
-	{sentinel: projection.ErrNotFound, code: codes.NotFound, reason: "ENOENT"},
 	{sentinel: engine.ErrNoData, code: codes.NotFound, reason: "ENODATA"},
 	{sentinel: engine.ErrExist, code: codes.AlreadyExists, reason: "EEXIST"},
 	{sentinel: engine.ErrPerm, code: codes.PermissionDenied, reason: "EPERM"},
@@ -47,9 +45,7 @@ var errorMappings = []errorMapping{
 	{sentinel: engine.ErrInvalid, code: codes.InvalidArgument, reason: "EINVAL"},
 	{sentinel: engine.ErrInvalidKey, code: codes.InvalidArgument, reason: "EINVAL"},
 	{sentinel: engine.ErrInvalidValue, code: codes.InvalidArgument, reason: "EINVAL"},
-	{sentinel: projection.ErrInvalidArgument, code: codes.InvalidArgument, reason: "EINVAL"},
 	{sentinel: engine.ErrClosed, code: codes.Internal, reason: "EIO"},
-	{sentinel: projection.ErrUnavailable, code: codes.Unavailable, reason: "EIO"},
 }
 
 func grpcCodeToConnectCode(c codes.Code) connect.Code {

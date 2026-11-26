@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -13,37 +11,15 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
-	"github.com/cockroachdb/pebble/v2/bloom"
 	"github.com/google/uuid"
 )
 
-const (
-	defaultMemTableSize    = 16 << 20
-	defaultCacheSize       = 32 << 20
-	defaultMaxOpenFiles    = 128
-	defaultWALBytesPerSync = 4 << 20
-	defaultBloomBitsPerKey = 10
-	pebbleLevelCount       = 7
-)
-
-type DiskOptions struct {
-	Dir          string
-	DiskID       string
-	Name         string
-	MaxBytes     uint64
-	BlockSize    uint32
-	MaxPackSize  uint32
-	Cache        *pebble.Cache
-	Now          func() time.Time
-	ActorIdleTTL time.Duration
-	GCInterval   time.Duration
-	EnableGCWake bool
-}
-
 type DiskStore struct {
+	node         *NodeStore
+	diskID       uuid.UUID
+	keys         diskKeys
 	dir          string
 	db           *pebble.DB
-	ownedCache   *pebble.Cache
 	packs        *PackActor
 	now          func() time.Time
 	blockSize    uint32
@@ -77,34 +53,11 @@ type DiskStore struct {
 	walCommitHook          func(sync bool)
 	beforeTickHook         func()
 
-	gcCancel  context.CancelFunc
-	gcDone    chan struct{}
-	gcWake    chan struct{}
-	closing   atomic.Bool
-	closeOnce sync.Once
-	closeErr  error
-}
-
-func newPebbleOptions(cache *pebble.Cache) *pebble.Options {
-	cmp := *pebble.DefaultComparer
-	cmp.Name = "bowl.engine.comparer"
-	cmp.Split = SplitKey
-
-	var levels [pebbleLevelCount]pebble.LevelOptions
-	policy := bloom.FilterPolicy(defaultBloomBitsPerKey)
-	for i := range levels {
-		levels[i].FilterPolicy = policy
-	}
-
-	return &pebble.Options{
-		Comparer:           &cmp,
-		Cache:              cache,
-		MemTableSize:       defaultMemTableSize,
-		MaxOpenFiles:       defaultMaxOpenFiles,
-		WALBytesPerSync:    defaultWALBytesPerSync,
-		FormatMajorVersion: pebble.FormatNewest,
-		Levels:             levels,
-	}
+	gcCancel   context.CancelFunc
+	gcDone     chan struct{}
+	gcWake     chan struct{}
+	gcStopOnce sync.Once
+	closing    atomic.Bool
 }
 
 func validateDiskName(name string) error {
@@ -114,221 +67,53 @@ func validateDiskName(name string) error {
 	return nil
 }
 
-func OpenDisk(opts DiskOptions) (*DiskStore, error) {
-	if opts.Dir == "" {
-		return nil, ErrInvalid
-	}
-	if err := validateDiskName(opts.Name); err != nil {
-		return nil, err
-	}
-	blockSize := opts.BlockSize
-	if blockSize != 0 {
-		if blockSize < MinBlockSize || blockSize > MaxBlockSize || blockSize&(blockSize-1) != 0 {
-			return nil, ErrInvalid
+func (d *DiskStore) stopGC() {
+	d.gcStopOnce.Do(func() {
+		if d.gcCancel != nil {
+			d.gcCancel()
+			<-d.gcDone
 		}
-	}
-	maxPackSize := opts.MaxPackSize
-	if maxPackSize == 0 {
-		maxPackSize = DefaultMaxPackSize
-	}
-	if maxPackSize > DefaultMaxPackSize {
-		return nil, ErrInvalid
-	}
-	nowFn := opts.Now
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-
-	pebbleDir := filepath.Join(opts.Dir, "pebble")
-	packsDir := filepath.Join(opts.Dir, "packs")
-	if err := os.MkdirAll(pebbleDir, 0o755); err != nil {
-		return nil, err
-	}
-
-	var ownedCache *pebble.Cache
-	cache := opts.Cache
-	if cache == nil {
-		cache = pebble.NewCache(defaultCacheSize)
-		ownedCache = cache
-	}
-
-	db, err := pebble.Open(pebbleDir, newPebbleOptions(cache))
-	if err != nil {
-		if ownedCache != nil {
-			ownedCache.Unref()
-		}
-		return nil, err
-	}
-
-	defaultBlockSize := blockSize
-	if defaultBlockSize == 0 {
-		defaultBlockSize = DefaultBlockSize
-	}
-	d := &DiskStore{
-		dir:          opts.Dir,
-		db:           db,
-		ownedCache:   ownedCache,
-		now:          nowFn,
-		blockSize:    defaultBlockSize,
-		actorIdleTTL: opts.ActorIdleTTL,
-		branchActors: make(map[string]*BranchActor),
-		commitActors: make(map[uint64]*BranchActor),
-	}
-
-	if err = d.loadOrBootstrapMeta(opts, defaultBlockSize); err != nil {
-		_ = db.Close()
-		if ownedCache != nil {
-			ownedCache.Unref()
-		}
-		return nil, err
-	}
-	if maxPackSize < d.blockSize {
-		_ = db.Close()
-		if ownedCache != nil {
-			ownedCache.Unref()
-		}
-		return nil, ErrInvalid
-	}
-
-	packs, err := newPackActor(packsDir, maxPackSize)
-	if err != nil {
-		_ = db.Close()
-		if ownedCache != nil {
-			ownedCache.Unref()
-		}
-		return nil, err
-	}
-	d.packs = packs
-	if opts.GCInterval > 0 || opts.EnableGCWake {
-		gcCtx, gcCancel := context.WithCancel(context.Background())
-		d.gcCancel = gcCancel
-		d.gcDone = make(chan struct{})
-		d.gcWake = make(chan struct{}, 1)
-		go d.runBackgroundGC(gcCtx, opts.GCInterval)
-	}
-	return d, nil
+	})
 }
 
-func (d *DiskStore) loadOrBootstrapMeta(opts DiskOptions, blockSize uint32) error {
-	val, closer, err := d.db.Get(MetaDiskKey())
-	if err == nil {
-		meta, decErr := DecodeDiskMeta(val)
-		closeErr := closer.Close()
-		if decErr != nil || closeErr != nil {
-			return errors.Join(decErr, closeErr)
-		}
-		if opts.MaxBytes > 0 && opts.MaxBytes != meta.MaxBytes {
-			meta.MaxBytes = opts.MaxBytes
-			meta.UpdatedAt = d.now().UnixNano()
-			if setErr := d.db.Set(MetaDiskKey(), EncodeDiskMeta(meta), pebble.Sync); setErr != nil {
-				return setErr
-			}
-		}
-		d.meta = meta
-		d.blockSize = meta.BlockSize
-		d.initAllocatorsFromMeta(meta)
-		return d.recoverUsedBytes()
+func (d *DiskStore) closeResources(onDetached func()) error {
+	d.stopGC()
+	_ = d.gcGate.lockExclusive(context.Background())
+	d.branchRegMu.Lock()
+	d.closing.Store(true)
+	d.stopAllActors()
+	var packErr error
+	if d.packs != nil {
+		packErr = d.packs.Close()
 	}
-	if !errors.Is(err, pebble.ErrNotFound) {
-		return err
+	if onDetached != nil {
+		onDetached()
 	}
-
-	diskID := opts.DiskID
-	if diskID == "" {
-		diskID = uuid.NewString()
+	if d.node != nil {
+		d.node.clearPackDirty(d.diskID)
 	}
-	nowNano := d.now().UnixNano()
-
-	const (
-		initCommitID uint64 = 1
-		initLayerID  uint64 = 1
-		mainWorkID   uint64 = 2
-	)
-
-	meta := DiskMeta{
-		DiskID:        diskID,
-		Name:          opts.Name,
-		DefaultBranch: DefaultBranchName,
-		MaxBytes:      opts.MaxBytes,
-		BlockSize:     blockSize,
-		ReservedIno:   RootIno + IDSegmentSize,
-		ReservedLayer: mainWorkID + IDSegmentSize,
-		ReservedCmt:   initCommitID + IDSegmentSize,
-		CreatedAt:     nowNano,
-		UpdatedAt:     nowNano,
-	}
-
-	rootInode := Inode{
-		Ino:        RootIno,
-		ParentIno:  RootIno,
-		Mode:       ModeDir | 0o755,
-		Nlink:      2,
-		Size:       DefaultDirSize,
-		Atime:      nowNano,
-		Mtime:      nowNano,
-		Ctime:      nowNano,
-		Generation: 1,
-	}
-	encodedRoot, encErr := EncodeInode(rootInode)
-	if encErr != nil {
-		return encErr
-	}
-
-	initCommit := CommitMeta{
-		ID:        initCommitID,
-		ParentID:  0,
-		LayerID:   initLayerID,
-		Kind:      CommitKindInit,
-		Message:   "init",
-		CreatedAt: nowNano,
-	}
-	mainBranch := BranchMeta{
-		Name:         DefaultBranchName,
-		HeadCommitID: initCommitID,
-		WorkLayerID:  mainWorkID,
-		WriterEpoch:  1,
-		CreatedAt:    nowNano,
-		UpdatedAt:    nowNano,
-	}
-
-	batch := d.db.NewBatch()
-	defer func() { _ = batch.Close() }()
-
-	if setErr := batch.Set(MetaDiskKey(), EncodeDiskMeta(meta), nil); setErr != nil {
-		return setErr
-	}
-	if setErr := batch.Set(MetaCommitKey(initCommitID), EncodeCommitMeta(initCommit), nil); setErr != nil {
-		return setErr
-	}
-	if setErr := batch.Set(LayerInodeKey(initLayerID, RootIno), EncodeLiveEnvelope(encodedRoot), nil); setErr != nil {
-		return setErr
-	}
-	if setErr := batch.Set(MetaBranchKey(DefaultBranchName), EncodeBranchMeta(mainBranch), nil); setErr != nil {
-		return setErr
-	}
-	if commitErr := batch.Commit(pebble.Sync); commitErr != nil {
-		return commitErr
-	}
-
-	d.meta = meta
-	d.usedBytes.Store(0)
-	d.nextIno.Store(RootIno + 1)
-	d.resIno.Store(meta.ReservedIno)
-	d.nextLayerID.Store(mainWorkID + 1)
-	d.resLayerID.Store(meta.ReservedLayer)
-	d.nextCmtID.Store(initCommitID + 1)
-	d.resCmtID.Store(meta.ReservedCmt)
-	return nil
+	d.branchRegMu.Unlock()
+	d.gcGate.unlockExclusive()
+	return packErr
 }
 
 func (d *DiskStore) recoverUsedBytes() error {
-	branches, err := listBranchesFromReader(d.db)
+	total, err := computeColdUsedBytes(d.db, d.keys)
 	if err != nil {
 		return err
 	}
-	commits, err := listCommitsFromReader(d.db)
+	d.usedBytes.Store(total)
+	return nil
+}
+
+func computeColdUsedBytes(r pebbleReader, dk diskKeys) (uint64, error) {
+	branches, err := listBranchesFromReader(r, dk)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	commits, err := listCommitsFromReader(r, dk)
+	if err != nil {
+		return 0, err
 	}
 	var total uint64
 	for _, b := range branches {
@@ -337,8 +122,7 @@ func (d *DiskStore) recoverUsedBytes() error {
 	for _, c := range commits {
 		total += c.OwnedBytes
 	}
-	d.usedBytes.Store(total)
-	return nil
+	return total, nil
 }
 
 func (d *DiskStore) UsedBytes() uint64 {
@@ -432,7 +216,7 @@ func (d *DiskStore) allocFromSegment(nextAtom, resAtom *atomic.Uint64, updateMet
 		d.metaMu.Lock()
 		metaCopy := d.meta
 		updateMeta(&metaCopy, newRes)
-		err := d.setKeySync(context.Background(), MetaDiskKey(), EncodeDiskMeta(metaCopy))
+		err := d.setKeySync(context.Background(), d.keys.MetaDiskKey(), EncodeDiskMeta(metaCopy))
 		if err != nil {
 			d.metaMu.Unlock()
 			d.allocMu.Unlock()
@@ -446,75 +230,24 @@ func (d *DiskStore) allocFromSegment(nextAtom, resAtom *atomic.Uint64, updateMet
 	}
 }
 
-func (d *DiskStore) syncPacksBeforeWAL(ctx context.Context) error {
-	if d.packs == nil {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return d.packs.SyncActive(ctx)
+func (d *DiskStore) commitTickNoSync(batch *pebble.Batch) error {
+	return d.node.commitBatchNoSync(batch, d.walCommitHook)
+}
+
+func (d *DiskStore) commitTickSync(ctx context.Context, batch *pebble.Batch) error {
+	return d.node.commitTickSync(ctx, batch, d.walCommitHook)
 }
 
 func (d *DiskStore) commitBatchSync(ctx context.Context, batch *pebble.Batch) error {
-	if err := d.syncPacksBeforeWAL(ctx); err != nil {
-		return err
-	}
-	if d.walCommitHook != nil {
-		d.walCommitHook(true)
-	}
-	return batch.Commit(pebble.Sync)
+	return d.node.commitBatchSync(ctx, batch, d.walCommitHook)
 }
 
 func (d *DiskStore) setKeySync(ctx context.Context, key, val []byte) error {
-	if err := d.syncPacksBeforeWAL(ctx); err != nil {
-		return err
-	}
-	if d.walCommitHook != nil {
-		d.walCommitHook(true)
-	}
-	return d.db.Set(key, val, pebble.Sync)
+	return d.node.setKeySync(ctx, key, val, d.walCommitHook)
 }
 
 func (d *DiskStore) deleteKeySync(ctx context.Context, key []byte) error {
-	if err := d.syncPacksBeforeWAL(ctx); err != nil {
-		return err
-	}
-	if d.walCommitHook != nil {
-		d.walCommitHook(true)
-	}
-	return d.db.Delete(key, pebble.Sync)
-}
-
-func (d *DiskStore) Close() error {
-	d.closeOnce.Do(func() {
-		d.closing.Store(true)
-		if d.gcCancel != nil {
-			d.gcCancel()
-			<-d.gcDone
-		}
-		d.stopAllActors()
-		var packErr, dbErr error
-		if d.packs != nil {
-			packErr = d.packs.Close()
-		}
-		if d.db != nil {
-			if packErr == nil {
-				if d.walCommitHook != nil {
-					d.walCommitHook(true)
-				}
-				if logErr := d.db.LogData(nil, pebble.Sync); logErr != nil {
-					dbErr = logErr
-				}
-			}
-			dbErr = errors.Join(dbErr, d.db.Close())
-		}
-		if d.ownedCache != nil {
-			d.ownedCache.Unref()
-		}
-		d.closeErr = errors.Join(packErr, dbErr)
-	})
-	return d.closeErr
+	return d.node.deleteKeySync(ctx, key, d.walCommitHook)
 }
 
 func (d *DiskStore) DiskMeta() DiskMeta {
@@ -565,7 +298,7 @@ func (d *DiskStore) UpdateDiskMeta(ctx context.Context, name *string, maxBytes *
 	}
 	metaCopy.UpdatedAt = d.now().UnixNano()
 
-	if err := d.setKeySync(ctx, MetaDiskKey(), EncodeDiskMeta(metaCopy)); err != nil {
+	if err := d.setKeySync(ctx, d.keys.MetaDiskKey(), EncodeDiskMeta(metaCopy)); err != nil {
 		return DiskMeta{}, err
 	}
 	d.meta = metaCopy
@@ -579,7 +312,7 @@ func (d *DiskStore) GetBranch(name string) (BranchMeta, error) {
 	if name == "" {
 		return BranchMeta{}, ErrInvalid
 	}
-	val, closer, err := d.db.Get(MetaBranchKey(name))
+	val, closer, err := d.db.Get(d.keys.MetaBranchKey(name))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return BranchMeta{}, ErrNotFound
 	}
@@ -598,11 +331,11 @@ func (d *DiskStore) ListBranches() ([]BranchMeta, error) {
 	if d.closing.Load() {
 		return nil, ErrClosed
 	}
-	return listBranchesFromReader(d.db)
+	return listBranchesFromReader(d.db, d.keys)
 }
 
-func listBranchesFromReader(r pebbleReader) ([]BranchMeta, error) {
-	prefix := MetaBranchPrefix()
+func listBranchesFromReader(r pebbleReader, dk diskKeys) ([]BranchMeta, error) {
+	prefix := dk.MetaBranchPrefix()
 	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: PrefixUpperBound(prefix),
@@ -632,11 +365,11 @@ func (d *DiskStore) ListCommits() ([]CommitMeta, error) {
 	if d.closing.Load() {
 		return nil, ErrClosed
 	}
-	return listCommitsFromReader(d.db)
+	return listCommitsFromReader(d.db, d.keys)
 }
 
-func listCommitsFromReader(r pebbleReader) ([]CommitMeta, error) {
-	prefix := MetaCommitPrefix()
+func listCommitsFromReader(r pebbleReader, dk diskKeys) ([]CommitMeta, error) {
+	prefix := dk.MetaCommitPrefix()
 	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: PrefixUpperBound(prefix),
@@ -662,8 +395,8 @@ func listCommitsFromReader(r pebbleReader) ([]CommitMeta, error) {
 	return out, nil
 }
 
-func readDiskMeta(r pebbleReader) (DiskMeta, error) {
-	val, closer, err := r.Get(MetaDiskKey())
+func readDiskMeta(r pebbleReader, dk diskKeys) (DiskMeta, error) {
+	val, closer, err := r.Get(dk.MetaDiskKey())
 	if errors.Is(err, pebble.ErrNotFound) {
 		return DiskMeta{}, ErrNotFound
 	}
@@ -689,20 +422,21 @@ func (d *DiskStore) SnapshotControlMeta(now time.Time) (ControlSnapshot, error) 
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
+	dk := d.keys
 	usedBytes := d.UsedBytes()
-	diskMeta, err := readDiskMeta(snap)
+	diskMeta, err := readDiskMeta(snap, dk)
 	if err != nil {
 		return ControlSnapshot{}, err
 	}
-	branches, err := listBranchesFromReader(snap)
+	branches, err := listBranchesFromReader(snap, dk)
 	if err != nil {
 		return ControlSnapshot{}, err
 	}
-	commits, err := listCommitsFromReader(snap)
+	commits, err := listCommitsFromReader(snap, dk)
 	if err != nil {
 		return ControlSnapshot{}, err
 	}
-	mounts, err := listActiveMountsFromReader(snap, "", now.UnixNano())
+	mounts, err := listActiveMountsFromReader(snap, dk, "", now.UnixNano())
 	if err != nil {
 		return ControlSnapshot{}, err
 	}
@@ -722,7 +456,7 @@ func (d *DiskStore) GetCommit(commitID uint64) (CommitMeta, error) {
 	if commitID == 0 {
 		return CommitMeta{}, ErrInvalid
 	}
-	val, closer, err := d.db.Get(MetaCommitKey(commitID))
+	val, closer, err := d.db.Get(d.keys.MetaCommitKey(commitID))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return CommitMeta{}, ErrNotFound
 	}
@@ -753,13 +487,18 @@ func (d *DiskStore) allocatedInodes() uint64 {
 	return cur - 1
 }
 
+func (d *DiskStore) activeBranchActorCount() int {
+	d.actorsMu.Lock()
+	n := len(d.branchActors)
+	d.actorsMu.Unlock()
+	return n
+}
+
 func (d *DiskStore) MetricsSnapshot() DiskMetricsSnapshot {
 	if d.closing.Load() {
 		return DiskMetricsSnapshot{}
 	}
-	d.actorsMu.Lock()
-	branchCount := len(d.branchActors)
-	d.actorsMu.Unlock()
+	branchCount := d.activeBranchActorCount()
 
 	var pm *pebble.Metrics
 	if d.db != nil && !d.closing.Load() {
@@ -789,22 +528,23 @@ func (d *DiskStore) StatFSBranch(_ context.Context, branch string) (StatFSResult
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	branchMeta, layers, err := resolveBranchLayers(snap, branch)
+	dk := d.keys
+	branchMeta, layers, err := resolveBranchLayers(snap, dk, branch)
 	if err != nil {
 		return StatFSResult{}, err
 	}
-	liveInodes, err := countLiveInodes(snap, layers)
+	liveInodes, err := countLiveInodes(snap, dk, layers)
 	if err != nil {
 		return StatFSResult{}, err
 	}
 	return d.buildStatFS(liveInodes, branchMeta.LogicalBytes, d.UsedBytes())
 }
 
-func countLiveInodes(r pebbleReader, layers []uint64) (uint64, error) {
+func countLiveInodes(r pebbleReader, dk diskKeys, layers []uint64) (uint64, error) {
 	seen := make(map[uint64]struct{})
 	var liveCount uint64
 	for _, layerID := range layers {
-		prefix := LayerInodePrefix(layerID)
+		prefix := dk.LayerInodePrefix(layerID)
 		iter, err := r.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
@@ -813,7 +553,7 @@ func countLiveInodes(r pebbleReader, layers []uint64) (uint64, error) {
 			return 0, err
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
-			_, ino, decErr := DecodeLayerInodeKey(iter.Key())
+			_, ino, decErr := dk.DecodeLayerInodeKey(iter.Key())
 			if decErr != nil {
 				_ = iter.Close()
 				return 0, decErr

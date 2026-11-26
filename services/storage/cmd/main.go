@@ -17,7 +17,7 @@ import (
 	"github.com/starsrc/pkg/observability"
 
 	"github.com/starsrc/bowl/services/storage/internal/config"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
 	"github.com/starsrc/bowl/services/storage/internal/server"
 )
 
@@ -89,31 +89,26 @@ func runWithConfig(ctx context.Context, cfg *config.Config) error {
 		addCleanup("tracer provider", tp.Shutdown)
 	}
 
-	pool, err := projection.OpenPool(cfg.PoolConfig)
-	if err != nil {
-		return abort(fmt.Errorf("open db pool: %w", err))
-	}
-	addCleanup("db pool", func(context.Context) error {
-		pool.Close()
-		return nil
-	})
-
-	if pingErr := pool.Ping(ctx); pingErr != nil {
-		return abort(fmt.Errorf("ping database: %w", pingErr))
+	gcMode := engine.GCModePeriodic
+	gcInterval := cfg.Meta.GCInterval()
+	if gcInterval == 0 {
+		gcMode = engine.GCModeWakeOnly
 	}
 
-	mgr, err := projection.ProvideControlManager(projection.ControlManagerParams{
-		Store:   projection.ProvideStore(pool),
-		MetaCfg: &cfg.Meta,
-		Logger:  obsRT.Logger(),
+	node, err := engine.OpenNode(engine.NodeOptions{
+		DataDir:      cfg.Meta.DataDir(),
+		Logger:       obsRT.Logger(),
+		ActorIdleTTL: cfg.Meta.ActorIdleTTL(),
+		GCMode:       gcMode,
+		GCInterval:   gcInterval,
 	})
 	if err != nil {
-		return abort(fmt.Errorf("initialize control manager: %w", err))
+		return abort(fmt.Errorf("open node store: %w", err))
 	}
-	addCleanup("control manager", mgr.Close)
+	addCleanup("node store", node.Close)
 
 	httpMetrics := server.NewHTTPMetrics()
-	storageCollector := projection.NewStorageMetricsCollector(mgr)
+	storageCollector := server.NewStorageMetricsCollector(node)
 	if regErr := obsRT.RegisterCollector(httpMetrics, storageCollector); regErr != nil {
 		return abort(fmt.Errorf("register metrics collectors: %w", regErr))
 	}
@@ -121,12 +116,11 @@ func runWithConfig(ctx context.Context, cfg *config.Config) error {
 	srv, err := server.New(server.Params{
 		Config:        cfg.ServerConfig,
 		MetaCfg:       &cfg.Meta,
-		Manager:       mgr,
+		Node:          node,
 		Observability: cfg,
 		Telemetry:     &cfg.TelemetryConfig,
 		AdminCfg:      cfg,
 		Gatherer:      obsRT.Gatherer(),
-		Pool:          pool,
 		HTTPMetrics:   httpMetrics,
 		Logger:        obsRT.Logger(),
 	})

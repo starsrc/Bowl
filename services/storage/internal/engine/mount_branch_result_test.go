@@ -11,12 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func deleteRootInodeFromBranch(t *testing.T, disk *DiskStore, branch string) {
+func deleteRootInodeFromBranch(t *testing.T, disk *testDisk, branch string) {
 	t.Helper()
-	_, layers, err := resolveBranchLayers(disk.db, branch)
+	_, layers, err := resolveBranchLayers(disk.db, disk.keys, branch)
 	require.NoError(t, err)
 	for _, layerID := range layers {
-		require.NoError(t, disk.db.Delete(LayerInodeKey(layerID, RootIno), pebble.Sync))
+		require.NoError(t, disk.db.Delete(disk.keys.LayerInodeKey(layerID, RootIno), pebble.Sync))
 	}
 }
 
@@ -25,7 +25,7 @@ func TestMountBranch_Step12_MissingRootInodeFailsAtomicallyWithoutMutation(t *te
 	ctx := context.Background()
 	clk := newStepClock(time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC))
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "disk-step12-atomic-root",
 		BlockSize: 4096,
@@ -59,7 +59,7 @@ func TestMountBranch_Step12_MissingRootInodeFailsAtomicallyWithoutMutation(t *te
 	require.Equal(t, activeRW.WriterEpoch, branchBefore.WriterEpoch)
 	require.Positive(t, branchBefore.WorkOwnedBytes)
 
-	allMountsBefore, err := listAllMountsFromReader(disk.db, DefaultBranchName)
+	allMountsBefore, err := listAllMountsFromReader(disk.db, disk.keys, DefaultBranchName)
 	require.NoError(t, err)
 	require.Len(t, allMountsBefore, 2)
 
@@ -71,7 +71,7 @@ func TestMountBranch_Step12_MissingRootInodeFailsAtomicallyWithoutMutation(t *te
 	_, err = disk.MountBranch(ctx, DefaultBranchName, true, false, 30*time.Second)
 	require.ErrorIs(t, err, ErrNotFound)
 
-	allMountsAfterRO, err := listAllMountsFromReader(disk.db, DefaultBranchName)
+	allMountsAfterRO, err := listAllMountsFromReader(disk.db, disk.keys, DefaultBranchName)
 	require.NoError(t, err)
 	require.Equal(t, allMountsBefore, allMountsAfterRO)
 
@@ -82,7 +82,7 @@ func TestMountBranch_Step12_MissingRootInodeFailsAtomicallyWithoutMutation(t *te
 	_, err = disk.MountBranch(ctx, DefaultBranchName, false, true, 30*time.Second)
 	require.ErrorIs(t, err, ErrNotFound)
 
-	allMountsAfterForceRW, err := listAllMountsFromReader(disk.db, DefaultBranchName)
+	allMountsAfterForceRW, err := listAllMountsFromReader(disk.db, disk.keys, DefaultBranchName)
 	require.NoError(t, err)
 	require.Equal(t, allMountsBefore, allMountsAfterForceRW)
 
@@ -99,7 +99,7 @@ func TestMountBranch_Step13_ReturnsRootInodeUpdatedBranchAndSortedDeletedMountID
 	ctx := context.Background()
 	clk := newStepClock(time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC))
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "disk-step13-mount-result",
 		BlockSize: 4096,

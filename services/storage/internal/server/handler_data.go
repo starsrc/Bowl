@@ -19,7 +19,7 @@ func (s *Server) Read(ctx context.Context, req *connect.Request[storagev1.ReadRe
 	}
 	if msg.Size == 0 {
 		var data []byte
-		err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 			var rErr error
 			data, rErr = ds.Read(ctx, msg.Branch, msg.Ino, int64(msg.Offset), 0)
 			return rErr
@@ -32,7 +32,7 @@ func (s *Server) Read(ctx context.Context, req *connect.Request[storagev1.ReadRe
 
 	leased := acquireReadPayloadBuf()
 	var data []byte
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var rErr error
 		data, rErr = ds.ReadInto(ctx, msg.Branch, msg.Ino, int64(msg.Offset), int(msg.Size), leased[:0])
 		return rErr
@@ -68,7 +68,7 @@ func (s *Server) Write(ctx context.Context, req *connect.Request[storagev1.Write
 		written int
 		inode   engine.Inode
 	)
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var wErr error
 		written, inode, wErr = ds.WriteWithAttr(epochCtx, msg.Branch, msg.Ino, int64(msg.Offset), msg.Data)
 		return wErr

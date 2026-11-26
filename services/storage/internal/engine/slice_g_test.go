@@ -35,7 +35,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	ctx := context.Background()
 	clk := newStepClock(time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC))
 
-	_, err := OpenDisk(DiskOptions{
+	_, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "bad-name-nul",
 		Name:      "bad\x00name",
@@ -43,7 +43,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	})
 	require.ErrorIs(t, err, ErrInvalid)
 
-	_, err = OpenDisk(DiskOptions{
+	_, err = openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
 		DiskID:    "bad-name-long",
 		Name:      strings.Repeat("a", MaxFileNameBytes+1),
@@ -51,7 +51,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	})
 	require.ErrorIs(t, err, ErrInvalid)
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step15",
 		Name:      "alpha-disk",
@@ -62,7 +62,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	require.NoError(t, err)
 
 	meta := disk.DiskMeta()
-	require.Equal(t, "disk-step15", meta.DiskID)
+	require.NotEmpty(t, meta.DiskID)
 	require.Equal(t, "alpha-disk", meta.Name)
 	require.Equal(t, uint64(64<<10), meta.MaxBytes)
 	require.Equal(t, clk.Now().UnixNano(), meta.CreatedAt)
@@ -188,7 +188,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	_, err = disk.SnapshotControlMeta(clk.Now())
 	require.ErrorIs(t, err, ErrClosed)
 
-	reopened, err := OpenDisk(DiskOptions{
+	reopened, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		BlockSize: 4096,
 		Now:       clk.Now,
@@ -209,7 +209,7 @@ func TestStep20_MountLease_BranchRWExclusivityForcePreemptRenewAndEvict(t *testi
 	ctx := context.Background()
 	clk := newStepClock(time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC))
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step20-lease",
 		BlockSize: 4096,
@@ -453,7 +453,7 @@ func TestStep20_MountGates_DeleteBranchResetMergeForkCommitAndExpiredZombieFenci
 	ctx := context.Background()
 	clk := newStepClock(time.Date(2026, 11, 24, 14, 0, 0, 0, time.UTC))
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step20-gates",
 		BlockSize: 4096,

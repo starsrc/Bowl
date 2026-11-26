@@ -1,4 +1,4 @@
-package projection
+package engine
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ func NormalizePageSize(pageSize uint32) (uint32, error) {
 		return DefaultPageSize, nil
 	}
 	if pageSize > MaxPageSize {
-		return 0, fmt.Errorf("%w: page_size %d exceeds max %d", ErrInvalidArgument, pageSize, MaxPageSize)
+		return 0, fmt.Errorf("%w: page_size %d exceeds max %d", ErrInvalid, pageSize, MaxPageSize)
 	}
 	return pageSize, nil
 }
@@ -49,17 +49,17 @@ func EncodeDiskPageCursor(createdAt time.Time, diskID uuid.UUID) string {
 func DecodeDiskPageCursor(token string) (time.Time, uuid.UUID, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
-		return time.Time{}, uuid.Nil, fmt.Errorf("%w: invalid page_token base64 encoding", ErrInvalidArgument)
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: invalid page_token base64 encoding", ErrInvalid)
 	}
 	var cursor diskPageCursor
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err = dec.Decode(&cursor); err != nil || dec.More() || cursor.CreatedAtMicro == nil || cursor.DiskID == "" {
-		return time.Time{}, uuid.Nil, fmt.Errorf("%w: malformed disk page_token payload", ErrInvalidArgument)
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: malformed disk page_token payload", ErrInvalid)
 	}
 	id, err := uuid.Parse(cursor.DiskID)
 	if err != nil || id == uuid.Nil {
-		return time.Time{}, uuid.Nil, fmt.Errorf("%w: invalid page_token disk_id", ErrInvalidArgument)
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: invalid page_token disk_id", ErrInvalid)
 	}
 	return time.UnixMicro(*cursor.CreatedAtMicro).UTC(), id, nil
 }
@@ -77,13 +77,13 @@ func EncodeCommitPageCursor(commitID uint64) string {
 func DecodeCommitPageCursor(token string) (uint64, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
-		return 0, fmt.Errorf("%w: invalid commit page_token base64 encoding", ErrInvalidArgument)
+		return 0, fmt.Errorf("%w: invalid commit page_token base64 encoding", ErrInvalid)
 	}
 	var cursor commitPageCursor
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err = dec.Decode(&cursor); err != nil || dec.More() || cursor.CommitID == nil || *cursor.CommitID == 0 {
-		return 0, fmt.Errorf("%w: malformed commit page_token payload", ErrInvalidArgument)
+		return 0, fmt.Errorf("%w: malformed commit page_token payload", ErrInvalid)
 	}
 	return *cursor.CommitID, nil
 }

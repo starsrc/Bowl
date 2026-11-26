@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"sort"
 	"strings"
 
@@ -69,14 +68,15 @@ func (d *DiskStore) Merge(ctx context.Context, opts MergeOptions) (*MergeResult,
 }
 
 func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStrategies map[string]MergeStrategy) (*MergeResult, error) {
+	dk := d.keys
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	tgtBranch, err := readBranchMeta(snap, opts.TargetBranch)
+	tgtBranch, err := readBranchMeta(snap, dk, opts.TargetBranch)
 	if err != nil {
 		return nil, err
 	}
-	tgtDirty, err := layerHasAnyKey(snap, tgtBranch.WorkLayerID)
+	tgtDirty, err := layerHasAnyKey(snap, dk, tgtBranch.WorkLayerID)
 	if err != nil {
 		return nil, err
 	}
@@ -86,11 +86,11 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 
 	srcBranch := tgtBranch
 	if opts.SourceBranch != opts.TargetBranch {
-		srcBranch, err = readBranchMeta(snap, opts.SourceBranch)
+		srcBranch, err = readBranchMeta(snap, dk, opts.SourceBranch)
 		if err != nil {
 			return nil, err
 		}
-		srcDirty, sErr := layerHasAnyKey(snap, srcBranch.WorkLayerID)
+		srcDirty, sErr := layerHasAnyKey(snap, dk, srcBranch.WorkLayerID)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -99,7 +99,7 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 		}
 	}
 
-	lca, err := findLCA(snap, srcBranch.HeadCommitID, tgtBranch.HeadCommitID)
+	lca, err := findLCA(snap, dk, srcBranch.HeadCommitID, tgtBranch.HeadCommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,19 +126,19 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 		}, nil
 	}
 
-	_, baseLayers, err := resolveCommitLayers(snap, lca)
+	_, baseLayers, err := resolveCommitLayers(snap, dk, lca)
 	if err != nil {
 		return nil, err
 	}
 	targetIsBase := tgtBranch.HeadCommitID == lca
 	targetLayers := baseLayers
 	if !targetIsBase {
-		_, targetLayers, err = resolveCommitLayers(snap, tgtBranch.HeadCommitID)
+		_, targetLayers, err = resolveCommitLayers(snap, dk, tgtBranch.HeadCommitID)
 		if err != nil {
 			return nil, err
 		}
 	}
-	_, sourceLayers, err := resolveCommitLayers(snap, srcBranch.HeadCommitID)
+	_, sourceLayers, err := resolveCommitLayers(snap, dk, srcBranch.HeadCommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -146,9 +146,9 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 	plan, err := d.planDeltaMerge(
 		ctx,
 		lca,
-		layerView{r: snap, layers: baseLayers},
-		layerView{r: snap, layers: targetLayers},
-		layerView{r: snap, layers: sourceLayers},
+		layerView{r: snap, keys: dk, layers: baseLayers},
+		layerView{r: snap, keys: dk, layers: targetLayers},
+		layerView{r: snap, keys: dk, layers: sourceLayers},
 		targetIsBase,
 		opts,
 		normStrategies,
@@ -172,8 +172,9 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		return nil, ErrInvalid
 	}
 
+	dk := a.disk.keys
 	gateNow := a.disk.now().UnixNano()
-	tgtMounted, err := hasActiveMountOnReader(batch, branch.Name, gateNow, false)
+	tgtMounted, err := hasActiveMountOnReader(batch, dk, branch.Name, gateNow, false)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +182,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		return nil, ErrDiskMounted
 	}
 	if req.opts.SourceBranch != branch.Name {
-		srcMounted, srcMountErr := hasActiveMountOnReader(batch, req.opts.SourceBranch, gateNow, true)
+		srcMounted, srcMountErr := hasActiveMountOnReader(batch, dk, req.opts.SourceBranch, gateNow, true)
 		if srcMountErr != nil {
 			return nil, srcMountErr
 		}
@@ -199,7 +200,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 	snap := a.disk.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	tgtDirty, err := layerHasAnyKey(batch, branch.WorkLayerID)
+	tgtDirty, err := layerHasAnyKey(batch, dk, branch.WorkLayerID)
 	if err != nil {
 		return nil, err
 	}
@@ -212,11 +213,11 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 	if req.opts.SourceBranch == branch.Name {
 		srcReader = batch
 	} else {
-		srcBranch, err = readBranchMeta(snap, req.opts.SourceBranch)
+		srcBranch, err = readBranchMeta(snap, dk, req.opts.SourceBranch)
 		if err != nil {
 			return nil, err
 		}
-		srcDirty, sErr := layerHasAnyKey(snap, srcBranch.WorkLayerID)
+		srcDirty, sErr := layerHasAnyKey(snap, dk, srcBranch.WorkLayerID)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -225,7 +226,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		}
 	}
 
-	lca, err := findLCA(batch, srcBranch.HeadCommitID, branch.HeadCommitID)
+	lca, err := findLCA(batch, dk, srcBranch.HeadCommitID, branch.HeadCommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +245,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 
 	nowNano := a.disk.now().UnixNano()
 	if lca == oldTargetHead && !req.opts.NoFastForward {
-		srcHeadCmt, cmtErr := readCommitMeta(srcReader, srcBranch.HeadCommitID)
+		srcHeadCmt, cmtErr := readCommitMeta(srcReader, dk, srcBranch.HeadCommitID)
 		if cmtErr != nil {
 			return nil, cmtErr
 		}
@@ -253,7 +254,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		branch.WorkOwnedBytes = 0
 		branch.LogicalBytes = srcHeadCmt.LogicalBytes
 		branch.UpdatedAt = nowNano
-		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+		if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 			return nil, setErr
 		}
 		return &MergeResult{
@@ -266,27 +267,27 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		}, nil
 	}
 
-	targetHeadCmt, targetLayers, err := resolveCommitLayers(batch, oldTargetHead)
+	targetHeadCmt, targetLayers, err := resolveCommitLayers(batch, dk, oldTargetHead)
 	if err != nil {
 		return nil, err
 	}
 	targetIsBase := oldTargetHead == lca
 	var baseView layerView
-	targetView := layerView{r: batch, layers: targetLayers}
+	targetView := layerView{r: batch, keys: dk, layers: targetLayers}
 	if targetIsBase {
 		baseView = targetView
 	} else {
-		_, baseLayers, bErr := resolveCommitLayers(snap, lca)
+		_, baseLayers, bErr := resolveCommitLayers(snap, dk, lca)
 		if bErr != nil {
 			return nil, bErr
 		}
-		baseView = layerView{r: snap, layers: baseLayers}
+		baseView = layerView{r: snap, keys: dk, layers: baseLayers}
 	}
-	_, sourceLayers, err := resolveCommitLayers(srcReader, srcBranch.HeadCommitID)
+	_, sourceLayers, err := resolveCommitLayers(srcReader, dk, srcBranch.HeadCommitID)
 	if err != nil {
 		return nil, err
 	}
-	sourceView := layerView{r: srcReader, layers: sourceLayers}
+	sourceView := layerView{r: srcReader, keys: dk, layers: sourceLayers}
 
 	plan, err := a.disk.planDeltaMerge(
 		context.Background(),
@@ -321,7 +322,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		sort.Strings(keys)
 		for _, k := range keys {
 			rawKey := []byte(k)
-			binary.BigEndian.PutUint64(rawKey[2:10], mergeLayerID)
+			dk.setLayerID(rawKey, mergeLayerID)
 			if setErr := batch.Set(rawKey, plan.deltaKV[k], nil); setErr != nil {
 				return nil, setErr
 			}
@@ -350,10 +351,10 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 	branch.LogicalBytes = mergeLogical
 	branch.UpdatedAt = nowNano
 
-	if setErr := batch.Set(MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
 		return nil, setErr
 	}
-	if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+	if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 		return nil, setErr
 	}
 
@@ -828,7 +829,7 @@ func (b *deltaMergeBuilder) resolveParentDirIno(parentPath string) (uint64, erro
 	}
 	cur := RootIno
 	for seg := range strings.SplitSeq(parentPath, "/") {
-		ent, err := overlayGetEntry(b.tc.target.r, b.tc.target.layers, cur, []byte(seg))
+		ent, err := overlayGetEntry(b.tc.target.r, b.tc.target.keys, b.tc.target.layers, cur, []byte(seg))
 		if err != nil {
 			return 0, err
 		}
@@ -842,6 +843,7 @@ func (b *deltaMergeBuilder) applyResolvedRecord(rr resolvedRecord) error {
 	rec := rr.rec
 	an := rec.an
 	pathStr := string(an.path)
+	dk := b.disk.keys
 
 	switch rr.action {
 	case actionKeepTarget:
@@ -855,7 +857,7 @@ func (b *deltaMergeBuilder) applyResolvedRecord(rr resolvedRecord) error {
 		if err != nil {
 			return err
 		}
-		b.putDelta(LayerEntryKey(0, parentIno, rec.name), EncodeTombstone())
+		b.putDelta(dk.LayerEntryKey(0, parentIno, rec.name), EncodeTombstone())
 		b.dirtyParentMeta[parentIno] = true
 		if (an.tNode.Mode & ModeTypeMask) == ModeDir {
 			b.dirSubdirDelta[parentIno]--
@@ -891,7 +893,7 @@ func (b *deltaMergeBuilder) applyResolvedRecord(rr resolvedRecord) error {
 				parentIno:       parentIno,
 			}
 			if an.tNode.Mode != meta.Mode {
-				b.putDelta(LayerEntryKey(0, parentIno, rec.name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: an.tNode.Ino, Mode: meta.Mode})))
+				b.putDelta(dk.LayerEntryKey(0, parentIno, rec.name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: an.tNode.Ino, Mode: meta.Mode})))
 			}
 			return nil
 		}
@@ -913,7 +915,7 @@ func (b *deltaMergeBuilder) applyResolvedRecord(rr resolvedRecord) error {
 			}
 			b.dirInoByPath[pathStr] = finalDirIno
 			b.claimedInos[finalDirIno] = true
-			b.putDelta(LayerEntryKey(0, parentIno, rec.name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: finalDirIno, Mode: an.sNode.Mode})))
+			b.putDelta(dk.LayerEntryKey(0, parentIno, rec.name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: finalDirIno, Mode: an.sNode.Mode})))
 			b.dirSubdirDelta[parentIno]++
 			b.dirtyParentMeta[parentIno] = true
 			meta := *an.sNode
@@ -968,7 +970,7 @@ func (b *deltaMergeBuilder) applyResolvedRecord(rr resolvedRecord) error {
 					parentIno:       parentIno,
 				}
 				if an.tNode.Mode != an.mergedMeta.Mode {
-					b.putDelta(LayerEntryKey(0, parentIno, rec.name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: an.tNode.Ino, Mode: an.mergedMeta.Mode})))
+					b.putDelta(dk.LayerEntryKey(0, parentIno, rec.name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: an.tNode.Ino, Mode: an.mergedMeta.Mode})))
 				}
 			}
 			return nil
@@ -1006,7 +1008,7 @@ func (b *deltaMergeBuilder) adoptSourceNonDir(parentIno uint64, name []byte, tNo
 	b.recordEntryParent(finalIno, parentIno)
 
 	if oldTgtIno != finalIno || tNode == nil || tNode.Mode != sNode.Mode {
-		b.putDelta(LayerEntryKey(0, parentIno, name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: finalIno, Mode: sNode.Mode})))
+		b.putDelta(b.disk.keys.LayerEntryKey(0, parentIno, name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: finalIno, Mode: sNode.Mode})))
 		b.dirtyParentMeta[parentIno] = true
 	}
 	if oldTgtIno != 0 && oldTgtIno != finalIno {
@@ -1134,12 +1136,12 @@ func (b *deltaMergeBuilder) fuseNonDir(parentIno uint64, name []byte, an *analyz
 	}
 	if reallocated {
 		meta.ParentIno = parentIno
-		b.putDelta(LayerEntryKey(0, parentIno, name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: finalIno, Mode: meta.Mode})))
+		b.putDelta(b.disk.keys.LayerEntryKey(0, parentIno, name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: finalIno, Mode: meta.Mode})))
 		b.dirtyParentMeta[parentIno] = true
 		b.nlinkDelta[tNode.Ino]--
 		b.nlinkDelta[finalIno]++
 	} else if tNode.Mode != meta.Mode {
-		b.putDelta(LayerEntryKey(0, parentIno, name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: finalIno, Mode: meta.Mode})))
+		b.putDelta(b.disk.keys.LayerEntryKey(0, parentIno, name), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: finalIno, Mode: meta.Mode})))
 		b.dirtyParentMeta[parentIno] = true
 	}
 
@@ -1197,7 +1199,7 @@ func (b *deltaMergeBuilder) adoptSourceSubtree(srcDirIno, dstDirIno uint64, dirP
 			}
 			b.dirInoByPath[childPath] = subDstIno
 			b.claimedInos[subDstIno] = true
-			b.putDelta(LayerEntryKey(0, dstDirIno, []byte(ent.Name)), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: subDstIno, Mode: sNode.Mode})))
+			b.putDelta(b.disk.keys.LayerEntryKey(0, dstDirIno, []byte(ent.Name)), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: subDstIno, Mode: sNode.Mode})))
 			b.dirSubdirDelta[dstDirIno]++
 			meta := sNode
 			meta.Ino = subDstIno
@@ -1228,13 +1230,14 @@ func (b *deltaMergeBuilder) deleteTargetSubtree(dirIno uint64) error {
 		return nil
 	}
 	b.tombstonedInos[dirIno] = true
+	dk := b.disk.keys
 
 	entries, err := b.tc.target.readDir(dirIno)
 	if err != nil {
 		return err
 	}
 	for _, ent := range entries {
-		b.putDelta(LayerEntryKey(0, dirIno, []byte(ent.Name)), EncodeTombstone())
+		b.putDelta(dk.LayerEntryKey(0, dirIno, []byte(ent.Name)), EncodeTombstone())
 		if (ent.Mode & ModeTypeMask) == ModeDir {
 			if subErr := b.deleteTargetSubtree(ent.Ino); subErr != nil {
 				return subErr
@@ -1244,18 +1247,19 @@ func (b *deltaMergeBuilder) deleteTargetSubtree(dirIno uint64) error {
 		}
 	}
 
-	b.putDelta(LayerInodeKey(0, dirIno), EncodeTombstone())
+	b.putDelta(dk.LayerInodeKey(0, dirIno), EncodeTombstone())
 	xattrs, err := b.tc.target.readAllXattrs(dirIno)
 	if err != nil {
 		return err
 	}
 	for k := range xattrs {
-		b.putDelta(LayerXattrKey(0, dirIno, []byte(k)), EncodeTombstone())
+		b.putDelta(dk.LayerXattrKey(0, dirIno, []byte(k)), EncodeTombstone())
 	}
 	return nil
 }
 
 func (b *deltaMergeBuilder) materializeDeltaKV() error {
+	dk := b.disk.keys
 	for ino, delta := range b.nlinkDelta {
 		if delta == 0 {
 			continue
@@ -1289,13 +1293,13 @@ func (b *deltaMergeBuilder) materializeDeltaKV() error {
 		if err != nil {
 			return err
 		}
-		b.putDelta(LayerInodeKey(0, ino), EncodeLiveEnvelope(raw))
+		b.putDelta(dk.LayerInodeKey(0, ino), EncodeLiveEnvelope(raw))
 		if tNode.Flags&InodeFlagEverLinked != 0 {
 			if tNode.ParentIno != 0 {
-				b.putDelta(LayerParentKey(0, ino, tNode.ParentIno), EncodeLiveEnvelope(nil))
+				b.putDelta(dk.LayerParentKey(0, ino, tNode.ParentIno), EncodeLiveEnvelope(nil))
 			}
 			for pDir := range b.entryParentDirs[ino] {
-				b.putDelta(LayerParentKey(0, ino, pDir), EncodeLiveEnvelope(nil))
+				b.putDelta(dk.LayerParentKey(0, ino, pDir), EncodeLiveEnvelope(nil))
 			}
 		}
 	}
@@ -1331,7 +1335,7 @@ func (b *deltaMergeBuilder) materializeDeltaKV() error {
 		if err != nil {
 			return err
 		}
-		b.putDelta(LayerInodeKey(0, dirIno), EncodeLiveEnvelope(raw))
+		b.putDelta(dk.LayerInodeKey(0, dirIno), EncodeLiveEnvelope(raw))
 	}
 
 	for srcIno, pSet := range b.tc.dirty.sourceDeltaParentKeys {
@@ -1355,7 +1359,7 @@ func (b *deltaMergeBuilder) materializeDeltaKV() error {
 			}
 		}
 		for pDir := range pSet {
-			b.putDelta(LayerParentKey(0, targetIno, pDir), EncodeLiveEnvelope(nil))
+			b.putDelta(dk.LayerParentKey(0, targetIno, pDir), EncodeLiveEnvelope(nil))
 		}
 	}
 
@@ -1367,20 +1371,21 @@ func (b *deltaMergeBuilder) tombstoneTargetNonDir(ino uint64) error {
 		return nil
 	}
 	b.tombstonedInos[ino] = true
-	b.putDelta(LayerInodeKey(0, ino), EncodeTombstone())
+	dk := b.disk.keys
+	b.putDelta(dk.LayerInodeKey(0, ino), EncodeTombstone())
 	xattrs, err := b.tc.target.readAllXattrs(ino)
 	if err != nil {
 		return err
 	}
 	for k := range xattrs {
-		b.putDelta(LayerXattrKey(0, ino, []byte(k)), EncodeTombstone())
+		b.putDelta(dk.LayerXattrKey(0, ino, []byte(k)), EncodeTombstone())
 	}
 	refs, err := b.tc.target.readAllDataRefs(ino)
 	if err != nil {
 		return err
 	}
 	for blkIdx, ref := range refs {
-		b.putDelta(LayerDataKey(0, ino, blkIdx), EncodeTombstone())
+		b.putDelta(dk.LayerDataKey(0, ino, blkIdx), EncodeTombstone())
 		b.logicalDelta -= int64(ref.Length)
 	}
 	return nil
@@ -1389,6 +1394,7 @@ func (b *deltaMergeBuilder) tombstoneTargetNonDir(ino uint64) error {
 func (b *deltaMergeBuilder) writePlannedInode(finalIno uint64, w *plannedInodeWrite) error {
 	inode := w.meta
 	inode.Ino = finalIno
+	dk := b.disk.keys
 
 	if w.isDir {
 		var baseNlink int64 = 2
@@ -1435,7 +1441,7 @@ func (b *deltaMergeBuilder) writePlannedInode(finalIno uint64, w *plannedInodeWr
 	if err != nil {
 		return err
 	}
-	b.putDelta(LayerInodeKey(0, finalIno), EncodeLiveEnvelope(raw))
+	b.putDelta(dk.LayerInodeKey(0, finalIno), EncodeLiveEnvelope(raw))
 
 	if xErr := b.writePlannedXattrs(finalIno, w); xErr != nil {
 		return xErr
@@ -1449,10 +1455,10 @@ func (b *deltaMergeBuilder) writePlannedInode(finalIno uint64, w *plannedInodeWr
 
 	if !w.isDir && (inode.Flags&InodeFlagEverLinked != 0 || inode.Nlink > 1) {
 		if inode.ParentIno != 0 {
-			b.putDelta(LayerParentKey(0, finalIno, inode.ParentIno), EncodeLiveEnvelope(nil))
+			b.putDelta(dk.LayerParentKey(0, finalIno, inode.ParentIno), EncodeLiveEnvelope(nil))
 		}
 		for pDir := range b.entryParentDirs[finalIno] {
-			b.putDelta(LayerParentKey(0, finalIno, pDir), EncodeLiveEnvelope(nil))
+			b.putDelta(dk.LayerParentKey(0, finalIno, pDir), EncodeLiveEnvelope(nil))
 		}
 		if w.srcIno != 0 {
 			srcParents, pErr := b.tc.source.scanParentDirs(w.srcIno)
@@ -1460,7 +1466,7 @@ func (b *deltaMergeBuilder) writePlannedInode(finalIno uint64, w *plannedInodeWr
 				return pErr
 			}
 			for _, pDir := range srcParents {
-				b.putDelta(LayerParentKey(0, finalIno, pDir), EncodeLiveEnvelope(nil))
+				b.putDelta(dk.LayerParentKey(0, finalIno, pDir), EncodeLiveEnvelope(nil))
 			}
 		}
 	}
@@ -1472,6 +1478,7 @@ func (b *deltaMergeBuilder) writePlannedXattrs(finalIno uint64, w *plannedInodeW
 	if w.xattrMode == xattrDeltaKeepTarget {
 		return nil
 	}
+	dk := b.disk.keys
 	var desired map[string][]byte
 	var err error
 	switch w.xattrMode {
@@ -1499,12 +1506,12 @@ func (b *deltaMergeBuilder) writePlannedXattrs(finalIno uint64, w *plannedInodeW
 
 	for k, v := range desired {
 		if ev, ok := existing[k]; !ok || !bytes.Equal(ev, v) {
-			b.putDelta(LayerXattrKey(0, finalIno, []byte(k)), EncodeLiveEnvelope(v))
+			b.putDelta(dk.LayerXattrKey(0, finalIno, []byte(k)), EncodeLiveEnvelope(v))
 		}
 	}
 	for k := range existing {
 		if _, ok := desired[k]; !ok {
-			b.putDelta(LayerXattrKey(0, finalIno, []byte(k)), EncodeTombstone())
+			b.putDelta(dk.LayerXattrKey(0, finalIno, []byte(k)), EncodeTombstone())
 		}
 	}
 	return nil
@@ -1514,6 +1521,7 @@ func (b *deltaMergeBuilder) writePlannedDataRefs(finalIno uint64, w *plannedInod
 	if !w.writeDataFromSource && !w.writeDataFromTarget {
 		return nil
 	}
+	dk := b.disk.keys
 	var desired map[uint64]BlobRef
 	var err error
 	if w.writeDataFromSource {
@@ -1538,7 +1546,7 @@ func (b *deltaMergeBuilder) writePlannedDataRefs(finalIno uint64, w *plannedInod
 
 	for blkIdx, ref := range desired {
 		if eRef, ok := existing[blkIdx]; !ok || eRef != ref {
-			b.putDelta(LayerDataKey(0, finalIno, blkIdx), EncodeLiveEnvelope(EncodeBlobRef(ref)))
+			b.putDelta(dk.LayerDataKey(0, finalIno, blkIdx), EncodeLiveEnvelope(EncodeBlobRef(ref)))
 			var oldLen uint64
 			if ok {
 				oldLen = uint64(eRef.Length)
@@ -1548,7 +1556,7 @@ func (b *deltaMergeBuilder) writePlannedDataRefs(finalIno uint64, w *plannedInod
 	}
 	for blkIdx, eRef := range existing {
 		if _, ok := desired[blkIdx]; !ok {
-			b.putDelta(LayerDataKey(0, finalIno, blkIdx), EncodeTombstone())
+			b.putDelta(dk.LayerDataKey(0, finalIno, blkIdx), EncodeTombstone())
 			b.logicalDelta -= int64(eRef.Length)
 		}
 	}

@@ -26,13 +26,11 @@ import (
 	"github.com/starsrc/pkg/observability"
 	"github.com/starsrc/pkg/observability/slogx"
 	"github.com/starsrc/pkg/observability/telemetry"
-	"github.com/starsrc/pkg/tx"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 type syncLogBuffer struct {
@@ -177,15 +175,12 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 	})
 	telemetry.RegisterGlobalTracer(tp)
 
-	mem := projection.NewMemStore()
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
-		StorageRoot:             t.TempDir(),
-		Store:                   mem,
-		DisableStartupReconcile: true,
+	node, err := engine.OpenNode(engine.NodeOptions{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, mgr.Close(context.Background()))
+		require.NoError(t, node.Close(context.Background()))
 	})
 
 	srvCfg := config.ServerConfig{
@@ -201,7 +196,7 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 	}
 
 	httpMetrics := NewHTTPMetrics()
-	storageCollector := projection.NewStorageMetricsCollector(mgr)
+	storageCollector := NewStorageMetricsCollector(node)
 	obsRT, err := observability.Setup(
 		ctx,
 		config.NewObservabilityConfig(&fullCfg.EnvConfig),
@@ -223,7 +218,7 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 	srv, err := New(Params{
 		Config:        fullCfg.ServerConfig,
 		MetaVal:       fullCfg.Meta,
-		Manager:       mgr,
+		Node:          node,
 		Observability: fullCfg,
 		Telemetry:     &fullCfg.TelemetryConfig,
 		AdminCfg:      fullCfg,
@@ -329,22 +324,28 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 		"bowl_storage_logical_bytes",
 		"bowl_storage_pack_physical_bytes",
 		"bowl_storage_inodes",
-		"bowl_storage_projection_dirty_disks",
-		"bowl_storage_projection_dirty_catalog_disks",
-		"bowl_storage_projection_sync_writes_total",
-		"bowl_storage_projection_sync_write_errors_total",
-		"bowl_storage_projection_sync_write_skips_total",
-		"bowl_storage_projection_read_fallbacks_total",
-		"bowl_storage_projection_reconcile_disks_total",
-		"bowl_storage_projection_reconcile_errors_total",
-		"bowl_storage_projection_batch_flush_errors_total",
-		"bowl_storage_projection_idle_evictions_total",
-		"bowl_storage_projection_disk_opens_total",
+		"bowl_storage_branch_actors_loaded",
+		"bowl_storage_pebble_wal_bytes_in_total",
+		"bowl_storage_pebble_wal_bytes_written_total",
+		"bowl_storage_pebble_l0_sublevels",
+		"bowl_storage_pebble_l0_tables",
+		"bowl_storage_pebble_read_amp",
+		"bowl_storage_pebble_compaction_debt_bytes",
+		"bowl_storage_pebble_compactions_in_progress",
+		"bowl_storage_pebble_flushes_in_progress",
+		"bowl_storage_pebble_filter_hits_total",
+		"bowl_storage_pebble_filter_misses_total",
+		"bowl_storage_pebble_open_table_iters",
+		"bowl_storage_pebble_block_cache_bytes",
+		"bowl_storage_pebble_block_cache_count",
+		"bowl_storage_pebble_block_cache_hits_total",
+		"bowl_storage_pebble_block_cache_misses_total",
 		"bowl_storage_http_request_duration_seconds_bucket",
 		"rpc_server_call_duration_seconds_bucket",
 	} {
 		require.Contains(t, metricsText, want)
 	}
+	require.NotContains(t, metricsText, "bowl_storage_projection_")
 	require.NotContains(t, metricsText, diskID)
 	require.NotContains(t, metricsText, "disk_id=")
 	require.NotContains(t, metricsText, "bowl_disk_id=")
@@ -371,28 +372,15 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 	require.True(t, sawReqID)
 }
 
-func TestObservability_Step27ReadyzChecksPostgresPool(t *testing.T) {
+func TestObservability_ReadyzChecksNodeStore(t *testing.T) {
 	ctx := context.Background()
-	mem := projection.NewMemStore()
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
-		StorageRoot:             t.TempDir(),
-		Store:                   mem,
-		DisableStartupReconcile: true,
+	node, err := engine.OpenNode(engine.NodeOptions{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, mgr.Close(context.Background()))
+		require.NoError(t, node.Close(context.Background()))
 	})
-
-	pool, err := tx.OpenPool(config.DBPoolConfig{
-		DSN:             "postgres://postgres:postgres@127.0.0.1:1/bowl?sslmode=disable&connect_timeout=1",
-		MaxConns:        2,
-		MinConns:        0,
-		MaxConnLifetime: time.Minute,
-		MaxConnIdleTime: time.Minute,
-	})
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
 
 	srv, err := New(Params{
 		Config: config.ServerConfig{
@@ -401,8 +389,7 @@ func TestObservability_Step27ReadyzChecksPostgresPool(t *testing.T) {
 			InternalServerHost: "127.0.0.1",
 			InternalServerPort: 19091,
 		},
-		Manager: mgr,
-		Pool:    pool,
+		Node: node,
 	})
 	require.NoError(t, err)
 
@@ -411,10 +398,21 @@ func TestObservability_Step27ReadyzChecksPostgresPool(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody).WithContext(reqCtx)
 	rec := httptest.NewRecorder()
 	srv.AdminHandler().ServeHTTP(rec, req)
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
 	body, err := io.ReadAll(rec.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(body), "postgres")
+	require.Contains(t, string(body), `"storage":"ok"`)
+	require.NotContains(t, string(body), "postgres")
+
+	require.NoError(t, node.Close(ctx))
+
+	closedReq := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody).WithContext(reqCtx)
+	closedRec := httptest.NewRecorder()
+	srv.AdminHandler().ServeHTTP(closedRec, closedReq)
+	require.Equal(t, http.StatusServiceUnavailable, closedRec.Code)
+	closedBody, err := io.ReadAll(closedRec.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(closedBody), "storage")
 }
 
 func TestObservability_SlowRPCWarningThresholds(t *testing.T) {

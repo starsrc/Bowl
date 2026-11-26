@@ -16,11 +16,11 @@ type pebbleReader interface {
 	NewIter(opts *pebble.IterOptions) (*pebble.Iterator, error)
 }
 
-func readBranchMeta(r pebbleReader, branchName string) (BranchMeta, error) {
+func readBranchMeta(r pebbleReader, dk diskKeys, branchName string) (BranchMeta, error) {
 	if branchName == "" {
 		return BranchMeta{}, ErrInvalid
 	}
-	val, closer, err := r.Get(MetaBranchKey(branchName))
+	val, closer, err := r.Get(dk.MetaBranchKey(branchName))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return BranchMeta{}, ErrNotFound
 	}
@@ -35,11 +35,11 @@ func readBranchMeta(r pebbleReader, branchName string) (BranchMeta, error) {
 	return meta, nil
 }
 
-func readCommitMeta(r pebbleReader, commitID uint64) (CommitMeta, error) {
+func readCommitMeta(r pebbleReader, dk diskKeys, commitID uint64) (CommitMeta, error) {
 	if commitID == 0 {
 		return CommitMeta{}, ErrInvalid
 	}
-	val, closer, err := r.Get(MetaCommitKey(commitID))
+	val, closer, err := r.Get(dk.MetaCommitKey(commitID))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return CommitMeta{}, ErrNotFound
 	}
@@ -54,8 +54,8 @@ func readCommitMeta(r pebbleReader, commitID uint64) (CommitMeta, error) {
 	return meta, nil
 }
 
-func resolveBranchLayers(r pebbleReader, branchName string) (BranchMeta, []uint64, error) {
-	branch, err := readBranchMeta(r, branchName)
+func resolveBranchLayers(r pebbleReader, dk diskKeys, branchName string) (BranchMeta, []uint64, error) {
+	branch, err := readBranchMeta(r, dk, branchName)
 	if err != nil {
 		return BranchMeta{}, nil, err
 	}
@@ -65,7 +65,7 @@ func resolveBranchLayers(r pebbleReader, branchName string) (BranchMeta, []uint6
 	}
 	commitID := branch.HeadCommitID
 	for commitID != 0 {
-		cmt, cmtErr := readCommitMeta(r, commitID)
+		cmt, cmtErr := readCommitMeta(r, dk, commitID)
 		if cmtErr != nil {
 			return BranchMeta{}, nil, cmtErr
 		}
@@ -77,8 +77,8 @@ func resolveBranchLayers(r pebbleReader, branchName string) (BranchMeta, []uint6
 	return branch, layers, nil
 }
 
-func resolveCommitLayers(r pebbleReader, commitID uint64) (CommitMeta, []uint64, error) {
-	head, err := readCommitMeta(r, commitID)
+func resolveCommitLayers(r pebbleReader, dk diskKeys, commitID uint64) (CommitMeta, []uint64, error) {
+	head, err := readCommitMeta(r, dk, commitID)
 	if err != nil {
 		return CommitMeta{}, nil, err
 	}
@@ -91,7 +91,7 @@ func resolveCommitLayers(r pebbleReader, commitID uint64) (CommitMeta, []uint64,
 		if cur.ParentID == 0 {
 			break
 		}
-		next, nextErr := readCommitMeta(r, cur.ParentID)
+		next, nextErr := readCommitMeta(r, dk, cur.ParentID)
 		if nextErr != nil {
 			return CommitMeta{}, nil, nextErr
 		}
@@ -123,12 +123,12 @@ func overlayGetEnvelope(r pebbleReader, layers []uint64, keyFn func(layerID uint
 	return 0, nil, false, nil
 }
 
-func overlayGetInode(r pebbleReader, layers []uint64, ino uint64) (Inode, error) {
+func overlayGetInode(r pebbleReader, dk diskKeys, layers []uint64, ino uint64) (Inode, error) {
 	if ino == 0 {
 		return Inode{}, ErrInvalid
 	}
 	tag, payload, found, err := overlayGetEnvelope(r, layers, func(layerID uint64) []byte {
-		return LayerInodeKey(layerID, ino)
+		return dk.LayerInodeKey(layerID, ino)
 	})
 	if err != nil {
 		return Inode{}, err
@@ -139,9 +139,9 @@ func overlayGetInode(r pebbleReader, layers []uint64, ino uint64) (Inode, error)
 	return DecodeInode(payload)
 }
 
-func overlayGetEntry(r pebbleReader, layers []uint64, parent uint64, name []byte) (Entry, error) {
+func overlayGetEntry(r pebbleReader, dk diskKeys, layers []uint64, parent uint64, name []byte) (Entry, error) {
 	tag, payload, found, err := overlayGetEnvelope(r, layers, func(layerID uint64) []byte {
-		return LayerEntryKey(layerID, parent, name)
+		return dk.LayerEntryKey(layerID, parent, name)
 	})
 	if err != nil {
 		return Entry{}, err
@@ -152,9 +152,9 @@ func overlayGetEntry(r pebbleReader, layers []uint64, parent uint64, name []byte
 	return DecodeEntry(payload)
 }
 
-func overlayGetXattr(r pebbleReader, layers []uint64, ino uint64, name []byte) ([]byte, error) {
+func overlayGetXattr(r pebbleReader, dk diskKeys, layers []uint64, ino uint64, name []byte) ([]byte, error) {
 	tag, payload, found, err := overlayGetEnvelope(r, layers, func(layerID uint64) []byte {
-		return LayerXattrKey(layerID, ino, name)
+		return dk.LayerXattrKey(layerID, ino, name)
 	})
 	if err != nil {
 		return nil, err
@@ -168,9 +168,9 @@ func overlayGetXattr(r pebbleReader, layers []uint64, ino uint64, name []byte) (
 	return payload, nil
 }
 
-func overlayGetDataRef(r pebbleReader, layers []uint64, ino, blockIdx uint64) (BlobRef, bool, error) {
+func overlayGetDataRef(r pebbleReader, dk diskKeys, layers []uint64, ino, blockIdx uint64) (BlobRef, bool, error) {
 	tag, payload, found, err := overlayGetEnvelope(r, layers, func(layerID uint64) []byte {
-		return LayerDataKey(layerID, ino, blockIdx)
+		return dk.LayerDataKey(layerID, ino, blockIdx)
 	})
 	if err != nil {
 		return BlobRef{}, false, err
@@ -185,11 +185,11 @@ func overlayGetDataRef(r pebbleReader, layers []uint64, ino, blockIdx uint64) (B
 	return ref, true, nil
 }
 
-func overlayReadDir(r pebbleReader, layers []uint64, parent uint64) ([]DirEntry, error) {
+func overlayReadDir(r pebbleReader, dk diskKeys, layers []uint64, parent uint64) ([]DirEntry, error) {
 	seen := make(map[string]struct{})
 	var entries []DirEntry
 	for _, layerID := range layers {
-		prefix := LayerEntryPrefix(layerID, parent)
+		prefix := dk.LayerEntryPrefix(layerID, parent)
 		iter, err := r.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
@@ -198,7 +198,7 @@ func overlayReadDir(r pebbleReader, layers []uint64, parent uint64) ([]DirEntry,
 			return nil, err
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, nameBytes, decKeyErr := DecodeLayerEntryKey(iter.Key())
+			_, _, nameBytes, decKeyErr := dk.DecodeLayerEntryKey(iter.Key())
 			if decKeyErr != nil {
 				_ = iter.Close()
 				return nil, decKeyErr
@@ -237,11 +237,11 @@ func overlayReadDir(r pebbleReader, layers []uint64, parent uint64) ([]DirEntry,
 	return entries, nil
 }
 
-func overlayListXattr(r pebbleReader, layers []uint64, ino uint64) ([]string, error) {
+func overlayListXattr(r pebbleReader, dk diskKeys, layers []uint64, ino uint64) ([]string, error) {
 	seen := make(map[string]struct{})
 	var names []string
 	for _, layerID := range layers {
-		prefix := LayerXattrPrefix(layerID, ino)
+		prefix := dk.LayerXattrPrefix(layerID, ino)
 		iter, err := r.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
@@ -250,7 +250,7 @@ func overlayListXattr(r pebbleReader, layers []uint64, ino uint64) ([]string, er
 			return nil, err
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, nameBytes, decKeyErr := DecodeLayerXattrKey(iter.Key())
+			_, _, nameBytes, decKeyErr := dk.DecodeLayerXattrKey(iter.Key())
 			if decKeyErr != nil {
 				_ = iter.Close()
 				return nil, decKeyErr
@@ -278,8 +278,8 @@ func overlayListXattr(r pebbleReader, layers []uint64, ino uint64) ([]string, er
 	return names, nil
 }
 
-func readLayerDataRefLen(r pebbleReader, layerID, ino, blockIdx uint64) (uint64, error) {
-	val, closer, err := r.Get(LayerDataKey(layerID, ino, blockIdx))
+func readLayerDataRefLen(r pebbleReader, dk diskKeys, layerID, ino, blockIdx uint64) (uint64, error) {
+	val, closer, err := r.Get(dk.LayerDataKey(layerID, ino, blockIdx))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return 0, nil
 	}
@@ -301,8 +301,8 @@ func readLayerDataRefLen(r pebbleReader, layerID, ino, blockIdx uint64) (uint64,
 	return uint64(ref.Length), nil
 }
 
-func overlayGetDataRefLen(r pebbleReader, layers []uint64, ino, blockIdx uint64) (uint64, error) {
-	ref, exists, err := overlayGetDataRef(r, layers, ino, blockIdx)
+func overlayGetDataRefLen(r pebbleReader, dk diskKeys, layers []uint64, ino, blockIdx uint64) (uint64, error) {
+	ref, exists, err := overlayGetDataRef(r, dk, layers, ino, blockIdx)
 	if err != nil || !exists {
 		return 0, err
 	}
@@ -328,10 +328,10 @@ func applyBranchByteDeltas(branch *BranchMeta, workOwnedDelta, logicalDelta int6
 	branch.LogicalBytes = applySignedDelta(branch.LogicalBytes, logicalDelta)
 }
 
-func overlayCollectLiveBlocksRange(r pebbleReader, layers []uint64, ino, minBlockIdx, maxBlockIdx uint64) (live []uint64, workBytes, effBytes uint64, err error) {
+func overlayCollectLiveBlocksRange(r pebbleReader, dk diskKeys, layers []uint64, ino, minBlockIdx, maxBlockIdx uint64) (live []uint64, workBytes, effBytes uint64, err error) {
 	seen := make(map[uint64]struct{})
 	for i, layerID := range layers {
-		prefix := LayerDataPrefix(layerID, ino)
+		prefix := dk.LayerDataPrefix(layerID, ino)
 		iter, iterErr := r.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
@@ -340,7 +340,7 @@ func overlayCollectLiveBlocksRange(r pebbleReader, layers []uint64, ino, minBloc
 			return nil, 0, 0, iterErr
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, blkIdx, decKeyErr := DecodeLayerDataKey(iter.Key())
+			_, _, blkIdx, decKeyErr := dk.DecodeLayerDataKey(iter.Key())
 			if decKeyErr != nil {
 				_ = iter.Close()
 				return nil, 0, 0, decKeyErr
@@ -378,8 +378,8 @@ func overlayCollectLiveBlocksRange(r pebbleReader, layers []uint64, ino, minBloc
 	return live, workBytes, effBytes, nil
 }
 
-func layerHasAnyKey(r pebbleReader, layerID uint64) (bool, error) {
-	start, end := LayerRangeBounds(layerID)
+func layerHasAnyKey(r pebbleReader, dk diskKeys, layerID uint64) (bool, error) {
+	start, end := dk.LayerRangeBounds(layerID)
 	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: start,
 		UpperBound: end,
@@ -395,7 +395,7 @@ func layerHasAnyKey(r pebbleReader, layerID uint64) (bool, error) {
 }
 
 func (d *DiskStore) readInodeFromLayers(r pebbleReader, layers []uint64, ino uint64) (Inode, error) {
-	return overlayGetInode(r, layers, ino)
+	return overlayGetInode(r, d.keys, layers, ino)
 }
 
 func (d *DiskStore) readDataFromLayers(r pebbleReader, layers []uint64, ino uint64, offset int64, size int) ([]byte, error) {
@@ -406,7 +406,7 @@ func (d *DiskStore) readDataFromLayersInto(r pebbleReader, layers []uint64, ino 
 	if offset < 0 || size < 0 {
 		return nil, ErrInvalid
 	}
-	inode, err := overlayGetInode(r, layers, ino)
+	inode, err := overlayGetInode(r, d.keys, layers, ino)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +439,7 @@ func (d *DiskStore) readRegularDataInto(r pebbleReader, layers []uint64, inode I
 	endBlk := (end - 1) / blkSize
 
 	for blkIdx := startBlk; blkIdx <= endBlk; blkIdx++ {
-		ref, ok, refErr := overlayGetDataRef(r, layers, inode.Ino, blkIdx)
+		ref, ok, refErr := overlayGetDataRef(r, d.keys, layers, inode.Ino, blkIdx)
 		if refErr != nil {
 			return nil, refErr
 		}
@@ -470,7 +470,7 @@ func (d *DiskStore) GetAttr(_ context.Context, branch string, ino uint64) (Inode
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	_, layers, err := resolveBranchLayers(snap, d.keys, branch)
 	if err != nil {
 		return Inode{}, err
 	}
@@ -493,11 +493,12 @@ func (d *DiskStore) Lookup(_ context.Context, branch string, parentIno uint64, n
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	dk := d.keys
+	_, layers, err := resolveBranchLayers(snap, dk, branch)
 	if err != nil {
 		return Entry{}, Inode{}, err
 	}
-	parent, err := overlayGetInode(snap, layers, parentIno)
+	parent, err := overlayGetInode(snap, dk, layers, parentIno)
 	if err != nil {
 		return Entry{}, Inode{}, err
 	}
@@ -520,7 +521,7 @@ func (d *DiskStore) Lookup(_ context.Context, branch string, parentIno uint64, n
 		if parent.ParentIno == 0 || parent.ParentIno == parentIno {
 			return Entry{}, Inode{}, ErrNotFound
 		}
-		grandparent, gpErr := overlayGetInode(snap, layers, parent.ParentIno)
+		grandparent, gpErr := overlayGetInode(snap, dk, layers, parent.ParentIno)
 		if gpErr != nil {
 			return Entry{}, Inode{}, gpErr
 		}
@@ -529,11 +530,11 @@ func (d *DiskStore) Lookup(_ context.Context, branch string, parentIno uint64, n
 		}
 		return Entry{Ino: grandparent.Ino, Mode: grandparent.Mode}, grandparent, nil
 	}
-	ent, err := overlayGetEntry(snap, layers, parentIno, []byte(name))
+	ent, err := overlayGetEntry(snap, dk, layers, parentIno, []byte(name))
 	if err != nil {
 		return Entry{}, Inode{}, err
 	}
-	inode, err := overlayGetInode(snap, layers, ent.Ino)
+	inode, err := overlayGetInode(snap, dk, layers, ent.Ino)
 	if err != nil {
 		return Entry{}, Inode{}, err
 	}
@@ -550,18 +551,19 @@ func (d *DiskStore) ReadDir(_ context.Context, branch string, parentIno uint64) 
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	dk := d.keys
+	_, layers, err := resolveBranchLayers(snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	parent, err := overlayGetInode(snap, layers, parentIno)
+	parent, err := overlayGetInode(snap, dk, layers, parentIno)
 	if err != nil {
 		return nil, err
 	}
 	if parent.Mode&ModeTypeMask != ModeDir {
 		return nil, ErrNotDir
 	}
-	return overlayReadDir(snap, layers, parentIno)
+	return overlayReadDir(snap, dk, layers, parentIno)
 }
 
 func (d *DiskStore) Readlink(_ context.Context, branch string, ino uint64) ([]byte, error) {
@@ -574,11 +576,12 @@ func (d *DiskStore) Readlink(_ context.Context, branch string, ino uint64) ([]by
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	dk := d.keys
+	_, layers, err := resolveBranchLayers(snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	inode, err := overlayGetInode(snap, layers, ino)
+	inode, err := overlayGetInode(snap, dk, layers, ino)
 	if err != nil {
 		return nil, err
 	}
@@ -598,11 +601,12 @@ func (d *DiskStore) ReadDirPage(_ context.Context, branch string, parentIno, off
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	dk := d.keys
+	_, layers, err := resolveBranchLayers(snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	dir, err := overlayGetInode(snap, layers, parentIno)
+	dir, err := overlayGetInode(snap, dk, layers, parentIno)
 	if err != nil {
 		return nil, err
 	}
@@ -627,7 +631,7 @@ func (d *DiskStore) ReadDirPage(_ context.Context, branch string, parentIno, off
 		dotDotIno := dir.Ino
 		dotDotMode := dir.Mode
 		if parentIno != RootIno && dir.ParentIno > 0 {
-			parent, readErr := overlayGetInode(snap, layers, dir.ParentIno)
+			parent, readErr := overlayGetInode(snap, dk, layers, dir.ParentIno)
 			if readErr == nil {
 				dotDotIno = parent.Ino
 				dotDotMode = parent.Mode
@@ -646,7 +650,7 @@ func (d *DiskStore) ReadDirPage(_ context.Context, branch string, parentIno, off
 		return entries, nil
 	}
 
-	children, err := overlayReadDir(snap, layers, parentIno)
+	children, err := overlayReadDir(snap, dk, layers, parentIno)
 	if err != nil {
 		return nil, err
 	}
@@ -683,11 +687,12 @@ func (d *DiskStore) ReadDirPlus(_ context.Context, branch string, parentIno, off
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	dk := d.keys
+	_, layers, err := resolveBranchLayers(snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	dir, err := overlayGetInode(snap, layers, parentIno)
+	dir, err := overlayGetInode(snap, dk, layers, parentIno)
 	if err != nil {
 		return nil, err
 	}
@@ -712,7 +717,7 @@ func (d *DiskStore) ReadDirPlus(_ context.Context, branch string, parentIno, off
 	if offset < 2 && len(entries) < maxCount {
 		dotDot := dir
 		if parentIno != RootIno && dir.ParentIno > 0 {
-			parent, readErr := overlayGetInode(snap, layers, dir.ParentIno)
+			parent, readErr := overlayGetInode(snap, dk, layers, dir.ParentIno)
 			if readErr == nil {
 				dotDot = parent
 			} else if !errors.Is(readErr, ErrNotFound) {
@@ -731,7 +736,7 @@ func (d *DiskStore) ReadDirPlus(_ context.Context, branch string, parentIno, off
 		return entries, nil
 	}
 
-	children, err := overlayReadDir(snap, layers, parentIno)
+	children, err := overlayReadDir(snap, dk, layers, parentIno)
 	if err != nil {
 		return nil, err
 	}
@@ -748,7 +753,7 @@ func (d *DiskStore) ReadDirPlus(_ context.Context, branch string, parentIno, off
 			break
 		}
 		next++
-		childInode, getErr := overlayGetInode(snap, layers, ch.Ino)
+		childInode, getErr := overlayGetInode(snap, dk, layers, ch.Ino)
 		if errors.Is(getErr, ErrNotFound) {
 			continue
 		}
@@ -779,18 +784,19 @@ func (d *DiskStore) GetXattr(_ context.Context, branch string, ino uint64, name 
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	dk := d.keys
+	_, layers, err := resolveBranchLayers(snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	inode, err := overlayGetInode(snap, layers, ino)
+	inode, err := overlayGetInode(snap, dk, layers, ino)
 	if err != nil {
 		return nil, err
 	}
 	if strings.HasPrefix(name, "user.") && !isAllowedUserXattrFileType(inode.Mode) {
 		return nil, ErrNoData
 	}
-	return overlayGetXattr(snap, layers, ino, []byte(name))
+	return overlayGetXattr(snap, dk, layers, ino, []byte(name))
 }
 
 func (d *DiskStore) ListXattr(_ context.Context, branch string, ino uint64) ([]string, error) {
@@ -800,14 +806,15 @@ func (d *DiskStore) ListXattr(_ context.Context, branch string, ino uint64) ([]s
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	dk := d.keys
+	_, layers, err := resolveBranchLayers(snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = overlayGetInode(snap, layers, ino); err != nil {
+	if _, err = overlayGetInode(snap, dk, layers, ino); err != nil {
 		return nil, err
 	}
-	return overlayListXattr(snap, layers, ino)
+	return overlayListXattr(snap, dk, layers, ino)
 }
 
 func (d *DiskStore) Read(ctx context.Context, branch string, ino uint64, offset int64, size int) ([]byte, error) {
@@ -821,7 +828,7 @@ func (d *DiskStore) ReadInto(_ context.Context, branch string, ino uint64, offse
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	_, layers, err := resolveBranchLayers(snap, d.keys, branch)
 	if err != nil {
 		return nil, err
 	}
@@ -835,11 +842,12 @@ func (d *DiskStore) GetAttrAtCommit(_ context.Context, commitID, ino uint64) (In
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveCommitLayers(snap, commitID)
+	dk := d.keys
+	_, layers, err := resolveCommitLayers(snap, dk, commitID)
 	if err != nil {
 		return Inode{}, err
 	}
-	return overlayGetInode(snap, layers, ino)
+	return overlayGetInode(snap, dk, layers, ino)
 }
 
 func (d *DiskStore) LookupAtCommit(_ context.Context, commitID, parentIno uint64, name string) (Entry, Inode, error) {
@@ -852,15 +860,16 @@ func (d *DiskStore) LookupAtCommit(_ context.Context, commitID, parentIno uint64
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveCommitLayers(snap, commitID)
+	dk := d.keys
+	_, layers, err := resolveCommitLayers(snap, dk, commitID)
 	if err != nil {
 		return Entry{}, Inode{}, err
 	}
-	ent, err := overlayGetEntry(snap, layers, parentIno, []byte(name))
+	ent, err := overlayGetEntry(snap, dk, layers, parentIno, []byte(name))
 	if err != nil {
 		return Entry{}, Inode{}, err
 	}
-	inode, err := overlayGetInode(snap, layers, ent.Ino)
+	inode, err := overlayGetInode(snap, dk, layers, ent.Ino)
 	if err != nil {
 		return Entry{}, Inode{}, err
 	}
@@ -874,11 +883,12 @@ func (d *DiskStore) ReadDirAtCommit(_ context.Context, commitID, parentIno uint6
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveCommitLayers(snap, commitID)
+	dk := d.keys
+	_, layers, err := resolveCommitLayers(snap, dk, commitID)
 	if err != nil {
 		return nil, err
 	}
-	return overlayReadDir(snap, layers, parentIno)
+	return overlayReadDir(snap, dk, layers, parentIno)
 }
 
 func (d *DiskStore) ReadAtCommit(_ context.Context, commitID, ino uint64, offset int64, size int) ([]byte, error) {
@@ -888,7 +898,7 @@ func (d *DiskStore) ReadAtCommit(_ context.Context, commitID, ino uint64, offset
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveCommitLayers(snap, commitID)
+	_, layers, err := resolveCommitLayers(snap, d.keys, commitID)
 	if err != nil {
 		return nil, err
 	}
@@ -905,11 +915,12 @@ func (d *DiskStore) ReadCommitNode(_ context.Context, commitID, ino uint64, offs
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveCommitLayers(snap, commitID)
+	dk := d.keys
+	_, layers, err := resolveCommitLayers(snap, dk, commitID)
 	if err != nil {
 		return CommitNodeResult{}, err
 	}
-	inode, err := overlayGetInode(snap, layers, ino)
+	inode, err := overlayGetInode(snap, dk, layers, ino)
 	if err != nil {
 		return CommitNodeResult{}, err
 	}

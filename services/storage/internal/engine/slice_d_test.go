@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,7 +16,7 @@ func TestStep6_GC_SealedWatermarkProtectsActiveAndInFlightPacks(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-gc-wm",
 		BlockSize:   4096,
@@ -46,7 +45,7 @@ func TestStep6_GC_SealedWatermarkProtectsActiveAndInFlightPacks(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, stats.PacksDeleted)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.NoError(t, statErr)
 
 	disk.packs.ReleaseInFlight(inFlightRefs)
@@ -61,7 +60,7 @@ func TestStep6_GC_ReapsDeadPacksAfterResetAndPruneCommits(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-gc-dead",
 		MaxBytes:    64 << 10,
@@ -101,9 +100,9 @@ func TestStep6_GC_ReapsDeadPacksAfterResetAndPruneCommits(t *testing.T) {
 	require.Equal(t, 2, stats.PacksDeleted)
 	require.Equal(t, uint64(12288), stats.BytesReclaimed)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
-	_, statErr = os.Stat(packFilePath(filepath.Join(dir, "packs"), 2))
+	_, statErr = os.Stat(packFilePath(disk.packs.dir, 2))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
@@ -112,7 +111,7 @@ func TestStep6_GC_RelocatesLowWatermarkPackAcrossWorkingAndImmutableCommitLayers
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-gc-relocate",
 		MaxBytes:    1 << 20,
@@ -157,7 +156,7 @@ func TestStep6_GC_RelocatesLowWatermarkPackAcrossWorkingAndImmutableCommitLayers
 	require.Equal(t, 2, stats.BlocksRelocated)
 	require.Equal(t, uint64(16384), stats.BytesReclaimed)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	gotCommit, err := disk.ReadAtCommit(ctx, c1.ID, fCommit.Ino, 0, 4096)
@@ -174,7 +173,7 @@ func TestStep6_GC_RelocatesLowWatermarkPackAcrossWorkingAndImmutableCommitLayers
 
 	require.NoError(t, disk.Close())
 
-	reopened, err := OpenDisk(DiskOptions{
+	reopened, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		MaxPackSize: 16384,
 	})
@@ -197,7 +196,7 @@ func TestStep6_GC_CASSkipsConcurrentlyOverwrittenWorkingBlockWithoutClobbering(t
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-gc-cas",
 		MaxBytes:    1 << 20,
@@ -252,7 +251,7 @@ func TestStep6_GC_AbortsPackDeleteWhenAnyRelocationFailsAndRetriesCleanly(t *tes
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-gc-abort",
 		MaxBytes:    1 << 20,
@@ -293,7 +292,7 @@ func TestStep6_GC_AbortsPackDeleteWhenAnyRelocationFailsAndRetriesCleanly(t *tes
 	require.ErrorIs(t, err, injectedErr)
 	require.Zero(t, statsFail.PacksDeleted)
 
-	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr := os.Stat(packFilePath(disk.packs.dir, 1))
 	require.NoError(t, statErr)
 
 	gotStillIntact, err := disk.Read(ctx, DefaultBranchName, fKeep.Ino, 0, 4096)
@@ -306,9 +305,9 @@ func TestStep6_GC_AbortsPackDeleteWhenAnyRelocationFailsAndRetriesCleanly(t *tes
 	require.Equal(t, 2, statsRetry.PacksDeleted)
 	require.Equal(t, 2, statsRetry.BlocksRelocated)
 
-	_, statErr = os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	_, statErr = os.Stat(packFilePath(disk.packs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
-	_, statErr = os.Stat(packFilePath(filepath.Join(dir, "packs"), 2))
+	_, statErr = os.Stat(packFilePath(disk.packs.dir, 2))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	gotAfterRetry, err := disk.Read(ctx, DefaultBranchName, fKeep.Ino, 0, 4096)
@@ -325,7 +324,7 @@ func TestStep7_GC_QuotaExemptRelocationReclaimsSpaceOnFullDisk(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	disk, err := OpenDisk(DiskOptions{
+	disk, err := openTestDisk(testDiskOptions{
 		Dir:         dir,
 		DiskID:      "disk-gc-full",
 		MaxBytes:    16384,

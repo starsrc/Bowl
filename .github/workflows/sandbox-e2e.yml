@@ -1,0 +1,38 @@
+# 在 GitHub 的 Linux runner 上真的起 MicroVM,把 bowl-sandbox 从头到尾跑一遍。
+# runner 自带 /dev/kvm(嵌套虚拟化),不需要另外准备机器。
+name: sandbox-e2e
+
+on:
+  pull_request:
+    paths:
+      - client/internal/sandbox/**
+      - client/internal/sandboxcli/**
+      - client/cmd/bowl-sandbox/**
+      - client/cmd/bowl-sandbox-guest/**
+      - client/go.mod
+      - sdk/python/**
+      - scripts/sandbox-e2e.sh
+      - .github/workflows/sandbox-e2e.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: MicroVM 端到端
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: client/go.sum
+      - name: 确认 runner 有 KVM
+        run: ls -l /dev/kvm
+      - run: scripts/sandbox-e2e.sh

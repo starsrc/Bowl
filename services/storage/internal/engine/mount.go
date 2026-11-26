@@ -133,18 +133,18 @@ func hasActiveMountOnReader(r pebbleReader, branch string, nowNano int64, rwOnly
 	return found, nil
 }
 
-func (d *DiskStore) MountBranch(ctx context.Context, branch string, readOnly, force bool, ttl time.Duration) (MountMeta, error) {
+func (d *DiskStore) MountBranch(ctx context.Context, branch string, readOnly, force bool, ttl time.Duration) (MountBranchResult, error) {
 	if d.closing.Load() {
-		return MountMeta{}, ErrClosed
+		return MountBranchResult{}, ErrClosed
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := validateBranchName(branch); err != nil {
-		return MountMeta{}, err
+		return MountBranchResult{}, err
 	}
 	if ttl <= 0 {
-		return MountMeta{}, ErrInvalid
+		return MountBranchResult{}, ErrInvalid
 	}
 
 	d.branchRegMu.RLock()
@@ -152,7 +152,7 @@ func (d *DiskStore) MountBranch(ctx context.Context, branch string, readOnly, fo
 
 	actor, release, err := d.acquireBranchActor(branch)
 	if err != nil {
-		return MountMeta{}, err
+		return MountBranchResult{}, err
 	}
 	defer release()
 
@@ -162,26 +162,26 @@ func (d *DiskStore) MountBranch(ctx context.Context, branch string, readOnly, fo
 		ttl:      ttl,
 	})
 	if err != nil {
-		return MountMeta{}, err
+		return MountBranchResult{}, err
 	}
-	mount, ok := resp.(MountMeta)
+	res, ok := resp.(MountBranchResult)
 	if !ok {
-		return MountMeta{}, ErrInvalidValue
+		return MountBranchResult{}, ErrInvalidValue
 	}
-	return mount, nil
+	return res, nil
 }
 
-func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, raw any) (MountMeta, error) {
+func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, layers []uint64, raw any) (MountBranchResult, error) {
 	req, ok := raw.(*mountBranchReq)
 	if !ok {
-		return MountMeta{}, ErrInvalid
+		return MountBranchResult{}, ErrInvalid
 	}
 
 	now := a.disk.now()
 	nowNano := now.UnixNano()
 	existing, err := listAllMountsFromReader(batch, branch.Name)
 	if err != nil {
-		return MountMeta{}, err
+		return MountBranchResult{}, err
 	}
 
 	var expiredIDs []string
@@ -197,35 +197,48 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTrack
 	}
 
 	if !req.readOnly && len(activeRWIDs) > 0 && !req.force {
-		return MountMeta{}, ErrDiskMounted
+		return MountBranchResult{}, ErrDiskMounted
 	}
 
+	rootInode, err := a.disk.readInodeFromLayers(batch, layers, RootIno)
+	if err != nil {
+		return MountBranchResult{}, err
+	}
+
+	var deletedIDs []string
 	for _, id := range expiredIDs {
 		if delErr := batch.Delete(MetaMountKey(id), nil); delErr != nil {
-			return MountMeta{}, delErr
+			return MountBranchResult{}, delErr
 		}
+		deletedIDs = append(deletedIDs, id)
 	}
 
-	var epoch uint64
+	var (
+		epoch         uint64
+		updatedBranch *BranchMeta
+	)
 	if !req.readOnly {
 		for _, id := range activeRWIDs {
 			if delErr := batch.Delete(MetaMountKey(id), nil); delErr != nil {
-				return MountMeta{}, delErr
+				return MountBranchResult{}, delErr
 			}
+			deletedIDs = append(deletedIDs, id)
 		}
 		freedWork, freedLogical, sweepErr := sweepOrphansInWorkLayer(batch, branch.WorkLayerID, branch.HeadCommitID)
 		if sweepErr != nil {
-			return MountMeta{}, sweepErr
+			return MountBranchResult{}, sweepErr
 		}
 		branch.WorkOwnedBytes = saturatingSub(branch.WorkOwnedBytes, freedWork)
 		branch.LogicalBytes = saturatingSub(branch.LogicalBytes, freedLogical)
 		branch.WriterEpoch++
 		branch.UpdatedAt = nowNano
 		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
-			return MountMeta{}, setErr
+			return MountBranchResult{}, setErr
 		}
 		quota.release(freedWork)
 		epoch = branch.WriterEpoch
+		updated := branch
+		updatedBranch = &updated
 	}
 
 	mount := MountMeta{
@@ -237,9 +250,17 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTrack
 		ExpiresAt:   now.Add(req.ttl).UnixNano(),
 	}
 	if setErr := batch.Set(MetaMountKey(mount.ID), EncodeMountMeta(mount), nil); setErr != nil {
-		return MountMeta{}, setErr
+		return MountBranchResult{}, setErr
 	}
-	return mount, nil
+	if len(deletedIDs) > 0 {
+		sort.Strings(deletedIDs)
+	}
+	return MountBranchResult{
+		Mount:           mount,
+		RootInode:       rootInode,
+		UpdatedBranch:   updatedBranch,
+		DeletedMountIDs: deletedIDs,
+	}, nil
 }
 
 func (d *DiskStore) RenewMount(ctx context.Context, branch, mountID string, readOnly bool, epoch uint64, ttl time.Duration) (MountMeta, error) {

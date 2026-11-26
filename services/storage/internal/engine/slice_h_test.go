@@ -213,14 +213,16 @@ func TestStep21_MountBranch_AtomicOrphanSweep_AndGCReclaimsOrphanPacks(t *testin
 	_, err = disk.GetAttrAtCommit(ctx, cmt.ID, tmp1.Ino)
 	require.ErrorIs(t, err, ErrNotFound)
 
-	roMount, err := disk.MountBranch(ctx, DefaultBranchName, true, false, time.Minute)
+	roMountRes, err := disk.MountBranch(ctx, DefaultBranchName, true, false, time.Minute)
 	require.NoError(t, err)
+	roMount := roMountRes.Mount
 	require.True(t, roMount.ReadOnly)
 	_, err = disk.GetAttr(ctx, DefaultBranchName, tmp1.Ino)
 	require.NoError(t, err)
 
-	rwMount, err := disk.MountBranch(ctx, DefaultBranchName, false, false, time.Minute)
+	rwMountRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, time.Minute)
 	require.NoError(t, err)
+	rwMount := rwMountRes.Mount
 	require.False(t, rwMount.ReadOnly)
 	require.Equal(t, uint64(2), rwMount.WriterEpoch)
 

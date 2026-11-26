@@ -611,8 +611,9 @@ func TestStep14_RealMerge_SerializesTargetWritesFencesStaleEpochAndDoesNotBlockO
 	_, err = disk.Commit(ctx, DefaultBranchName, "main commit")
 	require.NoError(t, err)
 
-	mount, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	mountRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
+	mount := mountRes.Mount
 	staleCtx := WithWriterEpoch(ctx, mount.WriterEpoch)
 	clk.Advance(31 * time.Second)
 

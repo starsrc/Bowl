@@ -216,8 +216,9 @@ func TestStep8_Reset_RollsBackWorkingLayerFencesStaleEpochAndAllowsUndoReset(t *
 	c2, err := disk.Commit(ctx, DefaultBranchName, "c2")
 	require.NoError(t, err)
 
-	mount, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
+	mountRes, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
+	mount := mountRes.Mount
 	staleCtx := WithWriterEpoch(ctx, mount.WriterEpoch)
 
 	_, err = disk.Write(staleCtx, DefaultBranchName, f.Ino, 0, []byte("dirty-uncommitted"))

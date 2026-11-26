@@ -369,6 +369,7 @@ func TestNewClient_GivenControlMetaAndBulkTraffic_IsolatesThreeTransportTiers(t 
 	client, err := NewClientFromConfig(ClientConfig{
 		Endpoint:    endpoint,
 		RetryConfig: &RetryConfig{Disable: true},
+		Sharded:     true,
 	})
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -691,6 +692,7 @@ func TestNewClient_GivenSharedTLSConfigAndConcurrentHTTPSRequests_ClonesTLSConfi
 		Endpoint:    srv.URL,
 		TLSConfig:   callerTLS,
 		RetryConfig: &RetryConfig{Disable: true},
+		Sharded:     true,
 	})
 	require.NoError(t, err)
 
@@ -756,6 +758,172 @@ func TestNewClient_GivenSharedTLSConfigAndConcurrentHTTPSRequests_ClonesTLSConfi
 	require.NoError(t, err)
 	CloseIdleConnections(customClient)
 	require.Zero(t, customRT.idleClosed.Load(), "CloseIdleConnections must be a no-op for caller-owned HTTPClient")
+}
+
+func TestNewClient_GivenDefaultUnshardedConfig_UsesSingleTransportWithControlBufferAndH2Coalesce(t *testing.T) {
+	t.Run("HTTP_SingleConnectionControlBufferAndH2Coalesce", func(t *testing.T) {
+		recorder := newRecordedProcedureAddrs()
+		endpoint := startH2CStorageServer(t, &tierTestStorageHandler{}, func(r *http.Request) {
+			recorder.Record(r.URL.Path, r.RemoteAddr)
+		})
+
+		client, err := NewClientFromConfig(ClientConfig{
+			Endpoint:    endpoint,
+			RetryConfig: &RetryConfig{Disable: true},
+		})
+		require.NoError(t, err)
+		defer CloseIdleConnections(client)
+
+		owned, ok := client.(*ownedTransportClient)
+		require.True(t, ok, "default client must be wrapped in *ownedTransportClient")
+		tr, ok := owned.closer.(*http.Transport)
+		require.True(t, ok, "default unsharded client must use single *http.Transport, got %T", owned.closer)
+		require.NotNil(t, tr.HTTP2)
+		require.Equal(t, HTTP2ControlMaxReceiveBufferPerConnection, tr.HTTP2.MaxReceiveBufferPerConnection)
+		require.Equal(t, HTTP2SendPingTimeout, tr.HTTP2.SendPingTimeout)
+		require.Equal(t, HTTP2PingTimeout, tr.HTTP2.PingTimeout)
+		require.Equal(t, HTTP2IdleConnTimeout, tr.IdleConnTimeout)
+		require.NotNil(t, tr.Protocols)
+		require.True(t, tr.Protocols.UnencryptedHTTP2())
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer func() { _ = ln.Close() }()
+		acceptDone := make(chan struct{})
+		go func() {
+			defer close(acceptDone)
+			if c, accErr := ln.Accept(); accErr == nil {
+				_ = c.Close()
+			}
+		}()
+		dialedConn, dialErr := tr.DialContext(context.Background(), "tcp", ln.Addr().String())
+		require.NoError(t, dialErr)
+		_, isCoalesce := dialedConn.(*h2CoalesceConn)
+		require.True(t, isCoalesce, "http:// default transport must wrap connections in *h2CoalesceConn, got %T", dialedConn)
+		_ = dialedConn.Close()
+		<-acceptDone
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err = client.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{DiskId: "disk-1", Branch: "main"}))
+		require.NoError(t, err)
+		_, err = client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{ParentIno: 1, Name: []byte("a")}))
+		require.NoError(t, err)
+		runRepeatedBulkCalls(t, ctx, client, HTTP2DataConnectionShards)
+
+		allAddrs := recorder.AddrSet(
+			storagev1connect.StorageServiceMountBranchProcedure,
+			storagev1connect.StorageServiceLookupProcedure,
+			storagev1connect.StorageServiceReadProcedure,
+			storagev1connect.StorageServiceWriteProcedure,
+			storagev1connect.StorageServiceReadCommitNodeProcedure,
+		)
+		require.Len(t, allAddrs, 1, "default unsharded client must multiplex all RPCs over a single TCP connection")
+	})
+
+	t.Run("HTTPS_SingleConnectionClonedTLSAndCloseIdleConnections", func(t *testing.T) {
+		var (
+			connMu      sync.Mutex
+			openConns   = make(map[net.Conn]struct{})
+			openedTotal atomic.Int64
+			allClosedCh = make(chan struct{})
+			allClosed   atomic.Bool
+			expectClose atomic.Bool
+			h2Count     atomic.Int64
+		)
+
+		path, connectHandler := storagev1connect.NewStorageServiceHandler(
+			&tierTestStorageHandler{},
+			connect.WithCodec(newProtoBinaryCodec()),
+		)
+		mux := http.NewServeMux()
+		mux.Handle(path, connectHandler)
+		rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ProtoMajor == 2 {
+				h2Count.Add(1)
+			}
+			mux.ServeHTTP(w, r)
+		})
+
+		srv := httptest.NewUnstartedServer(rootHandler)
+		srv.EnableHTTP2 = true
+		srv.Config.ConnState = func(c net.Conn, state http.ConnState) {
+			connMu.Lock()
+			defer connMu.Unlock()
+			switch state {
+			case http.StateNew:
+				openConns[c] = struct{}{}
+				openedTotal.Add(1)
+			case http.StateClosed, http.StateHijacked:
+				delete(openConns, c)
+				if expectClose.Load() && len(openConns) == 0 && allClosed.CompareAndSwap(false, true) {
+					close(allClosedCh)
+				}
+			}
+		}
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+
+		certPool := x509.NewCertPool()
+		certPool.AddCert(srv.Certificate())
+		callerTLS := &tls.Config{
+			RootCAs:    certPool,
+			MinVersion: tls.VersionTLS12,
+		}
+
+		client, err := NewClientFromConfig(ClientConfig{
+			Endpoint:    srv.URL,
+			TLSConfig:   callerTLS,
+			RetryConfig: &RetryConfig{Disable: true},
+		})
+		require.NoError(t, err)
+
+		owned, ok := client.(*ownedTransportClient)
+		require.True(t, ok)
+		tr, ok := owned.closer.(*http.Transport)
+		require.True(t, ok, "default unsharded HTTPS client must use single *http.Transport, got %T", owned.closer)
+		require.True(t, tr.ForceAttemptHTTP2)
+		require.Equal(t, HTTP2TLSHandshakeTimeout, tr.TLSHandshakeTimeout)
+		require.Equal(t, HTTP2IdleConnTimeout, tr.IdleConnTimeout)
+		require.NotNil(t, tr.HTTP2)
+		require.Equal(t, HTTP2ControlMaxReceiveBufferPerConnection, tr.HTTP2.MaxReceiveBufferPerConnection)
+		require.NotNil(t, tr.TLSClientConfig)
+		require.NotSame(t, callerTLS, tr.TLSClientConfig)
+		require.Equal(t, uint16(tls.VersionTLS12), tr.TLSClientConfig.MinVersion)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err = client.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{DiskId: "disk-1", Branch: "main"}))
+		require.NoError(t, err)
+		_, err = client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{ParentIno: 1, Name: []byte("tls-single")}))
+		require.NoError(t, err)
+		_, err = client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+		require.NoError(t, err)
+
+		require.Empty(t, callerTLS.NextProtos, "caller TLSConfig must never be mutated")
+		require.Equal(t, int64(3), h2Count.Load())
+		require.Equal(t, int64(1), openedTotal.Load(), "default unsharded HTTPS client must open only one TCP connection")
+
+		connMu.Lock()
+		expectClose.Store(true)
+		alreadyZero := len(openConns) == 0
+		connMu.Unlock()
+		if alreadyZero && allClosed.CompareAndSwap(false, true) {
+			close(allClosedCh)
+		}
+
+		CloseIdleConnections(client)
+
+		select {
+		case <-allClosedCh:
+		case <-time.After(2 * time.Second):
+			connMu.Lock()
+			remaining := len(openConns)
+			connMu.Unlock()
+			t.Fatalf("expected owned single HTTPS connection closed after CloseIdleConnections, %d still open", remaining)
+		}
+	})
 }
 
 func TestResolveEndpoint_GivenWhitespacePrefixAndMalformedURLs_NormalizesAndValidatesStrictly(t *testing.T) {

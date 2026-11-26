@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"math"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -98,17 +97,6 @@ func defaultMountSignalContext(parent context.Context) (context.Context, context
 	}
 }
 
-var (
-	serveFUSE                 = defaultServeFUSE
-	newFUSEServer             = defaultNewFUSEServer
-	mountSignalContext        = defaultMountSignalContext
-	mountHTTPClient           *http.Client
-	mountRenewIntervalFn      = defaultMountRenewInterval
-	mountRenewRetryIntervalFn = defaultMountRenewRetryInterval
-	mountNowFn                = time.Now
-	stageDirIsTmpfs           = func(s *fusefs.StageDirSession) bool { return s.IsTmpfs() }
-)
-
 type mountLeaseInfo struct {
 	mountID         string
 	leaseTTLSeconds uint32
@@ -123,7 +111,7 @@ type mountLeaseTracker struct {
 
 func newMountLeaseTracker(lease mountLeaseInfo, nowFn func() time.Time) *mountLeaseTracker {
 	if nowFn == nil {
-		nowFn = mountNowFn
+		nowFn = time.Now
 	}
 	t := &mountLeaseTracker{
 		active: lease.mountID != "",
@@ -257,7 +245,7 @@ func permanentRenewFenceStatus(err error) (fuse.Status, connect.Code, bool) {
 	}
 }
 
-func startMountLeaseRenewer(
+func (rt *cliRuntime) startMountLeaseRenewer(
 	client storagev1connect.StorageServiceClient,
 	cfg *fusefs.Config,
 	lease mountLeaseInfo,
@@ -291,7 +279,7 @@ func startMountLeaseRenewer(
 		if rawFS != nil && rawFS.IsFenced() {
 			return
 		}
-		normalInterval := mountRenewIntervalFn(currentTTL)
+		normalInterval := rt.mountRenewIntervalFn(currentTTL)
 		timer := time.NewTimer(normalInterval)
 		defer timer.Stop()
 
@@ -333,7 +321,7 @@ func startMountLeaseRenewer(
 					slog.String("mount_id", lease.mountID),
 					slog.String("error", err.Error()),
 				)
-				timer.Reset(mountRenewRetryIntervalFn(normalInterval))
+				timer.Reset(rt.mountRenewRetryIntervalFn(normalInterval))
 				continue
 			}
 
@@ -344,7 +332,7 @@ func startMountLeaseRenewer(
 				currentTTL = nextTTL
 			}
 			tracker.refresh(currentTTL)
-			normalInterval = mountRenewIntervalFn(currentTTL)
+			normalInterval = rt.mountRenewIntervalFn(currentTTL)
 			timer.Reset(normalInterval)
 		}
 	}()
@@ -463,7 +451,7 @@ func unmountUntilStopped(
 	runFUSESignalUnmountLoop(abortCtx, nil, stopWait, retryInterval, mountpoint, logger, unmount)
 }
 
-func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config, mountpoint string, ready func()) error {
+func (rt *cliRuntime) defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config, mountpoint string, ready func()) error {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -471,7 +459,7 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 	}
 	opts := fusefs.BuildMountOptions(*cfg)
 
-	server, err := newFUSEServer(fs, mountpoint, opts)
+	server, err := rt.newFUSEServer(fs, mountpoint, opts)
 	if err != nil {
 		return fmt.Errorf("create FUSE server: %w", err)
 	}
@@ -542,7 +530,7 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 	return nil
 }
 
-func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string, logWriter io.Writer, onReady func()) error {
+func (rt *cliRuntime) runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string, logWriter io.Writer, onReady func()) error {
 	obs, err := setupObservability(ctx, opts, logWriter)
 	if err != nil {
 		return err
@@ -588,7 +576,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 			return fmt.Errorf("initialize stage directory: %w", stageErr)
 		}
 		defer closeStage()
-		if stageDirIsTmpfs(stageSession) {
+		if rt.stageDirIsTmpfs(stageSession) {
 			logger.Warn("stage_dir_on_tmpfs", slog.String("stage_dir", baseCfg.StageDir))
 		}
 	}
@@ -596,9 +584,10 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	rpcMetrics := rpc.NewMetrics()
 	client, err := rpc.NewClientFromConfig(rpc.ClientConfig{
 		Endpoint:   opts.endpoint,
-		HTTPClient: mountHTTPClient,
+		HTTPClient: rt.mountHTTPClient,
 		Logger:     logger,
 		Metrics:    rpcMetrics,
+		Sharded:    true,
 	})
 	if err != nil {
 		return fmt.Errorf("create RPC client: %w", err)
@@ -613,7 +602,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		unmountMountLease(client, cfg.DiskID, lease.mountID, mountUnmountRPCTimeout, logger)
 		return cancelErr
 	}
-	leaseTracker := newMountLeaseTracker(lease, mountNowFn)
+	leaseTracker := newMountLeaseTracker(lease, rt.mountNowFn)
 	cfg.Logger = logger
 	cfg.Metrics = fusefs.NewMetrics()
 	cfg.TracerProvider = obs.TracerProvider()
@@ -657,7 +646,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 			StartedAt:        startedAt,
 			UnmountTimeoutMs: rawFS.Config().UnmountTimeout.Milliseconds(),
 		}
-		path, werr := writeMountMeta(&meta)
+		path, werr := rt.writeMountMeta(&meta)
 		if werr != nil {
 			logger.Warn("mount_meta_write_failed", slog.String("mountpoint", mountpoint), slog.String("error", werr.Error()))
 		}
@@ -684,8 +673,8 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		return cancelErr
 	}
 
-	stopRenew := startMountLeaseRenewer(client, cfg, lease, rawFS, leaseTracker, logger)
-	serveErr := serveFUSE(ctx, rawFS, cfg, mountpoint, ready)
+	stopRenew := rt.startMountLeaseRenewer(client, cfg, lease, rawFS, leaseTracker, logger)
+	serveErr := rt.serveFUSE(ctx, rawFS, cfg, mountpoint, ready)
 	stopRenew()
 	if rawFS.IsFenced() {
 		logger.Info("unmount_disk_rpc_skipped_fenced",
@@ -1058,7 +1047,7 @@ func validatePathNotInMountpoint(flagName, targetPath, rawMP, canonMP string) er
 	return nil
 }
 
-func newMountCmd(rawArgs []string, rootOpts *rootOptions) *cobra.Command {
+func newMountCmd(rt *cliRuntime, rawArgs []string, rootOpts *rootOptions) *cobra.Command {
 	var (
 		foreground bool
 		allowOther bool
@@ -1100,7 +1089,7 @@ func newMountCmd(rawArgs []string, rootOpts *rootOptions) *cobra.Command {
 				unmountStageStallTimeout: flags.Changed("unmount-stage-stall-timeout"),
 				unmountFsyncTimeout:      flags.Changed("unmount-fsync-timeout"),
 			}
-			return executeMountValidated(cmd, posArgs, &opts, set, foreground, allowOther, directIO, debug, statsFile, rawArgs)
+			return rt.executeMountValidated(cmd, posArgs, &opts, set, foreground, allowOther, directIO, debug, statsFile, rawArgs)
 		},
 	}
 
@@ -1128,7 +1117,7 @@ func newMountCmd(rawArgs []string, rootOpts *rootOptions) *cobra.Command {
 	return cmd
 }
 
-func prepareMountExecution(
+func (rt *cliRuntime) prepareMountExecution(
 	posArgs []string,
 	opts *mountOptions,
 	set mountFlagPresence,
@@ -1152,7 +1141,7 @@ func prepareMountExecution(
 	}
 	absMountpoint = filepath.Clean(absMountpoint)
 
-	canonMountpoint, mounted, err := ResolveMountPoint(absMountpoint)
+	canonMountpoint, mounted, err := rt.resolveMountPoint(absMountpoint)
 	if err != nil {
 		return "", fusefs.Config{}, runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
 	}
@@ -1211,7 +1200,7 @@ func prepareMountExecution(
 	return canonMountpoint, baseCfg, nil
 }
 
-func executeMountValidated(
+func (rt *cliRuntime) executeMountValidated(
 	cmd *cobra.Command,
 	posArgs []string,
 	opts *mountOptions,
@@ -1220,10 +1209,10 @@ func executeMountValidated(
 	rawArgs []string,
 ) error {
 	isWorker := os.Getenv("BOWL_DAEMON_WORKER") == "1"
-	canonMountpoint, baseCfg, err := prepareMountExecution(posArgs, opts, set, foreground, allowOther, directIO, debug, statsFile)
+	canonMountpoint, baseCfg, err := rt.prepareMountExecution(posArgs, opts, set, foreground, allowOther, directIO, debug, statsFile)
 	if err != nil {
 		if isWorker {
-			writeDaemonReadinessError(err)
+			rt.writeDaemonReadinessError(err)
 			return &cliExitError{code: 1, silent: true}
 		}
 		return err
@@ -1231,23 +1220,23 @@ func executeMountValidated(
 
 	stderr := cmd.ErrOrStderr()
 	if isWorker {
-		if code := runDaemonWorker(context.Background(), opts, &baseCfg, canonMountpoint); code != 0 {
+		if code := rt.runDaemonWorker(context.Background(), opts, &baseCfg, canonMountpoint); code != 0 {
 			return &cliExitError{code: code, silent: true}
 		}
 		return nil
 	}
 
 	if !foreground {
-		if code := spawnDaemon(rawArgs, stderr); code != 0 {
+		if code := rt.spawnDaemon(rawArgs, stderr); code != 0 {
 			return &cliExitError{code: code, silent: true}
 		}
 		return nil
 	}
 
-	runnerCtx, runnerCancel := mountSignalContext(context.Background())
+	runnerCtx, runnerCancel := rt.mountSignalContext(context.Background())
 	defer runnerCancel()
 
-	if mountErr := runMount(runnerCtx, opts, &baseCfg, canonMountpoint, stderr, nil); mountErr != nil {
+	if mountErr := rt.runMount(runnerCtx, opts, &baseCfg, canonMountpoint, stderr, nil); mountErr != nil {
 		return runtimeExitErr(fmt.Errorf("mount failed: %w", mountErr))
 	}
 	return nil

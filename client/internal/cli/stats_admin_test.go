@@ -33,11 +33,9 @@ func newTestSamplerProvider(exporter sdktrace.SpanExporter, ratio float64) *sdkt
 	)
 }
 
-func withStatsMuxTransport(t *testing.T, handler http.Handler) *string {
-	t.Helper()
-	prev := statsHTTPClient
+func setStatsMuxTransport(rt *cliRuntime, handler http.Handler) *string {
 	var lastURL string
-	statsHTTPClient = &http.Client{
+	rt.statsHTTPClient = &http.Client{
 		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			lastURL = req.URL.String()
 			rec := httptest.NewRecorder()
@@ -47,19 +45,15 @@ func withStatsMuxTransport(t *testing.T, handler http.Handler) *string {
 			return resp, nil
 		}),
 	}
-	t.Cleanup(func() { statsHTTPClient = prev })
 	return &lastURL
 }
 
-func withStatsErrorTransport(t *testing.T, err error) {
-	t.Helper()
-	prev := statsHTTPClient
-	statsHTTPClient = &http.Client{
+func setStatsErrorTransport(rt *cliRuntime, err error) {
+	rt.statsHTTPClient = &http.Client{
 		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			return nil, err
 		}),
 	}
-	t.Cleanup(func() { statsHTTPClient = prev })
 }
 
 func setupTestObsAndMux(t *testing.T) (*clientRuntime, *http.ServeMux) {
@@ -89,7 +83,6 @@ func setupTestObsAndMux(t *testing.T) (*clientRuntime, *http.ServeMux) {
 }
 
 func TestStats_GivenHelpAndInvalidFlags_ReturnsExpectedExitCodes(t *testing.T) {
-
 	requireHelpExit0(t, "bowl stats [mountpoint]", "stats", "-h")
 	requireHelpExit0(t, "bowl stats [mountpoint]", "stats", "--help")
 
@@ -105,15 +98,15 @@ func TestStats_GivenHelpAndInvalidFlags_ReturnsExpectedExitCodes(t *testing.T) {
 }
 
 func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
+	setTempMountMetaDirs(rt, metaDir)
 
-	code, _, errOut := runCLI("stats")
+	code, _, errOut := runCLIWithRuntime(rt, "stats")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "no active bowl mounts found")
 
-	_, err := writeMountMeta(&mountMeta{
+	_, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: "/mnt/a",
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -121,7 +114,7 @@ func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *tes
 		StartedAt:  time.Now().UTC(),
 	})
 	require.NoError(t, err)
-	_, err = writeMountMeta(&mountMeta{
+	_, err = rt.writeMountMeta(&mountMeta{
 		Mountpoint: "/mnt/b",
 		PID:        os.Getpid(),
 		DiskID:     testDiskID2,
@@ -129,7 +122,7 @@ func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *tes
 		StartedAt:  time.Now().UTC(),
 	})
 	require.NoError(t, err)
-	_, err = writeMountMeta(&mountMeta{
+	_, err = rt.writeMountMeta(&mountMeta{
 		Mountpoint: "/mnt/dead",
 		PID:        99999999,
 		DiskID:     testDiskID1,
@@ -138,31 +131,31 @@ func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *tes
 	})
 	require.NoError(t, err)
 
-	code, _, errOut = runCLI("stats")
+	code, _, errOut = runCLIWithRuntime(rt, "stats")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "multiple active mounts found")
 	require.Contains(t, errOut, "/mnt/a")
 	require.Contains(t, errOut, "/mnt/b")
 	require.NotContains(t, errOut, "/mnt/dead")
 
-	code, _, errOut = runCLI("stats", "/mnt/missing")
+	code, _, errOut = runCLIWithRuntime(rt, "stats", "/mnt/missing")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "no active bowl mount process found for mountpoint")
 }
 
 func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(t *testing.T) {
-
 	_, mux := setupTestObsAndMux(t)
-	lastURL := withStatsMuxTransport(t, mux)
+	rt := defaultCLIRuntime()
+	lastURL := setStatsMuxTransport(rt, mux)
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
+	setTempMountMetaDirs(rt, metaDir)
 
 	realMP := filepath.Join(t.TempDir(), "real-mp")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
 	symMP := filepath.Join(t.TempDir(), "sym-mp")
 	require.NoError(t, os.Symlink(realMP, symMP))
 
-	_, err := writeMountMeta(&mountMeta{
+	_, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: realMP,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -171,19 +164,19 @@ func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(
 	})
 	require.NoError(t, err)
 
-	code, textOut, errOut := runCLI("stats")
+	code, textOut, errOut := runCLIWithRuntime(rt, "stats")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "http://127.0.0.1:19100/debug/stats?format=text", *lastURL)
 	require.NotEmpty(t, textOut)
 
-	code, falseOut, errOut := runCLI("stats", "--json=false", "--raw=false")
+	code, falseOut, errOut := runCLIWithRuntime(rt, "stats", "--json=false", "--raw=false")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "http://127.0.0.1:19100/debug/stats?format=text", *lastURL)
 	require.Contains(t, falseOut, "Uptime:")
 
-	code, jsonOut, errOut := runCLI("stats", symMP, "--json")
+	code, jsonOut, errOut := runCLIWithRuntime(rt, "stats", symMP, "--json")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "http://127.0.0.1:19100/debug/stats?format=json", *lastURL)
@@ -191,7 +184,7 @@ func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &snap))
 	require.Len(t, snap.FUSE.Ops, fusefs.OpCount)
 
-	code, rawOut, errOut := runCLI("stats", "--admin-addr", "http://127.0.0.1:19200/", "--raw")
+	code, rawOut, errOut := runCLIWithRuntime(rt, "stats", "--admin-addr", "http://127.0.0.1:19200/", "--raw")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "http://127.0.0.1:19200/debug/stats?format=stats", *lastURL)
@@ -199,10 +192,10 @@ func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(
 }
 
 func TestStats_GivenDisabledAdminOrHTTPError_ReturnsExit1(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
-	_, err := writeMountMeta(&mountMeta{
+	setTempMountMetaDirs(rt, metaDir)
+	_, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: "/mnt/no-admin",
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -211,25 +204,24 @@ func TestStats_GivenDisabledAdminOrHTTPError_ReturnsExit1(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	code, _, errOut := runCLI("stats")
+	code, _, errOut := runCLIWithRuntime(rt, "stats")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "admin endpoint is disabled")
 
-	withStatsErrorTransport(t, errors.New("connection refused"))
-	code, _, errOut = runCLI("stats", "--admin-addr", "127.0.0.1:19300")
+	setStatsErrorTransport(rt, errors.New("connection refused"))
+	code, _, errOut = runCLIWithRuntime(rt, "stats", "--admin-addr", "127.0.0.1:19300")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "failed to query admin endpoint 127.0.0.1:19300")
 
-	withStatsMuxTransport(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	setStatsMuxTransport(rt, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}))
-	code, _, errOut = runCLI("stats", "--admin-addr", "127.0.0.1:19300")
+	code, _, errOut = runCLIWithRuntime(rt, "stats", "--admin-addr", "127.0.0.1:19300")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "admin endpoint returned 500")
 }
 
 func TestAdminObservability_GivenBareOTLPEndpoint_NormalizesSchemeWithoutExternalDial(t *testing.T) {
-
 	require.Empty(t, normalizeOTLPEndpoint("   "))
 	require.Equal(t, "http://172.16.1.205:4317", normalizeOTLPEndpoint("172.16.1.205:4317"))
 	require.Equal(t, "http://172.16.1.205:4317", normalizeOTLPEndpoint("  172.16.1.205:4317  "))
@@ -251,7 +243,6 @@ func TestAdminObservability_GivenBareOTLPEndpoint_NormalizesSchemeWithoutExterna
 }
 
 func TestAdminObservability_GivenPriorityOpSampler_BoostsBarriersAndLinkedSpans(t *testing.T) {
-
 	exporter := tracetest.NewInMemoryExporter()
 	tp := newTestSamplerProvider(exporter, 1e-12)
 	defer func() { _ = tp.Shutdown(context.Background()) }()
@@ -289,7 +280,6 @@ func TestAdminObservability_GivenPriorityOpSampler_BoostsBarriersAndLinkedSpans(
 }
 
 func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponsesWithoutNetwork(t *testing.T) {
-
 	obs, mux := setupTestObsAndMux(t)
 	hist, err := obs.meterProvider.Meter("connectrpc").Float64Histogram("rpc.client.duration")
 	require.NoError(t, err)
@@ -319,7 +309,6 @@ func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponses
 }
 
 func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringStats(t *testing.T) {
-
 	obs, mux := setupTestObsAndMux(t)
 
 	unmountReq := httptest.NewRequest(http.MethodGet, "/debug/unmount", http.NoBody)
@@ -354,17 +343,17 @@ func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringSt
 }
 
 func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndListsCleanly(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	realMP := filepath.Join(t.TempDir(), "real-mp")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
-	canonMP := canonicalMountpoint(realMP)
+	canonMP := rt.canonicalMountpoint(realMP)
 	symMP := filepath.Join(t.TempDir(), "sym-mp")
 	require.NoError(t, os.Symlink(realMP, symMP))
 
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
+	setTempMountMetaDirs(rt, metaDir)
 
-	writtenPath, err := writeMountMeta(&mountMeta{
+	writtenPath, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: symMP,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -380,14 +369,13 @@ func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndListsCleanly(t *t
 	require.NoError(t, json.Unmarshal(data, &stored))
 	require.Equal(t, canonMP, stored.Mountpoint)
 
-	metas := listMountMetas()
+	metas := rt.listMountMetas()
 	require.Len(t, metas, 1)
 	require.Equal(t, canonMP, metas[0].Mountpoint)
 	require.Equal(t, "127.0.0.1:19401", metas[0].AdminAddr)
 }
 
 func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountRoots(t *testing.T) {
-
 	const (
 		realWedgedMP = "/wedged-root/mnt"
 		realOkMP     = "/ok-root/mnt"
@@ -395,21 +383,22 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 		symOkMP      = "/tmp/sym-ok"
 	)
 	_, mux := setupTestObsAndMux(t)
-	lastURL := withStatsMuxTransport(t, mux)
+	rt := defaultCLIRuntime()
+	lastURL := setStatsMuxTransport(rt, mux)
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
-	withMountInfoContent(t,
+	setTempMountMetaDirs(rt, metaDir)
+	setMountInfoContent(t, rt,
 		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
 			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
 			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
 	)
-	lstatCalls := withMountInfoNoRootLstatStub(t, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
+	lstatCalls := setMountInfoNoRootLstatStub(t, rt, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
 		"/tmp":      {mode: os.ModeDir | 0o755},
 		symWedgedMP: {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
 		symOkMP:     {mode: os.ModeSymlink | 0o777, target: realOkMP},
 	})
 
-	wedgedMetaPath, err := writeMountMeta(&mountMeta{
+	wedgedMetaPath, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: symWedgedMP,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -417,7 +406,7 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 		StartedAt:  time.Now().UTC(),
 	})
 	require.NoError(t, err)
-	okMetaPath, err := writeMountMeta(&mountMeta{
+	okMetaPath, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: symOkMP,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID2,
@@ -443,32 +432,32 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(extraPath, extraBytes, 0o644))
 
-	metas := listMountMetas()
+	metas := rt.listMountMetas()
 	require.Len(t, metas, 3)
 	gotMountpoints := []string{metas[0].Mountpoint, metas[1].Mountpoint, metas[2].Mountpoint}
 	require.Contains(t, gotMountpoints, hostSym)
 	require.NoError(t, os.Remove(extraPath))
 
-	code, _, errOut := runCLI("stats")
+	code, _, errOut := runCLIWithRuntime(rt, "stats")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "multiple active mounts found")
 	require.Contains(t, errOut, realOkMP)
 	require.Contains(t, errOut, realWedgedMP)
 
-	code, jsonOut, errOut := runCLI("stats", symOkMP, "--json")
+	code, jsonOut, errOut := runCLIWithRuntime(rt, "stats", symOkMP, "--json")
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, errOut)
 	require.Equal(t, "http://127.0.0.1:19401/debug/stats?format=json", *lastURL)
 	var snap fusefs.Snapshot
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &snap))
 
-	code, _, errOut = runCLI("stats", symWedgedMP)
+	code, _, errOut = runCLIWithRuntime(rt, "stats", symWedgedMP)
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "admin endpoint is disabled")
 	require.Contains(t, errOut, realWedgedMP)
 
 	require.NoError(t, os.Remove(okMetaPath))
-	code, _, errOut = runCLI("stats")
+	code, _, errOut = runCLIWithRuntime(rt, "stats")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "admin endpoint is disabled")
 	require.Contains(t, errOut, realWedgedMP)
@@ -478,7 +467,6 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 }
 
 func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpectedStatus(t *testing.T) {
-
 	obs, _ := setupTestObsAndMux(t)
 	rawFS := fusefs.NewRawFS(nil, fusefs.Config{
 		DiskID:  testDiskID1,
@@ -527,9 +515,10 @@ func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpe
 
 func TestRunMount_GivenOccupiedAdminAddrAndForce_FailsWithoutCallingMountDisk(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	occupiedLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -539,7 +528,7 @@ func TestRunMount_GivenOccupiedAdminAddrAndForce_FailsWithoutCallingMountDisk(t 
 	stageDir := t.TempDir()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "occupied-admin-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -555,7 +544,7 @@ func TestRunMount_GivenOccupiedAdminAddrAndForce_FailsWithoutCallingMountDisk(t 
 		StageDir:  stageDir,
 	}
 
-	mountErr := runMount(context.Background(), opts, baseCfg, mp, &syncBuffer{}, nil)
+	mountErr := rt.runMount(context.Background(), opts, baseCfg, mp, &syncBuffer{}, nil)
 
 	require.Error(t, mountErr)
 	require.Contains(t, mountErr.Error(), "listen on admin address")
@@ -567,9 +556,10 @@ func TestRunMount_GivenOccupiedAdminAddrAndForce_FailsWithoutCallingMountDisk(t 
 
 func TestRunMount_GivenPreBoundAdminAddr_BindsBeforeHandshakeAndClosesListenerOnHandshakeFailure(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	fixedAddr := reserveLoopbackTCPAddr(t)
 	mp := t.TempDir()
@@ -586,7 +576,7 @@ func TestRunMount_GivenPreBoundAdminAddr_BindsBeforeHandshakeAndClosesListenerOn
 		}
 		return errors.New("simulated handshake failure")
 	}
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -601,7 +591,7 @@ func TestRunMount_GivenPreBoundAdminAddr_BindsBeforeHandshakeAndClosesListenerOn
 		StageDir:  stageDir,
 	}
 
-	mountErr := runMount(context.Background(), opts, baseCfg, mp, &syncBuffer{}, nil)
+	mountErr := rt.runMount(context.Background(), opts, baseCfg, mp, &syncBuffer{}, nil)
 
 	require.Error(t, mountErr)
 	require.Error(t, rebindErrDuringHandshake, "scene=during_mountHandshake want=admin_addr_already_bound")
@@ -664,26 +654,27 @@ func TestMount_GivenWildcardAdminAddr_PersistsLoopbackMetaAndLogsRawListenAddr(t
 			_ = probe.Close()
 
 			withCleanOTelAndLogger(t)
-			withStageDirTmpfsStub(t, false)
-			withMissingMountInfo(t)
-			withTempMountMetaDirs(t, t.TempDir())
+			rt := defaultCLIRuntime()
+			setStageDirTmpfsStub(rt, false)
+			setMissingMountInfo(t, rt)
+			setTempMountMetaDirs(rt, t.TempDir())
 
 			mp := t.TempDir()
 			storage := newFakeStorage()
 			storage.seedDisk(testDiskID1, "wildcard-admin-disk", 1<<30, 0)
-			withMountStorageFake(t, storage)
+			setMountStorageFake(rt, storage)
 
 			var gotMeta mountMeta
 			var metaFound bool
 			var readyzStatus int
-			withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+			rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 				ready()
-				gotMeta, metaFound = findMountMeta(mp)
+				gotMeta, metaFound = rt.findMountMeta(mp)
 				if metaFound {
 					readyzStatus, _ = fetchReadyzStatusAndBody(t, gotMeta.AdminAddr)
 				}
 				return nil
-			})
+			}
 
 			var logBuf syncBuffer
 			opts := &mountOptions{
@@ -697,7 +688,7 @@ func TestMount_GivenWildcardAdminAddr_PersistsLoopbackMetaAndLogsRawListenAddr(t
 				Mode:   fusefs.MountModeRO,
 			}
 
-			err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+			err := rt.runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
 			require.NoError(t, err)
 			require.True(t, metaFound)
 			require.Equal(t, http.StatusOK, readyzStatus)
@@ -731,10 +722,11 @@ func TestMount_GivenWildcardAdminAddr_PersistsLoopbackMetaAndLogsRawListenAddr(t
 }
 
 func TestStats_GivenWildcardAdminAddrAndLegacyMeta_NormalizesToLoopbackAndKeepsDefaultProxyHandling(t *testing.T) {
-	require.Same(t, http.DefaultClient, statsHTTPClient)
+	rt := defaultCLIRuntime()
+	require.Same(t, http.DefaultClient, rt.statsHTTPClient)
 
 	_, mux := setupTestObsAndMux(t)
-	lastURL := withStatsMuxTransport(t, mux)
+	lastURL := setStatsMuxTransport(rt, mux)
 
 	flagCases := []struct {
 		name    string
@@ -750,7 +742,7 @@ func TestStats_GivenWildcardAdminAddrAndLegacyMeta_NormalizesToLoopbackAndKeepsD
 
 	for _, tc := range flagCases {
 		t.Run("Flag_"+tc.name, func(t *testing.T) {
-			code, out, errOut := runCLI("stats", "--admin-addr", tc.rawAddr)
+			code, out, errOut := runCLIWithRuntime(rt, "stats", "--admin-addr", tc.rawAddr)
 			require.Equal(t, 0, code, "scene=%s stderr=%s", tc.name, errOut)
 			require.Empty(t, errOut)
 			require.NotEmpty(t, out)
@@ -772,9 +764,9 @@ func TestStats_GivenWildcardAdminAddrAndLegacyMeta_NormalizesToLoopbackAndKeepsD
 	for _, tc := range metaCases {
 		t.Run("Meta_"+tc.name, func(t *testing.T) {
 			metaDir := t.TempDir()
-			withTempMountMetaDirs(t, metaDir)
+			setTempMountMetaDirs(rt, metaDir)
 			mp := t.TempDir()
-			_, err := writeMountMeta(&mountMeta{
+			_, err := rt.writeMountMeta(&mountMeta{
 				Mountpoint: mp,
 				PID:        os.Getpid(),
 				DiskID:     testDiskID1,
@@ -783,7 +775,7 @@ func TestStats_GivenWildcardAdminAddrAndLegacyMeta_NormalizesToLoopbackAndKeepsD
 			})
 			require.NoError(t, err)
 
-			code, out, errOut := runCLI("stats", mp)
+			code, out, errOut := runCLIWithRuntime(rt, "stats", mp)
 			require.Equal(t, 0, code, "scene=%s stderr=%s", tc.name, errOut)
 			require.Empty(t, errOut)
 			require.NotEmpty(t, out)
@@ -816,15 +808,16 @@ func TestAdminProxyHelperProcess(t *testing.T) {
 	if port == "" {
 		return
 	}
-	require.Same(t, http.DefaultClient, statsHTTPClient)
-	require.Same(t, http.DefaultClient, umountHTTPClient)
+	rt := defaultCLIRuntime()
+	require.Same(t, http.DefaultClient, rt.statsHTTPClient)
+	require.Same(t, http.DefaultClient, rt.umountHTTPClient)
 
-	code, out, errOut := runCLI("stats", "--admin-addr", "0.0.0.0:"+port)
+	code, out, errOut := runCLIWithRuntime(rt, "stats", "--admin-addr", "0.0.0.0:"+port)
 	require.Equal(t, 0, code, "scene=stats_wildcard_under_http_proxy stderr=%s", errOut)
 	require.Empty(t, errOut)
 	require.NotEmpty(t, out)
 
-	prog, ok := fetchUnmountProgress(normalizeUmountAdminAddr("0.0.0.0:"+port), time.Second)
+	prog, ok := rt.fetchUnmountProgress(normalizeUmountAdminAddr("0.0.0.0:"+port), time.Second)
 	require.True(t, ok, "scene=umount_wildcard_under_http_proxy")
 	require.Equal(t, fusefs.UnmountProgress{}, prog)
 

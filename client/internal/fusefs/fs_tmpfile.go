@@ -195,7 +195,7 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, input *fuse.LinkIn, filename
 	if status != fuse.OK {
 		return status, true
 	}
-	fs.markDirty(res.ServerIno)
+	fs.markMetaDirty()
 	if res.HasSecurityCap {
 		fs.caps.markPresent(input.Oldnodeid)
 	} else {

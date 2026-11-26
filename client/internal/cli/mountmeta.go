@@ -33,7 +33,6 @@ type mountMeta struct {
 var (
 	errProcStatUnsupported = errors.New("proc stat unsupported")
 	errInvalidProcStat     = errors.New("invalid proc stat")
-	readProcStatFn         = defaultReadProcStat
 )
 
 func isDeadProcState(state byte) bool {
@@ -67,7 +66,7 @@ func defaultReadProcStat(pid int) (state byte, startTicks uint64, err error) {
 	return parseProcStat(string(data))
 }
 
-func mountMetaProcessAlive(m mountMeta) bool {
+func (rt *cliRuntime) mountMetaProcessAlive(m mountMeta) bool {
 	if m.PID <= 0 {
 		return false
 	}
@@ -75,7 +74,7 @@ func mountMetaProcessAlive(m mountMeta) bool {
 	if err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
 	}
-	state, startTicks, statErr := readProcStatFn(m.PID)
+	state, startTicks, statErr := rt.readProcStatFn(m.PID)
 	if statErr == nil {
 		if isDeadProcState(state) {
 			return false
@@ -95,12 +94,8 @@ func fallbackMountMetaDir() string {
 	return filepath.Join(os.TempDir(), "bowl-mounts")
 }
 
-var mountMetaDirs = func() []string {
-	return []string{primaryMountMetaDir, fallbackMountMetaDir()}
-}
-
-func canonicalMountpoint(mountpoint string) string {
-	if resolved, _, err := ResolveMountPoint(mountpoint); err == nil {
+func (rt *cliRuntime) canonicalMountpoint(mountpoint string) string {
+	if resolved, _, err := rt.resolveMountPoint(mountpoint); err == nil {
 		return resolved
 	}
 	if abs, err := filepath.Abs(mountpoint); err == nil {
@@ -114,11 +109,11 @@ func mountMetaFileName(mountpoint string) string {
 	return hex.EncodeToString(sum[:16]) + ".json"
 }
 
-func writeMountMeta(meta *mountMeta) (string, error) {
+func (rt *cliRuntime) writeMountMeta(meta *mountMeta) (string, error) {
 	normalized := *meta
-	normalized.Mountpoint = canonicalMountpoint(normalized.Mountpoint)
+	normalized.Mountpoint = rt.canonicalMountpoint(normalized.Mountpoint)
 	if normalized.ProcStartTicks == 0 && normalized.PID > 0 {
-		if state, startTicks, err := readProcStatFn(normalized.PID); err == nil && !isDeadProcState(state) && startTicks > 0 {
+		if state, startTicks, err := rt.readProcStatFn(normalized.PID); err == nil && !isDeadProcState(state) && startTicks > 0 {
 			normalized.ProcStartTicks = startTicks
 			meta.ProcStartTicks = startTicks
 		}
@@ -129,7 +124,7 @@ func writeMountMeta(meta *mountMeta) (string, error) {
 	}
 	fallbackDir := fallbackMountMetaDir()
 	var errs error
-	for _, dir := range mountMetaDirs() {
+	for _, dir := range rt.mountMetaDirs() {
 		path, werr := writeFileAtomic(dir, mountMetaFileName(normalized.Mountpoint), data, dir == fallbackDir)
 		if werr == nil {
 			return path, nil
@@ -146,7 +141,6 @@ func writeFileAtomic(dir, name string, data []byte, sharedSticky bool) (string, 
 		return "", err
 	}
 	if createdDir && sharedSticky {
-
 		_ = os.Chmod(dir, 0o777|os.ModeSticky)
 	}
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
@@ -189,14 +183,14 @@ func removeOwnedMountMeta(metaPath string, pid int, startedAt time.Time) {
 	}
 }
 
-func processAlive(pid int) bool {
-	return mountMetaProcessAlive(mountMeta{PID: pid})
+func (rt *cliRuntime) processAlive(pid int) bool {
+	return rt.mountMetaProcessAlive(mountMeta{PID: pid})
 }
 
-func listMountMetas() []mountMeta {
+func (rt *cliRuntime) listMountMetas() []mountMeta {
 	seen := make(map[string]struct{})
 	var out []mountMeta
-	for _, dir := range mountMetaDirs() {
+	for _, dir := range rt.mountMetaDirs() {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -211,7 +205,7 @@ func listMountMetas() []mountMeta {
 				continue
 			}
 			var m mountMeta
-			if json.Unmarshal(data, &m) != nil || !mountMetaProcessAlive(m) {
+			if json.Unmarshal(data, &m) != nil || !rt.mountMetaProcessAlive(m) {
 				continue
 			}
 			m.Mountpoint = filepath.Clean(m.Mountpoint)
@@ -228,15 +222,15 @@ func listMountMetas() []mountMeta {
 	return out
 }
 
-func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta, ok bool) {
+func (rt *cliRuntime) resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta, ok bool) {
 	cleaned := filepath.Clean(mountpoint)
-	canon := canonicalMountpoint(cleaned)
+	canon := rt.canonicalMountpoint(cleaned)
 	names := []string{mountMetaFileName(cleaned)}
 	if canon != cleaned {
 		names = append(names, mountMetaFileName(canon))
 	}
 
-	for _, dir := range mountMetaDirs() {
+	for _, dir := range rt.mountMetaDirs() {
 		for _, name := range names {
 			candidate := filepath.Join(dir, name)
 			data, err := os.ReadFile(candidate)
@@ -247,7 +241,7 @@ func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta,
 			if json.Unmarshal(data, &m) != nil || m.PID <= 0 {
 				continue
 			}
-			if mountMetaProcessAlive(m) {
+			if rt.mountMetaProcessAlive(m) {
 				return candidate, m, true
 			}
 		}
@@ -255,10 +249,10 @@ func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta,
 	return "", mountMeta{}, false
 }
 
-func findMountMeta(mountpoint string) (mountMeta, bool) {
+func (rt *cliRuntime) findMountMeta(mountpoint string) (mountMeta, bool) {
 	cleaned := filepath.Clean(mountpoint)
-	canon := canonicalMountpoint(cleaned)
-	for _, m := range listMountMetas() {
+	canon := rt.canonicalMountpoint(cleaned)
+	for _, m := range rt.listMountMetas() {
 		if m.Mountpoint == cleaned || m.Mountpoint == canon {
 			return m, true
 		}

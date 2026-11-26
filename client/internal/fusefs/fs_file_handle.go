@@ -206,7 +206,6 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 				return fs.ToStatus(err)
 			}
 			fs.markMetaDirty()
-			fs.markDirty(ino)
 			fs.stage.ResetTruncatedInode(ino)
 			fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
 			fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), resp.Msg.GetAttrTimeoutSeconds())
@@ -333,7 +332,6 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 		fs.advanceMetaSyncedSeq(seq)
 	}
 	if err == nil {
-		fs.clearDirty(ino)
 		fs.metrics.incDirtyFlushOK()
 	} else {
 		fs.metrics.incDirtyFlushError()
@@ -381,7 +379,6 @@ func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 		if isRealServerIno {
 			fs.stage.DiscardInode(serverIno)
 			fs.readAhead.InvalidateInode(serverIno)
-			fs.clearDirty(serverIno)
 		}
 		fs.cache.invalidateInode(input.NodeId)
 		fs.forgetInodeSpecial(input.NodeId)

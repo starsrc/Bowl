@@ -87,18 +87,18 @@ func (g *stepGate) wait(ctx context.Context) error {
 	}
 }
 
-func TestRawFS_UnmountProgress_GivenStagedChunksAndDirtyInodes_AdvancesMonotonicallyToTotal(t *testing.T) {
+func TestRawFS_UnmountProgress_GivenStagedChunksAndSingleRootFsyncDir_AdvancesMonotonicallyToTotal(t *testing.T) {
 
-	srv := newFakeStorage(t, withTTL(1.0, 1.0))
+	srv := newFakeStorage(t, withRootIno(17), withTTL(1.0, 1.0))
 
 	var gateWrites atomic.Bool
 	writeEnteredCh := make(chan uint64, 4)
 	writeGate := newStepGate()
 
-	var gateFsyncs atomic.Bool
-	gateFsyncs.Store(true)
-	fsyncEnteredCh := make(chan uint64, 4)
-	fsyncGate := newStepGate()
+	var gateFsyncDir atomic.Bool
+	gateFsyncDir.Store(true)
+	fsyncDirEnteredCh := make(chan uint64, 2)
+	fsyncDirGate := newStepGate()
 
 	srv.writeHook = func(ctx context.Context, req *storagev1.WriteRequest) (uint32, error) {
 		if !gateWrites.Load() {
@@ -107,18 +107,18 @@ func TestRawFS_UnmountProgress_GivenStagedChunksAndDirtyInodes_AdvancesMonotonic
 		writeEnteredCh <- req.GetOffset()
 		return 0, writeGate.wait(ctx)
 	}
-	srv.fsyncHook = func(ctx context.Context, req *storagev1.FsyncRequest) error {
-		if !gateFsyncs.Load() {
+	srv.fsyncDirHook = func(ctx context.Context, req *storagev1.FsyncDirRequest) error {
+		if !gateFsyncDir.Load() {
 			return nil
 		}
-		fsyncEnteredCh <- req.GetIno()
-		return fsyncGate.wait(ctx)
+		fsyncDirEnteredCh <- req.GetIno()
+		return fsyncDirGate.wait(ctx)
 	}
 
 	fs := newTestRawFS(t, srv, withDirectIO(false), withStageSize(16*1024*1024))
 	t.Cleanup(func() {
 		writeGate.allowAll()
-		fsyncGate.allowAll()
+		fsyncDirGate.allowAll()
 	})
 
 	fileA := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "dirty-only.bin", syscall.O_RDWR, 0o644)
@@ -126,7 +126,7 @@ func TestRawFS_UnmountProgress_GivenStagedChunksAndDirtyInodes_AdvancesMonotonic
 	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fileA.NodeId}, Fh: fileA.Fh})
 	require.Eventually(t, func() bool {
 		snap := fs.Snapshot()
-		return srv.writeCalls.Load() >= 1 && snap.Stage.PendingChunks == 0 && snap.Stage.UsedBytes == 0 && snap.Queues.DirtyInodes == 1
+		return srv.writeCalls.Load() >= 1 && snap.Stage.PendingChunks == 0 && snap.Stage.UsedBytes == 0
 	}, 2*time.Second, 5*time.Millisecond)
 
 	gateWrites.Store(true)
@@ -151,7 +151,7 @@ func TestRawFS_UnmountProgress_GivenStagedChunksAndDirtyInodes_AdvancesMonotonic
 		pStart = fs.UnmountProgress()
 		return pStart.Active
 	}, 2*time.Second, 5*time.Millisecond, "OnUnmount must enter active state")
-	require.Equal(t, uint64(4), pStart.Total)
+	require.Equal(t, uint64(3), pStart.Total)
 	require.Equal(t, uint64(0), pStart.Completed)
 
 	writeGate.allowOne()
@@ -159,40 +159,35 @@ func TestRawFS_UnmountProgress_GivenStagedChunksAndDirtyInodes_AdvancesMonotonic
 	require.Eventually(t, func() bool {
 		return fs.UnmountProgress().Completed == 1
 	}, 2*time.Second, 5*time.Millisecond, "Completed must advance to 1 after first chunk upload")
-	require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 1, Total: 4}, fs.UnmountProgress())
+	require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 1, Total: 3}, fs.UnmountProgress())
 
 	writeGate.allowAll()
 
-	for range 2 {
-		select {
-		case <-fsyncEnteredCh:
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for concurrent Fsync RPCs")
-		}
+	var gotRootIno uint64
+	select {
+	case gotRootIno = <-fsyncDirEnteredCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for single root FsyncDir RPC")
 	}
-	require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 2, Total: 4}, fs.UnmountProgress())
+	require.Equal(t, uint64(17), gotRootIno)
+	require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 2, Total: 3}, fs.UnmountProgress())
 
-	fsyncGate.allowOne()
-
-	require.Eventually(t, func() bool {
-		return fs.UnmountProgress().Completed == 3
-	}, 2*time.Second, 5*time.Millisecond, "Completed must advance to 3 after first Fsync completes")
-	require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 3, Total: 4}, fs.UnmountProgress())
-
-	fsyncGate.allowAll()
+	fsyncDirGate.allowAll()
 	select {
 	case <-unmountDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for OnUnmount to complete")
 	}
 
-	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 4, Total: 4}, fs.UnmountProgress())
+	require.Zero(t, srv.fsyncCalls.Load())
+	require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 3, Total: 3}, fs.UnmountProgress())
 
 	fs.OnUnmount()
-	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 4, Total: 4}, fs.UnmountProgress())
+	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 3, Total: 3}, fs.UnmountProgress())
 }
 
-func TestRawFS_UnmountProgress_GivenOverlappingDirtyAndStagedInode_DeduplicatesUnion(t *testing.T) {
+func TestRawFS_UnmountProgress_GivenPendingStageChunk_CountsSinglePhase2Barrier(t *testing.T) {
 
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	var gateWrites atomic.Bool
@@ -214,7 +209,7 @@ func TestRawFS_UnmountProgress_GivenOverlappingDirtyAndStagedInode_DeduplicatesU
 	fs.Flush(nil, &fuse.FlushIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 	require.Eventually(t, func() bool {
 		snap := fs.Snapshot()
-		return snap.Stage.PendingChunks == 0 && snap.Queues.DirtyInodes == 1
+		return srv.writeCalls.Load() >= 1 && snap.Stage.PendingChunks == 0 && snap.Stage.UsedBytes == 0
 	}, 2*time.Second, 5*time.Millisecond)
 
 	gateWrites.Store(true)
@@ -237,21 +232,23 @@ func TestRawFS_UnmountProgress_GivenOverlappingDirtyAndStagedInode_DeduplicatesU
 
 	writeGate.allowAll()
 	<-doneCh
+	require.Zero(t, srv.fsyncCalls.Load())
+	require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 2, Total: 2}, fs.UnmountProgress())
 }
 
 func TestRawFS_UnmountProgress_GivenSyncAndCleanMounts_ReportsExpectedCounts(t *testing.T) {
-	t.Run("SyncModeTracksDirtyFsyncs", func(t *testing.T) {
+	t.Run("SyncModeTracksSingleRootFsyncDir", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		fsyncEntered := make(chan struct{}, 2)
-		fsyncGate := newStepGate()
-		srv.fsyncHook = func(ctx context.Context, _ *storagev1.FsyncRequest) error {
-			fsyncEntered <- struct{}{}
-			return fsyncGate.wait(ctx)
+		fsyncDirEntered := make(chan struct{}, 2)
+		fsyncDirGate := newStepGate()
+		srv.fsyncDirHook = func(ctx context.Context, _ *storagev1.FsyncDirRequest) error {
+			fsyncDirEntered <- struct{}{}
+			return fsyncDirGate.wait(ctx)
 		}
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
-		t.Cleanup(fsyncGate.allowAll)
+		t.Cleanup(fsyncDirGate.allowAll)
 
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "sync.bin", syscall.O_RDWR, 0o644)
 		mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("sync-payload"))
@@ -263,10 +260,12 @@ func TestRawFS_UnmountProgress_GivenSyncAndCleanMounts_ReportsExpectedCounts(t *
 			close(doneCh)
 		}()
 
-		<-fsyncEntered
+		<-fsyncDirEntered
 		require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 0, Total: 1}, fs.UnmountProgress())
-		fsyncGate.allowAll()
+		fsyncDirGate.allowAll()
 		<-doneCh
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
 	})
 

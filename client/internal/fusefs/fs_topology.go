@@ -244,8 +244,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 			inode = cached.inode
 		}
 	}
-	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending() ||
-		(fs.hasDirtyInodes() && (child == 0 || inode == nil || inode.GetAttr() == nil))
+	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending()
 	if needLookup {
 		cached, st := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
 		if st != fuse.OK {
@@ -272,7 +271,9 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 
 		unlock := fs.inodeLocks.lock(child)
 		defer unlock()
-		if fs.topologySeq.Load() != seq0 && (fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes()) {
+		needRevalidate := fs.topologySeq.Load() != seq0 && (fs.handles.AnyOpen() || fs.stage.HasAnyPending())
+		needOpenChildAttr := fs.handles.IsOpen(child) && (inode == nil || inode.GetAttr() == nil)
+		if needRevalidate || needOpenChildAttr {
 			refreshed, st := fs.getInodeWithContext(barrierCtx, nil, child)
 			switch st {
 			case fuse.OK:
@@ -320,7 +321,6 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 			if hasChildServerIno {
 				fs.stage.DiscardInode(childServerIno)
 				fs.readAhead.InvalidateInode(childServerIno)
-				fs.clearDirty(childServerIno)
 			}
 			if child != 0 {
 				fs.forgetInodeSpecial(child)

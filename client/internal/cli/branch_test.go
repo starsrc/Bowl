@@ -50,14 +50,15 @@ func TestBranch_GivenValidationAndDiskScopeErrors_ReturnsExit2(t *testing.T) {
 }
 
 func TestBranch_GivenLifecycleOps_ListsCreatesResetsAndDeletesWithMountGuard(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "repo", 1<<30, 0)
-	withDiskStorageFake(t, storage)
-	withMissingMountInfo(t)
+	setDiskStorageFake(rt, storage)
+	setMissingMountInfo(t, rt)
 
 	t.Setenv(EnvDiskID, testDiskID1)
 
-	code, createOut, errOut := runCLI("branch", "fork", "feat", "--from", "main", "-m", "start feat", "-q")
+	code, createOut, errOut := runCLIWithRuntime(rt, "branch", "fork", "feat", "--from", "main", "-m", "start feat", "-q")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	require.Equal(t, "feat\n", createOut)
@@ -65,7 +66,7 @@ func TestBranch_GivenLifecycleOps_ListsCreatesResetsAndDeletesWithMountGuard(t *
 	require.Equal(t, "feat", storage.lastForkBranchReq.GetNewBranch())
 	require.Equal(t, "start feat", storage.lastForkBranchReq.GetMessage())
 
-	code, createJSONOut, errOut := runCLI("branch", "create", "dev", "--from", "feat", "--json")
+	code, createJSONOut, errOut := runCLIWithRuntime(rt, "branch", "create", "dev", "--from", "feat", "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var created branchCreateJSON
@@ -73,12 +74,12 @@ func TestBranch_GivenLifecycleOps_ListsCreatesResetsAndDeletesWithMountGuard(t *
 	require.Equal(t, "dev", created.Branch.Name)
 	require.Equal(t, "fork", created.Commit.Kind)
 
-	code, listQuietOut, errOut := runCLI("branch", "ls", "-q")
+	code, listQuietOut, errOut := runCLIWithRuntime(rt, "branch", "ls", "-q")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	require.Equal(t, "dev\nfeat\nmain\n", listQuietOut)
 
-	code, listJSONOut, errOut := runCLI("branch", "list", "--json")
+	code, listJSONOut, errOut := runCLIWithRuntime(rt, "branch", "list", "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var listed branchListJSON
@@ -86,18 +87,18 @@ func TestBranch_GivenLifecycleOps_ListsCreatesResetsAndDeletesWithMountGuard(t *
 	require.Equal(t, testDiskID1, listed.DiskID)
 	require.Len(t, listed.Branches, 3)
 
-	withMountInfoContent(t, "100 30 0:50 / /mnt/feat rw - fuse.bowl bowl:"+testDiskID1+"@feat rw\n")
-	code, _, errOut = runCLI("branch", "delete", "feat", "-y")
+	setMountInfoContent(t, rt, "100 30 0:50 / /mnt/feat rw - fuse.bowl bowl:"+testDiskID1+"@feat rw\n")
+	code, _, errOut = runCLIWithRuntime(rt, "branch", "delete", "feat", "-y")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "bowl umount /mnt/feat")
 	require.Zero(t, storage.deleteBranchCalls)
 
-	code, _, errOut = runCLI("branch", "reset", "feat", "--to", "1", "-y")
+	code, _, errOut = runCLIWithRuntime(rt, "branch", "reset", "feat", "--to", "1", "-y")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "bowl umount /mnt/feat")
 	require.Zero(t, storage.resetBranchCalls)
 
-	code, resetOut, errOut := runCLI("branch", "reset", "dev", "--to", "1", "-y", "--json")
+	code, resetOut, errOut := runCLIWithRuntime(rt, "branch", "reset", "dev", "--to", "1", "-y", "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var resetRes branchJSON
@@ -105,13 +106,13 @@ func TestBranch_GivenLifecycleOps_ListsCreatesResetsAndDeletesWithMountGuard(t *
 	require.Equal(t, "dev", resetRes.Name)
 	require.Equal(t, uint64(1), resetRes.HeadCommitID)
 
-	withDiskStdin(t, strings.NewReader("n\n"))
-	code, _, errOut = runCLI("branch", "rm", "dev")
+	setDiskStdin(rt, strings.NewReader("n\n"))
+	code, _, errOut = runCLIWithRuntime(rt, "branch", "rm", "dev")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "Operation canceled")
 	require.Zero(t, storage.deleteBranchCalls)
 
-	code, delOut, errOut := runCLI("branch", "rm", "dev", "-y", "--json")
+	code, delOut, errOut := runCLIWithRuntime(rt, "branch", "rm", "dev", "-y", "--json")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	var delRes branchDeleteJSON
@@ -121,12 +122,13 @@ func TestBranch_GivenLifecycleOps_ListsCreatesResetsAndDeletesWithMountGuard(t *
 }
 
 func TestBranchMerge_GivenSuccessDirtyAndConflict_HandlesQuietJSONAndDiagnostics(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "merge-disk", 1<<30, 0)
 	storage.seedBranch(testDiskID1, "feat", 2, 0)
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
-	code, qOut, errOut := runCLI(
+	code, qOut, errOut := runCLIWithRuntime(rt,
 		"branch", "merge", "feat",
 		"--into", "main",
 		"--strategy", "ours",
@@ -155,7 +157,7 @@ func TestBranchMerge_GivenSuccessDirtyAndConflict_HandlesQuietJSONAndDiagnostics
 	dirtyErr.AddDetail(dirtyDetail)
 	storage.forcedErr["MergeBranch"] = dirtyErr
 
-	code, _, errOut = runCLI("branch", "merge", "feat", "--into", "main", "-d", testDiskID1)
+	code, _, errOut = runCLIWithRuntime(rt, "branch", "merge", "feat", "--into", "main", "-d", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "EDIRTY")
 	require.Contains(t, errOut, "bowl commit create")
@@ -186,7 +188,7 @@ func TestBranchMerge_GivenSuccessDirtyAndConflict_HandlesQuietJSONAndDiagnostics
 	conflictErr.AddDetail(reportDetail)
 	storage.forcedErr["MergeBranch"] = conflictErr
 
-	code, out, errOut := runCLI("branch", "merge", "feat", "--into", "main", "-d", testDiskID1)
+	code, out, errOut := runCLIWithRuntime(rt, "branch", "merge", "feat", "--into", "main", "-d", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "ECONFLICT")
@@ -194,7 +196,7 @@ func TestBranchMerge_GivenSuccessDirtyAndConflict_HandlesQuietJSONAndDiagnostics
 	require.Contains(t, errOut, "/conflict.txt")
 	require.Contains(t, errOut, "bowl diff -d "+testDiskID1+" main..feat --conflicts-only")
 
-	code, jsonOut, errOut := runCLI("branch", "merge", "feat", "--into", "main", "-d", testDiskID1, "--json")
+	code, jsonOut, errOut := runCLIWithRuntime(rt, "branch", "merge", "feat", "--into", "main", "-d", testDiskID1, "--json")
 	require.Equal(t, 1, code)
 	require.Empty(t, errOut)
 	var mergeRes branchMergeJSON
@@ -208,29 +210,30 @@ func TestBranchMerge_GivenSuccessDirtyAndConflict_HandlesQuietJSONAndDiagnostics
 
 func TestMount_GivenBranchFlag_CallsMountBranchAndPersistsBranchInMountMeta(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
-	withMissingMountInfo(t)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
+	setMissingMountInfo(t, rt)
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
+	setTempMountMetaDirs(rt, metaDir)
 	mp := t.TempDir()
 	stageDir := t.TempDir()
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "branch-mount", 1<<30, 0)
 	storage.seedBranch(testDiskID1, "dev", 1, 0)
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	var gotMeta mountMeta
 	var gotMetaOK bool
 	var gotCfg fusefs.Config
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, _ string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, _ string, ready func()) error {
 		gotCfg = *cfg
 		ready()
-		gotMeta, gotMetaOK = findMountMeta(mp)
+		gotMeta, gotMetaOK = rt.findMountMeta(mp)
 		return nil
-	})
+	}
 
-	code, _, errOut := runCLI(
+	code, _, errOut := runCLIWithRuntime(rt,
 		"--endpoint", "http://127.0.0.1:9000",
 		"mount", testDiskID1, mp,
 		"--branch", "dev",

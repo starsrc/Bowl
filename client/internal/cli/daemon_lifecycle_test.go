@@ -196,18 +196,19 @@ func reserveLoopbackTCPAddr(t *testing.T) string {
 
 func TestRunMount_TeardownOrder_GivenFixedAdminAddrAndStagedMode_ClosesAdminAndStageBeforeRemovingMeta(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
 	mp := t.TempDir()
 	stageDir := t.TempDir()
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	fixedAddr := reserveLoopbackTCPAddr(t)
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "teardown-order-disk", 1<<30, 0)
 	storage.mountLeaseTTL = 30
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	var (
 		stageInstDir           string
@@ -220,11 +221,11 @@ func TestRunMount_TeardownOrder_GivenFixedAdminAddrAndStagedMode_ClosesAdminAndS
 	)
 
 	storage.onUnmountBranch = func(_ *storagev1.UnmountBranchRequest) {
-		_, metaExistsAtUnmount = findMountMeta(mp)
+		_, metaExistsAtUnmount = rt.findMountMeta(mp)
 		readyStatusAtUnmount, _ = fetchReadyzStatusAndBody(t, fixedAddr)
 	}
 
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, _ string, ready func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, _ string, ready func()) error {
 		require.NotNil(t, cfg.StageSession)
 		stageInstDir = cfg.StageSession.InstanceDir()
 		ready()
@@ -233,7 +234,7 @@ func TestRunMount_TeardownOrder_GivenFixedAdminAddrAndStagedMode_ClosesAdminAndS
 		_, statErr := os.Stat(stageInstDir)
 		require.NoError(t, statErr)
 		return nil
-	})
+	}
 
 	logWriter := &hookLogWriter{
 		onWrite: func(chunk string) {
@@ -241,7 +242,7 @@ func TestRunMount_TeardownOrder_GivenFixedAdminAddrAndStagedMode_ClosesAdminAndS
 				return
 			}
 			sawUnmountComplete = true
-			_, metaExistsAtComplete = findMountMeta(mp)
+			_, metaExistsAtComplete = rt.findMountMeta(mp)
 			rebindLn, err := net.Listen("tcp", fixedAddr)
 			rebindErrAtComplete = err
 			if rebindLn != nil {
@@ -264,7 +265,7 @@ func TestRunMount_TeardownOrder_GivenFixedAdminAddrAndStagedMode_ClosesAdminAndS
 		StageDir:  stageDir,
 	}
 
-	err := runMount(context.Background(), opts, baseCfg, mp, logWriter, nil)
+	err := rt.runMount(context.Background(), opts, baseCfg, mp, logWriter, nil)
 
 	require.NoError(t, err)
 	require.True(t, metaExistsAtUnmount, "scene=during_unmount_rpc want=meta_exists got=false")
@@ -329,9 +330,10 @@ func readPipeWithDeadline(t *testing.T, r, w *os.File, timeout time.Duration) st
 }
 
 func TestMount_DaemonWorker_GivenPreWorkerValidationErrors_WritesERRToReadinessPipeAndExits1Silent(t *testing.T) {
+	baseRT := defaultCLIRuntime()
 	validMP := t.TempDir()
 	missingMP := filepath.Join(t.TempDir(), "missing-mp")
-	mountedMP := canonicalMountpoint(t.TempDir())
+	mountedMP := baseRT.canonicalMountpoint(t.TempDir())
 
 	cases := []struct {
 		name       string
@@ -369,19 +371,20 @@ func TestMount_DaemonWorker_GivenPreWorkerValidationErrors_WritesERRToReadinessP
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			rt := defaultCLIRuntime()
 			if tc.mountInfo != "" {
-				withMountInfoContent(t, tc.mountInfo)
+				setMountInfoContent(t, rt, tc.mountInfo)
 			} else {
-				withMissingMountInfo(t)
+				setMissingMountInfo(t, rt)
 			}
 
 			r, w, err := os.Pipe()
 			require.NoError(t, err)
 			defer func() { _ = r.Close() }()
-			withReadinessPipeStub(t, w)
+			setReadinessPipeStub(rt, w)
 			t.Setenv("BOWL_DAEMON_WORKER", "1")
 
-			code, out, errOut := runCLI(tc.args...)
+			code, out, errOut := runCLIWithRuntime(rt, tc.args...)
 
 			require.Equal(t, 1, code, "scene=%s want=1 got=%d stderr=%s", tc.name, code, errOut)
 			require.Empty(t, out, "scene=%s want=empty_stdout", tc.name)
@@ -397,33 +400,32 @@ func TestMount_DaemonWorker_GivenPreWorkerValidationErrors_WritesERRToReadinessP
 
 func TestMount_DaemonWorker_GivenValidOptions_DoesNotTouchReadinessPipeBeforeRunDaemonWorker(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
-	withStageDirTmpfsStub(t, false)
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
+	setStageDirTmpfsStub(rt, false)
 
 	mp := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "happy-worker.log")
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "happy-worker-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	stubMountServeFUSE(t, mp)
-	withRedirectDaemonStdioStub(t, func(*os.File) {})
-	withChdirStub(t, func(string) error { return nil })
+	setMountStorageFake(rt, storage)
+	stubMountServeFUSE(t, rt, mp)
+	rt.redirectDaemonStdio = func(*os.File) {}
+	rt.chdirFn = func(string) error { return nil }
 
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	defer func() { _ = r.Close() }()
 
 	var pipeOpenCalls atomic.Int32
-	prev := readinessPipeFile
-	readinessPipeFile = func() *os.File {
+	rt.readinessPipeFile = func() *os.File {
 		pipeOpenCalls.Add(1)
 		return w
 	}
-	t.Cleanup(func() { readinessPipeFile = prev })
 	t.Setenv("BOWL_DAEMON_WORKER", "1")
 
-	code, out, errOut := runCLI("mount", testDiskID1, mp, "--mode=ro", "--log-file", logPath, "--admin-addr", "off")
+	code, out, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "--mode=ro", "--log-file", logPath, "--admin-addr", "off")
 
 	require.Equal(t, 0, code, "scene=worker_happy want=0 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
@@ -514,11 +516,10 @@ func TestDaemonHelperProcess(_ *testing.T) {
 	}
 }
 
-func withDaemonHelperCommand(t *testing.T, mode, readyFile, markerFile string) *atomic.Pointer[exec.Cmd] {
+func setDaemonHelperCommand(t *testing.T, rt *cliRuntime, mode, readyFile, markerFile string) *atomic.Pointer[exec.Cmd] {
 	t.Helper()
 	var captured atomic.Pointer[exec.Cmd]
-	prev := daemonCommandFn
-	daemonCommandFn = func(_ []string, w *os.File) (*exec.Cmd, error) {
+	rt.daemonCommandFn = func(_ []string, w *os.File) (*exec.Cmd, error) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonHelperProcess$")
 		cmd.ExtraFiles = []*os.File{w}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -532,7 +533,6 @@ func withDaemonHelperCommand(t *testing.T, mode, readyFile, markerFile string) *
 		return cmd, nil
 	}
 	t.Cleanup(func() {
-		daemonCommandFn = prev
 		if cmd := captured.Load(); cmd != nil && cmd.Process != nil && cmd.ProcessState == nil {
 			_ = cmd.Process.Signal(syscall.SIGKILL)
 			_ = cmd.Wait()
@@ -541,31 +541,21 @@ func withDaemonHelperCommand(t *testing.T, mode, readyFile, markerFile string) *
 	return &captured
 }
 
-func withDaemonTimeouts(t *testing.T, handshake, killGrace time.Duration) {
-	t.Helper()
-	prevHandshake := daemonHandshakeTimeout
-	prevKillGrace := daemonKillGrace
-	daemonHandshakeTimeout = handshake
-	daemonKillGrace = killGrace
-	t.Cleanup(func() {
-		daemonHandshakeTimeout = prevHandshake
-		daemonKillGrace = prevKillGrace
-	})
+func setDaemonTimeouts(rt *cliRuntime, handshake, killGrace time.Duration) {
+	rt.daemonHandshakeTimeout = handshake
+	rt.daemonKillGrace = killGrace
 }
 
-func withDaemonSignalStub(t *testing.T) (chan os.Signal, *atomic.Bool) {
-	t.Helper()
+func setDaemonSignalStub(rt *cliRuntime) (chan os.Signal, *atomic.Bool) {
 	sigCh := make(chan os.Signal, 2)
 	var stopped atomic.Bool
-	prev := daemonSignalNotify
-	daemonSignalNotify = func() (<-chan os.Signal, func()) {
+	rt.daemonSignalNotify = func() (<-chan os.Signal, func()) {
 		return sigCh, func() { stopped.Store(true) }
 	}
-	t.Cleanup(func() { daemonSignalNotify = prev })
 	return sigCh, &stopped
 }
 
-func runSpawnWithDeadline(t *testing.T, deadline time.Duration) (code int, stderr string) {
+func runSpawnWithDeadline(t *testing.T, rt *cliRuntime, deadline time.Duration) (code int, stderr string) {
 	t.Helper()
 	type spawnRes struct {
 		code   int
@@ -574,7 +564,7 @@ func runSpawnWithDeadline(t *testing.T, deadline time.Duration) (code int, stder
 	ch := make(chan spawnRes, 1)
 	go func() {
 		var buf strings.Builder
-		c := spawnDaemonProcess([]string{testDiskID1, "/mnt/test"}, &buf)
+		c := rt.spawnDaemonProcess([]string{testDiskID1, "/mnt/test"}, &buf)
 		ch <- spawnRes{code: c, stderr: buf.String()}
 	}()
 	select {
@@ -587,14 +577,16 @@ func runSpawnWithDeadline(t *testing.T, deadline time.Duration) (code int, stder
 }
 
 func TestDaemonDefaults_FixedHandshakeTimeoutAndKillGrace(t *testing.T) {
-	require.Equal(t, 30*time.Second, daemonHandshakeTimeout)
-	require.Equal(t, 5*time.Second, daemonKillGrace)
+	rt := defaultCLIRuntime()
+	require.Equal(t, 30*time.Second, rt.daemonHandshakeTimeout)
+	require.Equal(t, 5*time.Second, rt.daemonKillGrace)
 }
 
 func TestTerminateAndReapDaemonChild_GivenNonPositiveGrace_UsesDaemonKillGraceFallback(t *testing.T) {
+	rt := defaultCLIRuntime()
 	readyFile := filepath.Join(t.TempDir(), "ready")
 	markerFile := filepath.Join(t.TempDir(), "marker")
-	withDaemonTimeouts(t, 10*time.Second, 150*time.Millisecond)
+	setDaemonTimeouts(rt, 10*time.Second, 150*time.Millisecond)
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonHelperProcess$")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -618,7 +610,7 @@ func TestTerminateAndReapDaemonChild_GivenNonPositiveGrace_UsesDaemonKillGraceFa
 	}, 2*time.Second, 10*time.Millisecond)
 
 	start := time.Now()
-	terminateAndReapDaemonChild(cmd, 0)
+	rt.terminateAndReapDaemonChild(cmd, 0)
 	elapsed := time.Since(start)
 
 	require.Less(t, elapsed, 1*time.Second, "scene=grace_fallback_uses_daemonKillGrace want<1s got=%s", elapsed)
@@ -643,9 +635,10 @@ func (c *cancelOnCloseReadCloser) Close() error {
 
 func TestRunMount_GivenCancelDuringHandshake_AbortsRPCAndCleansStageAndAdminListener(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	mp := t.TempDir()
 	stageDir := t.TempDir()
@@ -660,13 +653,13 @@ func TestRunMount_GivenCancelDuringHandshake_AbortsRPCAndCleansStageAndAdminList
 		<-rpcCtx.Done()
 		return rpcCtx.Err()
 	}
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
 	var serveCalled atomic.Bool
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
 		serveCalled.Store(true)
 		return nil
-	})
+	}
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -681,7 +674,7 @@ func TestRunMount_GivenCancelDuringHandshake_AbortsRPCAndCleansStageAndAdminList
 		StageDir:  stageDir,
 	}
 
-	err := runMount(ctx, opts, baseCfg, mp, &syncBuffer{}, nil)
+	err := rt.runMount(ctx, opts, baseCfg, mp, &syncBuffer{}, nil)
 
 	require.Error(t, err)
 	require.False(t, serveCalled.Load(), "scene=cancel_during_handshake want=serveFUSE_not_called got=true")
@@ -693,9 +686,10 @@ func TestRunMount_GivenCancelDuringHandshake_AbortsRPCAndCleansStageAndAdminList
 
 func TestRunMount_GivenCancelImmediatelyAfterHandshake_ReleasesLeaseAndSkipsServeFUSE(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withStageDirTmpfsStub(t, false)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
+	rt := defaultCLIRuntime()
+	setStageDirTmpfsStub(rt, false)
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
 
 	mp := t.TempDir()
 	stageDir := t.TempDir()
@@ -705,10 +699,10 @@ func TestRunMount_GivenCancelImmediatelyAfterHandshake_ReleasesLeaseAndSkipsServ
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "cancel-after-handshake", 1<<30, 0)
 	storage.mountLeaseTTL = 30
-	withMountStorageFake(t, storage)
+	setMountStorageFake(rt, storage)
 
-	baseTransport := mountHTTPClient.Transport
-	mountHTTPClient = &http.Client{
+	baseTransport := rt.mountHTTPClient.Transport
+	rt.mountHTTPClient = &http.Client{
 		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			resp, err := baseTransport.RoundTrip(req)
 			if err != nil {
@@ -725,10 +719,10 @@ func TestRunMount_GivenCancelImmediatelyAfterHandshake_ReleasesLeaseAndSkipsServ
 	}
 
 	var serveCalled atomic.Bool
-	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
+	rt.serveFUSE = func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
 		serveCalled.Store(true)
 		return nil
-	})
+	}
 
 	opts := &mountOptions{
 		endpoint:  "http://127.0.0.1:9000",
@@ -743,7 +737,7 @@ func TestRunMount_GivenCancelImmediatelyAfterHandshake_ReleasesLeaseAndSkipsServ
 		StageDir:  stageDir,
 	}
 
-	err := runMount(ctx, opts, baseCfg, mp, &syncBuffer{}, nil)
+	err := rt.runMount(ctx, opts, baseCfg, mp, &syncBuffer{}, nil)
 
 	require.ErrorIs(t, err, context.Canceled)
 	require.False(t, serveCalled.Load(), "scene=cancel_after_handshake want=serveFUSE_not_called got=true")
@@ -797,33 +791,20 @@ func (s *fakeFUSEMountServer) forceRelease() {
 	s.unmountOnce.Do(func() { close(s.unmountCh) })
 }
 
-func withNewFUSEServerStub(t *testing.T, fn func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error)) {
-	t.Helper()
-	prev := newFUSEServer
-	newFUSEServer = fn
-	t.Cleanup(func() { newFUSEServer = prev })
-}
-
-func withMountSignalContextStub(t *testing.T, fn func(context.Context) (context.Context, context.CancelFunc)) {
-	t.Helper()
-	prev := mountSignalContext
-	mountSignalContext = fn
-	t.Cleanup(func() { mountSignalContext = prev })
-}
-
 func TestDefaultServeFUSE_GivenCancelAcrossStartupWindows_UnmountsWithoutCallingReady(t *testing.T) {
 	t.Run("CanceledBeforeNewServer", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
 		var created atomic.Bool
-		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+		rt.newFUSEServer = func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
 			created.Store(true)
 			return newFakeFUSEMountServer(nil), nil
-		})
+		}
 
 		var readyCalled atomic.Bool
-		err := defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/pre-cancel", func() {
+		err := rt.defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/pre-cancel", func() {
 			readyCalled.Store(true)
 		})
 
@@ -833,6 +814,7 @@ func TestDefaultServeFUSE_GivenCancelAcrossStartupWindows_UnmountsWithoutCalling
 	})
 
 	t.Run("CanceledDuringWaitMount", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		ctx, cancel := context.WithCancel(context.Background())
 		waitEntered := make(chan struct{})
 		fakeSrv := newFakeFUSEMountServer(func(unmountCh <-chan struct{}) error {
@@ -840,14 +822,14 @@ func TestDefaultServeFUSE_GivenCancelAcrossStartupWindows_UnmountsWithoutCalling
 			<-unmountCh
 			return errors.New("unmounted during wait")
 		})
-		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+		rt.newFUSEServer = func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
 			return fakeSrv, nil
-		})
+		}
 
 		var readyCalled atomic.Bool
 		errCh := make(chan error, 1)
 		go func() {
-			errCh <- defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/wait-cancel", func() {
+			errCh <- rt.defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/wait-cancel", func() {
 				readyCalled.Store(true)
 			})
 		}()
@@ -872,19 +854,20 @@ func TestDefaultServeFUSE_GivenCancelAcrossStartupWindows_UnmountsWithoutCalling
 	})
 
 	t.Run("CanceledAfterWaitMountBeforeReady", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		ctx, cancel := context.WithCancel(context.Background())
 		fakeSrv := newFakeFUSEMountServer(func(<-chan struct{}) error {
 			cancel()
 			return nil
 		})
-		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+		rt.newFUSEServer = func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
 			return fakeSrv, nil
-		})
+		}
 
 		var readyCalled atomic.Bool
 		errCh := make(chan error, 1)
 		go func() {
-			errCh <- defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/post-wait-cancel", func() {
+			errCh <- rt.defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/post-wait-cancel", func() {
 				readyCalled.Store(true)
 			})
 		}()
@@ -909,6 +892,7 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 	})
 
 	t.Run("CanceledDuringWaitMount", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -920,14 +904,14 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 			return errors.New("unmounted during wait")
 		})
 		fakeSrv.busyUnmountLeft.Store(2)
-		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+		rt.newFUSEServer = func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
 			return fakeSrv, nil
-		})
+		}
 
 		var readyCalled atomic.Bool
 		errCh := make(chan error, 1)
 		go func() {
-			errCh <- defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-wait-cancel", func() {
+			errCh <- rt.defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-wait-cancel", func() {
 				readyCalled.Store(true)
 			})
 		}()
@@ -959,6 +943,7 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 	})
 
 	t.Run("WaitMountError", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -966,14 +951,14 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 			return errors.New("mount wait failed")
 		})
 		fakeSrv.busyUnmountLeft.Store(2)
-		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+		rt.newFUSEServer = func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
 			return fakeSrv, nil
-		})
+		}
 
 		var readyCalled atomic.Bool
 		errCh := make(chan error, 1)
 		go func() {
-			errCh <- defaultServeFUSE(context.Background(), nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-wait-err", func() {
+			errCh <- rt.defaultServeFUSE(context.Background(), nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-wait-err", func() {
 				readyCalled.Store(true)
 			})
 		}()
@@ -998,6 +983,7 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 	})
 
 	t.Run("CanceledAfterWaitMountBeforeReady", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -1007,14 +993,14 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 			return nil
 		})
 		fakeSrv.busyUnmountLeft.Store(2)
-		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+		rt.newFUSEServer = func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
 			return fakeSrv, nil
-		})
+		}
 
 		var readyCalled atomic.Bool
 		errCh := make(chan error, 1)
 		go func() {
-			errCh <- defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-post-wait", func() {
+			errCh <- rt.defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-post-wait", func() {
 				readyCalled.Store(true)
 			})
 		}()
@@ -1039,9 +1025,10 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 
 	t.Run("RunMountCleansLeaseAdminAndStageAfterEBUSYRetry", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 
 		mp := t.TempDir()
 		stageDir := t.TempDir()
@@ -1050,7 +1037,7 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "ebusy-startup-disk", 1<<30, 0)
 		storage.mountLeaseTTL = 30
-		withMountStorageFake(t, storage)
+		setMountStorageFake(rt, storage)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		waitEntered := make(chan struct{})
@@ -1060,9 +1047,9 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 			return errors.New("unmounted after retry")
 		})
 		fakeSrv.busyUnmountLeft.Store(2)
-		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+		rt.newFUSEServer = func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
 			return fakeSrv, nil
-		})
+		}
 
 		var logBuf syncBuffer
 		var onReadyCalled atomic.Bool
@@ -1081,7 +1068,7 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 
 		errCh := make(chan error, 1)
 		go func() {
-			errCh <- runMount(ctx, opts, baseCfg, mp, &logBuf, func() {
+			errCh <- rt.runMount(ctx, opts, baseCfg, mp, &logBuf, func() {
 				onReadyCalled.Store(true)
 			})
 		}()
@@ -1120,9 +1107,10 @@ func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *te
 func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeHandshakeAndCleansUp(t *testing.T) {
 	t.Run("Foreground", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
 
 		mp := t.TempDir()
 		stageDir := t.TempDir()
@@ -1130,20 +1118,20 @@ func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeH
 		var sigInstallCalls atomic.Int32
 		var sigStopCalls atomic.Int32
 		sigCtx, sigCancel := context.WithCancel(context.Background())
-		withMountSignalContextStub(t, func(_ context.Context) (context.Context, context.CancelFunc) {
+		rt.mountSignalContext = func(_ context.Context) (context.Context, context.CancelFunc) {
 			sigInstallCalls.Add(1)
 			ctx, cancel := context.WithCancel(sigCtx)
 			return ctx, func() {
 				sigStopCalls.Add(1)
 				cancel()
 			}
-		})
+		}
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "fg-early-sig", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		baseTransport := mountHTTPClient.Transport
-		mountHTTPClient = &http.Client{
+		setMountStorageFake(rt, storage)
+		baseTransport := rt.mountHTTPClient.Transport
+		rt.mountHTTPClient = &http.Client{
 			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				resp, err := baseTransport.RoundTrip(req)
 				if err != nil {
@@ -1157,12 +1145,12 @@ func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeH
 		}
 
 		var serveCalled atomic.Bool
-		withServeFUSEStub(t, func(context.Context, *fusefs.RawFS, *fusefs.Config, string, func()) error {
+		rt.serveFUSE = func(context.Context, *fusefs.RawFS, *fusefs.Config, string, func()) error {
 			serveCalled.Store(true)
 			return nil
-		})
+		}
 
-		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
+		code, _, errOut := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
 
 		require.Equal(t, 1, code, "scene=fg_early_sig stderr=%s", errOut)
 		require.Equal(t, int32(1), sigInstallCalls.Load(), "scene=fg_early_sig want=mountSignalContext_installed")
@@ -1174,11 +1162,12 @@ func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeH
 
 	t.Run("DaemonWorker", func(t *testing.T) {
 		withCleanOTelAndLogger(t)
-		withStageDirTmpfsStub(t, false)
-		withMissingMountInfo(t)
-		withTempMountMetaDirs(t, t.TempDir())
-		withRedirectDaemonStdioStub(t, func(*os.File) {})
-		withChdirStub(t, func(string) error { return nil })
+		rt := defaultCLIRuntime()
+		setStageDirTmpfsStub(rt, false)
+		setMissingMountInfo(t, rt)
+		setTempMountMetaDirs(rt, t.TempDir())
+		rt.redirectDaemonStdio = func(*os.File) {}
+		rt.chdirFn = func(string) error { return nil }
 
 		mp := t.TempDir()
 		stageDir := t.TempDir()
@@ -1187,20 +1176,20 @@ func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeH
 		var sigInstallCalls atomic.Int32
 		var sigStopCalls atomic.Int32
 		sigCtx, sigCancel := context.WithCancel(context.Background())
-		withMountSignalContextStub(t, func(_ context.Context) (context.Context, context.CancelFunc) {
+		rt.mountSignalContext = func(_ context.Context) (context.Context, context.CancelFunc) {
 			sigInstallCalls.Add(1)
 			ctx, cancel := context.WithCancel(sigCtx)
 			return ctx, func() {
 				sigStopCalls.Add(1)
 				cancel()
 			}
-		})
+		}
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "worker-early-sig", 1<<30, 0)
-		withMountStorageFake(t, storage)
-		baseTransport := mountHTTPClient.Transport
-		mountHTTPClient = &http.Client{
+		setMountStorageFake(rt, storage)
+		baseTransport := rt.mountHTTPClient.Transport
+		rt.mountHTTPClient = &http.Client{
 			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				resp, err := baseTransport.RoundTrip(req)
 				if err != nil {
@@ -1214,18 +1203,18 @@ func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeH
 		}
 
 		var serveCalled atomic.Bool
-		withServeFUSEStub(t, func(context.Context, *fusefs.RawFS, *fusefs.Config, string, func()) error {
+		rt.serveFUSE = func(context.Context, *fusefs.RawFS, *fusefs.Config, string, func()) error {
 			serveCalled.Store(true)
 			return nil
-		})
+		}
 
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
 		defer func() { _ = r.Close() }()
-		withReadinessPipeStub(t, w)
+		setReadinessPipeStub(rt, w)
 		t.Setenv("BOWL_DAEMON_WORKER", "1")
 
-		code, _, _ := runCLI("mount", testDiskID1, mp, "--stage-dir", stageDir, "--log-file", logPath, "--admin-addr", "off")
+		code, _, _ := runCLIWithRuntime(rt, "mount", testDiskID1, mp, "--stage-dir", stageDir, "--log-file", logPath, "--admin-addr", "off")
 
 		require.Equal(t, 1, code)
 		require.Equal(t, int32(1), sigInstallCalls.Load(), "scene=worker_early_sig want=mountSignalContext_installed")
@@ -1335,11 +1324,12 @@ func TestDefaultDaemonCommand_GivenArgsAndEnv_PreservesArgsVerbatimAndSetsDaemon
 
 func TestMount_DaemonWorker_GivenBowlTokenInEnv_IgnoresTokenAndSendsEmptyAuthorization(t *testing.T) {
 	withCleanOTelAndLogger(t)
-	withMissingMountInfo(t)
-	withTempMountMetaDirs(t, t.TempDir())
-	withStageDirTmpfsStub(t, false)
-	withRedirectDaemonStdioStub(t, func(*os.File) {})
-	withChdirStub(t, func(string) error { return nil })
+	rt := defaultCLIRuntime()
+	setMissingMountInfo(t, rt)
+	setTempMountMetaDirs(rt, t.TempDir())
+	setStageDirTmpfsStub(rt, false)
+	rt.redirectDaemonStdio = func(*os.File) {}
+	rt.chdirFn = func(string) error { return nil }
 
 	mp := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "token-worker.log")
@@ -1356,12 +1346,12 @@ func TestMount_DaemonWorker_GivenBowlTokenInEnv_IgnoresTokenAndSendsEmptyAuthori
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "token-worker-disk", 1<<30, 0)
-	withMountStorageFake(t, storage)
-	stubMountServeFUSE(t, mp)
-	withReadinessPipeStub(t, pw)
+	setMountStorageFake(rt, storage)
+	stubMountServeFUSE(t, rt, mp)
+	setReadinessPipeStub(rt, pw)
 	t.Setenv("BOWL_DAEMON_WORKER", "1")
 
-	code, _, errOut := runCLI(cmd.Args[1:]...)
+	code, _, errOut := runCLIWithRuntime(rt, cmd.Args[1:]...)
 
 	require.Equal(t, 0, code, "scene=worker_ignores_bowl_token_env stderr=%s", errOut)
 	require.Empty(t, storage.lastAuth)
@@ -1369,11 +1359,12 @@ func TestMount_DaemonWorker_GivenBowlTokenInEnv_IgnoresTokenAndSendsEmptyAuthori
 }
 
 func TestSpawnDaemonProcess_GivenOK_ReturnsZeroAndLeavesDetachedChildRunning(t *testing.T) {
-	withDaemonTimeouts(t, 5*time.Second, time.Second)
-	_, stopped := withDaemonSignalStub(t)
-	captured := withDaemonHelperCommand(t, "ok", "", "")
+	rt := defaultCLIRuntime()
+	setDaemonTimeouts(rt, 5*time.Second, time.Second)
+	_, stopped := setDaemonSignalStub(rt)
+	captured := setDaemonHelperCommand(t, rt, "ok", "", "")
 
-	code, errOut := runSpawnWithDeadline(t, 3*time.Second)
+	code, errOut := runSpawnWithDeadline(t, rt, 3*time.Second)
 
 	require.Equal(t, 0, code, "scene=spawn_ok want=0 got=%d stderr=%s", code, errOut)
 	require.Empty(t, errOut)
@@ -1406,11 +1397,12 @@ func TestSpawnDaemonProcess_GivenErrAndEOF_ReapsChildAndReturnsOne(t *testing.T)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			withDaemonTimeouts(t, 5*time.Second, time.Second)
-			_, stopped := withDaemonSignalStub(t)
-			captured := withDaemonHelperCommand(t, tc.mode, "", "")
+			rt := defaultCLIRuntime()
+			setDaemonTimeouts(rt, 5*time.Second, time.Second)
+			_, stopped := setDaemonSignalStub(rt)
+			captured := setDaemonHelperCommand(t, rt, tc.mode, "", "")
 
-			code, errOut := runSpawnWithDeadline(t, 3*time.Second)
+			code, errOut := runSpawnWithDeadline(t, rt, 3*time.Second)
 
 			require.Equal(t, 1, code, "scene=%s want=1 got=%d stderr=%s", tc.name, code, errOut)
 			require.Contains(t, errOut, tc.wantSubstr, "scene=%s", tc.name)
@@ -1425,11 +1417,12 @@ func TestSpawnDaemonProcess_GivenErrAndEOF_ReapsChildAndReturnsOne(t *testing.T)
 }
 
 func TestSpawnDaemonProcess_GivenHandshakeTimeout_TerminatesAndReapsChild(t *testing.T) {
-	withDaemonTimeouts(t, 200*time.Millisecond, 200*time.Millisecond)
-	_, stopped := withDaemonSignalStub(t)
-	captured := withDaemonHelperCommand(t, "hang_sleep", "", "")
+	rt := defaultCLIRuntime()
+	setDaemonTimeouts(rt, 200*time.Millisecond, 200*time.Millisecond)
+	_, stopped := setDaemonSignalStub(rt)
+	captured := setDaemonHelperCommand(t, rt, "hang_sleep", "", "")
 
-	code, errOut := runSpawnWithDeadline(t, 2*time.Second)
+	code, errOut := runSpawnWithDeadline(t, rt, 2*time.Second)
 
 	require.Equal(t, 1, code, "scene=handshake_timeout want=1 got=%d stderr=%s", code, errOut)
 	require.Contains(t, errOut, "timed out", "scene=handshake_timeout stderr=%s", errOut)
@@ -1442,11 +1435,12 @@ func TestSpawnDaemonProcess_GivenHandshakeTimeout_TerminatesAndReapsChild(t *tes
 }
 
 func TestSpawnDaemonProcess_GivenParentSignalAndChildExitsOnSIGTERM_TerminatesGracefullyAndReapsChild(t *testing.T) {
+	rt := defaultCLIRuntime()
 	readyFile := filepath.Join(t.TempDir(), "ready")
 	markerFile := filepath.Join(t.TempDir(), "marker")
-	withDaemonTimeouts(t, 10*time.Second, 5*time.Second)
-	sigCh, stopped := withDaemonSignalStub(t)
-	captured := withDaemonHelperCommand(t, "hang_term", readyFile, markerFile)
+	setDaemonTimeouts(rt, 10*time.Second, 5*time.Second)
+	sigCh, stopped := setDaemonSignalStub(rt)
+	captured := setDaemonHelperCommand(t, rt, "hang_term", readyFile, markerFile)
 
 	go func() {
 		for range 200 {
@@ -1459,7 +1453,7 @@ func TestSpawnDaemonProcess_GivenParentSignalAndChildExitsOnSIGTERM_TerminatesGr
 	}()
 
 	start := time.Now()
-	code, errOut := runSpawnWithDeadline(t, 3*time.Second)
+	code, errOut := runSpawnWithDeadline(t, rt, 3*time.Second)
 	elapsed := time.Since(start)
 
 	require.Equal(t, 1, code, "scene=parent_sig_graceful want=1 got=%d stderr=%s", code, errOut)
@@ -1478,11 +1472,12 @@ func TestSpawnDaemonProcess_GivenParentSignalAndChildExitsOnSIGTERM_TerminatesGr
 }
 
 func TestSpawnDaemonProcess_GivenParentSignalAndChildIgnoresSIGTERM_EscalatesToSIGKILLAndReapsChild(t *testing.T) {
+	rt := defaultCLIRuntime()
 	readyFile := filepath.Join(t.TempDir(), "ready")
 	markerFile := filepath.Join(t.TempDir(), "marker")
-	withDaemonTimeouts(t, 10*time.Second, 100*time.Millisecond)
-	sigCh, stopped := withDaemonSignalStub(t)
-	captured := withDaemonHelperCommand(t, "hang_ignore_term", readyFile, markerFile)
+	setDaemonTimeouts(rt, 10*time.Second, 100*time.Millisecond)
+	sigCh, stopped := setDaemonSignalStub(rt)
+	captured := setDaemonHelperCommand(t, rt, "hang_ignore_term", readyFile, markerFile)
 
 	go func() {
 		for range 200 {
@@ -1494,7 +1489,7 @@ func TestSpawnDaemonProcess_GivenParentSignalAndChildIgnoresSIGTERM_EscalatesToS
 		}
 	}()
 
-	code, errOut := runSpawnWithDeadline(t, 3*time.Second)
+	code, errOut := runSpawnWithDeadline(t, rt, 3*time.Second)
 
 	require.Equal(t, 1, code, "scene=sigkill_escalation want=1 got=%d stderr=%s", code, errOut)
 	require.Contains(t, errOut, "interrupted", "scene=sigkill_escalation stderr=%s", errOut)

@@ -274,7 +274,6 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 			return 0, fs.ToStatus(err)
 		}
 		fs.markMetaDirty()
-		fs.markDirty(ino)
 		fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
 		fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), DefaultWriteAttrTimeoutSeconds)
 		fs.caps.markAbsent(input.NodeId)
@@ -323,7 +322,6 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 		fs.caps.markAbsent(input.NodeId)
 		n := resp.Msg.GetSize()
 		fs.markMetaDirty()
-		fs.markDirty(ino)
 		fs.metrics.addStagePassthrough(uint64(n))
 		fs.stage.ObserveServerInode(ino, resp.Msg.GetInode(), false)
 		totalWritten += n

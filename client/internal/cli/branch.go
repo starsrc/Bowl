@@ -44,7 +44,7 @@ type branchDeleteJSON struct {
 	Deleted bool   `json:"deleted"`
 }
 
-func newBranchCmd(ports diskPorts, rootOpts *rootOptions) *cobra.Command {
+func newBranchCmd(rt *cliRuntime, rootOpts *rootOptions) *cobra.Command {
 	specs := []*diskSubcommandSpec{
 		&branchListSpec,
 		&branchCreateSpec,
@@ -52,7 +52,7 @@ func newBranchCmd(ports diskPorts, rootOpts *rootOptions) *cobra.Command {
 		&branchResetSpec,
 		&branchMergeSpec,
 	}
-	return newGroupCmd("branch", "Manage branches on a virtual disk", specs, ports, rootOpts)
+	return newGroupCmd(rt, "branch", "Manage branches on a virtual disk", specs, rootOpts)
 }
 
 func toBranchJSON(b *storagev1.Branch) branchJSON {
@@ -136,7 +136,7 @@ func (a *branchListAdapter) spanAttrs() []attribute.KeyValue {
 	return []attribute.KeyValue{attribute.String("bowl.disk_id", a.diskID)}
 }
 
-func (a *branchListAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *branchListAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
 	return nil
 }
 
@@ -226,7 +226,7 @@ func (a *branchCreateAdapter) spanAttrs() []attribute.KeyValue {
 	}
 }
 
-func (a *branchCreateAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *branchCreateAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
 	return nil
 }
 
@@ -310,8 +310,8 @@ func (a *branchDeleteAdapter) spanAttrs() []attribute.KeyValue {
 	}
 }
 
-func (a *branchDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIError {
-	info, err := ports.findBranchMountpoint(a.diskID, a.branch)
+func (a *branchDeleteAdapter) preRPC(rt *cliRuntime, stderr io.Writer) *diskCLIError {
+	info, err := rt.findBranchMountpoint(a.diskID, a.branch)
 	if err != nil {
 		return &diskCLIError{
 			exitCode: 1,
@@ -326,7 +326,7 @@ func (a *branchDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLI
 	}
 	if !a.yes {
 		prompt := fmt.Sprintf("Delete branch %q on disk %s? This action is irreversible [y/N]: ", a.branch, a.diskID)
-		return confirmInteractive(ports.stdin, stderr, prompt)
+		return confirmInteractive(rt.diskStdin, stderr, prompt)
 	}
 	return nil
 }
@@ -410,8 +410,8 @@ func (a *branchResetAdapter) spanAttrs() []attribute.KeyValue {
 	}
 }
 
-func (a *branchResetAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIError {
-	info, err := ports.findBranchMountpoint(a.diskID, a.branch)
+func (a *branchResetAdapter) preRPC(rt *cliRuntime, stderr io.Writer) *diskCLIError {
+	info, err := rt.findBranchMountpoint(a.diskID, a.branch)
 	if err != nil {
 		return &diskCLIError{
 			exitCode: 1,
@@ -426,7 +426,7 @@ func (a *branchResetAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIE
 	}
 	if !a.yes {
 		prompt := fmt.Sprintf("Reset branch %q on disk %s to commit %d and discard uncommitted work? [y/N]: ", a.branch, a.diskID, a.targetCommitID)
-		return confirmInteractive(ports.stdin, stderr, prompt)
+		return confirmInteractive(rt.diskStdin, stderr, prompt)
 	}
 	return nil
 }

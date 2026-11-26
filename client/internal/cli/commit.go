@@ -51,14 +51,14 @@ type commitPruneJSON struct {
 	ReclaimedCount uint32 `json:"reclaimed_count"`
 }
 
-func newCommitCmd(ports diskPorts, rootOpts *rootOptions) *cobra.Command {
+func newCommitCmd(rt *cliRuntime, rootOpts *rootOptions) *cobra.Command {
 	specs := []*diskSubcommandSpec{
 		&commitCreateSpec,
 		&commitListSpec,
 		&commitDeleteSpec,
 		&commitPruneSpec,
 	}
-	return newGroupCmd("commit", "Manage commits on a virtual disk", specs, ports, rootOpts)
+	return newGroupCmd(rt, "commit", "Manage commits on a virtual disk", specs, rootOpts)
 }
 
 func commitKindLabel(kind storagev1.CommitKind) string {
@@ -206,7 +206,7 @@ func (a *commitCreateAdapter) spanAttrs() []attribute.KeyValue {
 	}
 }
 
-func (a *commitCreateAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *commitCreateAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
 	return nil
 }
 
@@ -302,7 +302,7 @@ func (a *commitListAdapter) spanAttrs() []attribute.KeyValue {
 	return []attribute.KeyValue{attribute.String("bowl.disk_id", a.diskID)}
 }
 
-func (a *commitListAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *commitListAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
 	return nil
 }
 
@@ -390,12 +390,12 @@ func (a *commitDeleteAdapter) spanAttrs() []attribute.KeyValue {
 	}
 }
 
-func (a *commitDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIError {
+func (a *commitDeleteAdapter) preRPC(rt *cliRuntime, stderr io.Writer) *diskCLIError {
 	if a.yes {
 		return nil
 	}
 	prompt := fmt.Sprintf("Delete commit %d on disk %s? This action is irreversible [y/N]: ", a.commitID, a.diskID)
-	return confirmInteractive(ports.stdin, stderr, prompt)
+	return confirmInteractive(rt.diskStdin, stderr, prompt)
 }
 
 func (a *commitDeleteAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
@@ -461,12 +461,12 @@ func (a *commitPruneAdapter) spanAttrs() []attribute.KeyValue {
 	return []attribute.KeyValue{attribute.String("bowl.disk_id", a.diskID)}
 }
 
-func (a *commitPruneAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIError {
+func (a *commitPruneAdapter) preRPC(rt *cliRuntime, stderr io.Writer) *diskCLIError {
 	if a.yes {
 		return nil
 	}
 	prompt := fmt.Sprintf("Prune all unreachable commits on disk %s? [y/N]: ", a.diskID)
-	return confirmInteractive(ports.stdin, stderr, prompt)
+	return confirmInteractive(rt.diskStdin, stderr, prompt)
 }
 
 func (a *commitPruneAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {

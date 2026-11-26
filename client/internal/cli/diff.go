@@ -94,8 +94,8 @@ type diffResultJSON struct {
 	NextPageToken  string          `json:"next_page_token"`
 }
 
-func newDiffCmd(ports diskPorts, rootOpts *rootOptions) *cobra.Command {
-	return newDiskSubcommand(&diffCmdSpec, ports, rootOpts)
+func newDiffCmd(rt *cliRuntime, rootOpts *rootOptions) *cobra.Command {
+	return newDiskSubcommand(rt, &diffCmdSpec, rootOpts)
 }
 
 var diffCmdSpec = diskSubcommandSpec{
@@ -264,7 +264,7 @@ func (a *diffAdapter) spanAttrs() []attribute.KeyValue {
 	return attrs
 }
 
-func (a *diffAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *diffAdapter) preRPC(_ *cliRuntime, _ io.Writer) *diskCLIError {
 	return nil
 }
 

@@ -10,8 +10,6 @@ import (
 
 const defaultSystemLogDir = "/var/log/bowl"
 
-var openSystemLogFn = openSystemLog
-
 func openSystemLog(diskID string) (*os.File, string, error) {
 	systemPath := filepath.Join(defaultSystemLogDir, fmt.Sprintf("mount-%s.log", diskID))
 	mkdirErr := os.MkdirAll(defaultSystemLogDir, 0o755)
@@ -41,7 +39,7 @@ func isPermissionError(err error) bool {
 	return false
 }
 
-func ResolveLogFile(explicitPath, diskID string) (*os.File, string, error) {
+func (rt *cliRuntime) resolveLogFile(explicitPath, diskID string) (*os.File, string, error) {
 	if explicitPath != "" {
 		dir := filepath.Dir(explicitPath)
 		if dir != "" && dir != "." {
@@ -56,7 +54,7 @@ func ResolveLogFile(explicitPath, diskID string) (*os.File, string, error) {
 		return f, explicitPath, nil
 	}
 
-	f, systemPath, err := openSystemLogFn(diskID)
+	f, systemPath, err := rt.openSystemLogFn(diskID)
 	if err == nil {
 		return f, systemPath, nil
 	}

@@ -59,6 +59,8 @@ type ClientConfig struct {
 	Logger *slog.Logger
 
 	Metrics *Metrics
+
+	Sharded bool
 }
 
 func ResolveEndpoint(endpoint string) (string, error) {
@@ -294,13 +296,24 @@ func newClientWithClock(cfg ClientConfig, clk rpcClock, opts ...connect.ClientOp
 	var ownedCloser idleConnCloser
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		tr, trErr := newShardedRoundTripper(endpoint, cfg.TLSConfig)
-		if trErr != nil {
-			return nil, trErr
+		var rt http.RoundTripper
+		if cfg.Sharded {
+			tr, trErr := newShardedRoundTripper(endpoint, cfg.TLSConfig)
+			if trErr != nil {
+				return nil, trErr
+			}
+			rt = tr
+			ownedCloser = tr
+		} else {
+			tr, trErr := newHTTPTransport(endpoint, cfg.TLSConfig, HTTP2ControlMaxReceiveBufferPerConnection)
+			if trErr != nil {
+				return nil, trErr
+			}
+			rt = tr
+			ownedCloser = tr
 		}
-		ownedCloser = tr
 		httpClient = &http.Client{
-			Transport: tr,
+			Transport: rt,
 		}
 	}
 

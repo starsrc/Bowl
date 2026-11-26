@@ -15,12 +15,6 @@ import (
 
 const maxMountInfoSymlinkHops = 40
 
-var (
-	mountInfoPath     = "/proc/self/mountinfo"
-	mountInfoLstat    = os.Lstat
-	mountInfoReadlink = os.Readlink
-)
-
 type DiskMountInfo struct {
 	Mountpoint string
 	Mounted    bool
@@ -114,11 +108,10 @@ func parseMountPointsFromReader(r io.Reader) ([]mountPoint, error) {
 	return points, nil
 }
 
-func readMountPoints() ([]mountPoint, error) {
-	file, err := os.Open(mountInfoPath)
+func (rt *cliRuntime) readMountPoints() ([]mountPoint, error) {
+	file, err := os.Open(rt.mountInfoPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read mountinfo file: %w", err)
@@ -138,7 +131,7 @@ func parseBowlMountSource(source string) (diskID, branch string, ok bool) {
 	return rest, "", true
 }
 
-func findDiskMountpoint(points []mountPoint, diskID string) DiskMountInfo {
+func findDiskMountpointInPoints(points []mountPoint, diskID string) DiskMountInfo {
 	targetDiskID := strings.TrimSpace(diskID)
 	var found DiskMountInfo
 	for _, point := range points {
@@ -160,7 +153,7 @@ func findDiskMountpoint(points []mountPoint, diskID string) DiskMountInfo {
 	return found
 }
 
-func findBranchMountpoint(points []mountPoint, diskID, branch string) DiskMountInfo {
+func (rt *cliRuntime) findBranchMountpointInPoints(points []mountPoint, diskID, branch string) DiskMountInfo {
 	targetDiskID := strings.TrimSpace(diskID)
 	var found DiskMountInfo
 	for _, point := range points {
@@ -173,7 +166,7 @@ func findBranchMountpoint(points []mountPoint, diskID, branch string) DiskMountI
 				continue
 			}
 		} else {
-			meta, hasMeta := findMountMeta(point.path)
+			meta, hasMeta := rt.findMountMeta(point.path)
 			if !hasMeta || meta.Branch != branch {
 				continue
 			}
@@ -200,22 +193,20 @@ func splitAbsComponents(cleanAbs string) []string {
 	return strings.Split(trimmed, string(filepath.Separator))
 }
 
-func walkMountPointComponents(candidate string, hops *int, mountMap map[string]mountPoint) (nextCandidate string, matchedPoint mountPoint, mounted, expanded bool) {
+func (rt *cliRuntime) walkMountPointComponents(candidate string, hops *int, mountMap map[string]mountPoint) (nextCandidate string, matchedPoint mountPoint, mounted, expanded bool) {
 	parts := splitAbsComponents(candidate)
 	curPrefix := string(filepath.Separator)
 	for idx, comp := range parts {
-
 		checkCandidate := filepath.Clean(filepath.Join(append([]string{curPrefix}, parts[idx:]...)...))
 		if mp, ok := mountMap[checkCandidate]; ok {
 			return checkCandidate, mp, true, false
 		}
 		nextPath := filepath.Join(curPrefix, comp)
 		if _, isMount := mountMap[nextPath]; isMount {
-
 			curPrefix = nextPath
 			continue
 		}
-		info, lerr := mountInfoLstat(nextPath)
+		info, lerr := rt.mountInfoLstat(nextPath)
 		if lerr != nil || info == nil {
 			return candidate, mountPoint{}, false, false
 		}
@@ -227,7 +218,7 @@ func walkMountPointComponents(candidate string, hops *int, mountMap map[string]m
 		if *hops > maxMountInfoSymlinkHops {
 			return candidate, mountPoint{}, false, false
 		}
-		target, rerr := mountInfoReadlink(nextPath)
+		target, rerr := rt.mountInfoReadlink(nextPath)
 		if rerr != nil {
 			return candidate, mountPoint{}, false, false
 		}
@@ -240,14 +231,14 @@ func walkMountPointComponents(candidate string, hops *int, mountMap map[string]m
 	return candidate, mountPoint{}, false, false
 }
 
-func resolveMountPoint(path string) (resolvedPath string, point mountPoint, mounted bool, err error) {
+func (rt *cliRuntime) resolveMountPointEntry(path string) (resolvedPath string, point mountPoint, mounted bool, err error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return "", mountPoint{}, false, fmt.Errorf("resolve absolute path: %w", err)
 	}
 	cleanAbs := filepath.Clean(absPath)
 
-	points, err := readMountPoints()
+	points, err := rt.readMountPoints()
 	if err != nil {
 		return "", mountPoint{}, false, err
 	}
@@ -265,7 +256,7 @@ func resolveMountPoint(path string) (resolvedPath string, point mountPoint, moun
 		if mp, ok := mountMap[candidate]; ok {
 			return candidate, mp, true, nil
 		}
-		nextCandidate, mp, matched, expanded := walkMountPointComponents(candidate, &hops, mountMap)
+		nextCandidate, mp, matched, expanded := rt.walkMountPointComponents(candidate, &hops, mountMap)
 		if matched {
 			return nextCandidate, mp, true, nil
 		}
@@ -276,8 +267,8 @@ func resolveMountPoint(path string) (resolvedPath string, point mountPoint, moun
 	}
 }
 
-func ResolveMountPointInfo(path string) (MountPointInfo, bool, error) {
-	_, mp, mounted, err := resolveMountPoint(path)
+func (rt *cliRuntime) resolveMountPointInfo(path string) (MountPointInfo, bool, error) {
+	_, mp, mounted, err := rt.resolveMountPointEntry(path)
 	if err != nil || !mounted {
 		return MountPointInfo{}, false, err
 	}
@@ -289,28 +280,28 @@ func ResolveMountPointInfo(path string) (MountPointInfo, bool, error) {
 	}, true, nil
 }
 
-func ResolveMountPoint(path string) (resolvedPath string, mounted bool, err error) {
-	resolvedPath, _, mounted, err = resolveMountPoint(path)
+func (rt *cliRuntime) resolveMountPoint(path string) (resolvedPath string, mounted bool, err error) {
+	resolvedPath, _, mounted, err = rt.resolveMountPointEntry(path)
 	return resolvedPath, mounted, err
 }
 
-func IsMountPoint(path string) (bool, error) {
-	_, mounted, err := ResolveMountPoint(path)
+func (rt *cliRuntime) isMountPoint(path string) (bool, error) {
+	_, mounted, err := rt.resolveMountPoint(path)
 	return mounted, err
 }
 
-func FindDiskMountpoint(diskID string) (DiskMountInfo, error) {
-	points, err := readMountPoints()
+func (rt *cliRuntime) findDiskMountpoint(diskID string) (DiskMountInfo, error) {
+	points, err := rt.readMountPoints()
 	if err != nil {
 		return DiskMountInfo{}, err
 	}
-	return findDiskMountpoint(points, diskID), nil
+	return findDiskMountpointInPoints(points, diskID), nil
 }
 
-func FindBranchMountpoint(diskID, branch string) (DiskMountInfo, error) {
-	points, err := readMountPoints()
+func (rt *cliRuntime) findBranchMountpoint(diskID, branch string) (DiskMountInfo, error) {
+	points, err := rt.readMountPoints()
 	if err != nil {
 		return DiskMountInfo{}, err
 	}
-	return findBranchMountpoint(points, diskID, branch), nil
+	return rt.findBranchMountpointInPoints(points, diskID, branch), nil
 }

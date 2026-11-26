@@ -8,12 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
-
-	"github.com/starsrc/bowl/client/internal/fusefs"
 )
 
 func writeMultiFilesAndExpectedHashes(t *testing.T, dir string, count, size int) map[string][sha256.Size]byte {
@@ -50,25 +47,22 @@ func fallocateAndClose(t *testing.T, path string, mode uint32, off, length int64
 	require.NoError(t, unix.Close(fd))
 }
 
-func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly_PersistsAcrossRemount(t *testing.T) {
+func TestUnmountDurability_SingleFsyncDir_MultiFileTruncateFallocateAndMetaOnly_PersistsAcrossRemount(t *testing.T) {
 	client := newTestStorageClient(t)
 	realEndpoint := getStorageEndpoint()
 
-	t.Run("MultiFileConcurrentFsyncOverMetaTransport", func(t *testing.T) {
+	t.Run("MultiFileUnmountPersistsViaSingleFsyncDir", func(t *testing.T) {
 
 		proxy := startControllableStorageProxy(t, realEndpoint)
 		diskID := createTestDisk(t, client).GetDiskId()
 		mp, _, _, stopMount := startMountedDaemon(t, proxy.Endpoint, diskID, "--stage-size", "16MiB")
 
 		wantHashes := writeMultiFilesAndExpectedHashes(t, mp, 80, 4096)
-		proxy.SetFsyncDelay(25 * time.Millisecond)
 
 		stopMount()
 
-		require.Equal(t, int64(80), proxy.FsyncCalls())
-		require.Zero(t, proxy.FsyncDirCalls())
-		require.Greater(t, proxy.FsyncMaxInflight(), int64(1))
-		require.LessOrEqual(t, proxy.FsyncMaxInflight(), int64(fusefs.DefaultUnmountFsyncConcurrency))
+		require.Zero(t, proxy.FsyncCalls())
+		require.Equal(t, int64(1), proxy.FsyncDirCalls())
 
 		mpRO, stopRO := mountWithCleanup(t, realEndpoint, diskID, "--mode", "ro", "--direct-io")
 		defer stopRO()
@@ -104,8 +98,8 @@ func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly
 		fallocateAndClose(t, filepath.Join(mpMut, growPath), 0, 4096, 16_384)
 		stopMut()
 
-		require.Equal(t, int64(4), proxy.FsyncCalls())
-		require.Zero(t, proxy.FsyncDirCalls())
+		require.Zero(t, proxy.FsyncCalls())
+		require.Equal(t, int64(1), proxy.FsyncDirCalls())
 
 		mpRO, stopRO := mountWithCleanup(t, realEndpoint, diskID, "--mode", "ro", "--direct-io")
 		defer stopRO()

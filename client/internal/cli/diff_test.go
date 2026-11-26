@@ -26,9 +26,10 @@ func TestDiff_GivenInvalidOrAmbiguousModes_ReturnsExit2(t *testing.T) {
 }
 
 func TestDiff_GivenBranchCommitAndWorkModesWithPatch_ReadsExpectedNodes(t *testing.T) {
+	rt := defaultCLIRuntime()
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "diff-disk", 1<<30, 0)
-	withDiskStorageFake(t, storage)
+	setDiskStorageFake(rt, storage)
 
 	t.Run("Mode1BranchDiffWithPatch", func(t *testing.T) {
 		storage.seedCommitFile(testDiskID1, 10, 100, 0o100644, []byte("hello\nold\n"))
@@ -48,7 +49,7 @@ func TestDiff_GivenBranchCommitAndWorkModesWithPatch_ReadsExpectedNodes(t *testi
 			},
 		}
 
-		code, out, errOut := runCLI("diff", "main..feat", "-p", "--prefix", "/notes", "--conflicts-only", "--limit", "10", "-d", testDiskID1)
+		code, out, errOut := runCLIWithRuntime(rt, "diff", "main..feat", "-p", "--prefix", "/notes", "--conflicts-only", "--limit", "10", "-d", testDiskID1)
 		require.Equal(t, 0, code, errOut)
 		require.Empty(t, errOut)
 		require.Equal(t, "feat", storage.lastDiffBranchesReq.GetSourceBranch())
@@ -80,7 +81,7 @@ func TestDiff_GivenBranchCommitAndWorkModesWithPatch_ReadsExpectedNodes(t *testi
 			},
 		}
 
-		code, jsonOut, errOut := runCLI("diff", "--commits", "3..7", "-p", "--json", "-d", testDiskID1)
+		code, jsonOut, errOut := runCLIWithRuntime(rt, "diff", "--commits", "3..7", "-p", "--json", "-d", testDiskID1)
 		require.Equal(t, 0, code, errOut)
 		require.Empty(t, errOut)
 		require.Equal(t, uint64(3), storage.lastDiffCommitsReq.GetBaseCommitId())
@@ -118,7 +119,7 @@ func TestDiff_GivenBranchCommitAndWorkModesWithPatch_ReadsExpectedNodes(t *testi
 		}
 
 		t.Setenv(EnvDiskID, testDiskID1)
-		code, out, errOut := runCLI("diff", "--work", "--branch", "dev", "-p")
+		code, out, errOut := runCLIWithRuntime(rt, "diff", "--work", "--branch", "dev", "-p")
 		require.Equal(t, 0, code, errOut)
 		require.Empty(t, errOut)
 		require.Equal(t, "dev", storage.lastDiffWorkReq.GetBranch())

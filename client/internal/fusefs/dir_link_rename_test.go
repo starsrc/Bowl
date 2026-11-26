@@ -329,7 +329,8 @@ func TestRmdir与Unlink_拦截非空目录删除并区分在途孤儿与硬链�
 
 		require.Zero(t, srv.reclaimOrphanCalls.Load())
 		fs.OnUnmount()
-		require.Equal(t, fsyncBeforeUnlink+1, srv.fsyncCalls.Load(), "多硬链接仅删除其一时必须保留脏位并在 OnUnmount 同步")
+		require.Equal(t, fsyncBeforeUnlink, srv.fsyncCalls.Load(), "OnUnmount 不得发送逐 inode Fsync")
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "多硬链接仅删除其一时 OnUnmount 必须执行单次根 FsyncDir")
 	})
 }
 

@@ -17,9 +17,7 @@ import (
 
 const statsRequestTimeout = 5 * time.Second
 
-var statsHTTPClient = http.DefaultClient
-
-func newStatsCmd(rootOpts *rootOptions) *cobra.Command {
+func newStatsCmd(rt *cliRuntime, rootOpts *rootOptions) *cobra.Command {
 	var (
 		raw       bool
 		adminAddr string
@@ -30,7 +28,7 @@ func newStatsCmd(rootOpts *rootOptions) *cobra.Command {
 		Short: "Show FUSE statistics for a local mount process",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, posArgs []string) error {
-			return runStats(cmd, posArgs, rootOpts.jsonOut, raw, adminAddr)
+			return rt.runStats(cmd, posArgs, rootOpts.jsonOut, raw, adminAddr)
 		},
 	}
 
@@ -40,7 +38,7 @@ func newStatsCmd(rootOpts *rootOptions) *cobra.Command {
 	return cmd
 }
 
-func runStats(cmd *cobra.Command, posArgs []string, asJSON, raw bool, adminAddr string) error {
+func (rt *cliRuntime) runStats(cmd *cobra.Command, posArgs []string, asJSON, raw bool, adminAddr string) error {
 	if asJSON && raw {
 		return usageExitErr(errors.New("--json and --raw cannot be used together"), false)
 	}
@@ -52,7 +50,7 @@ func runStats(cmd *cobra.Command, posArgs []string, asJSON, raw bool, adminAddr 
 		}
 		adminAddr = normalized
 	} else {
-		addr, err := discoverAdminAddr(posArgs)
+		addr, err := rt.discoverAdminAddr(posArgs)
 		if err != nil {
 			return runtimeExitErr(err)
 		}
@@ -67,7 +65,7 @@ func runStats(cmd *cobra.Command, posArgs []string, asJSON, raw bool, adminAddr 
 		format = "stats"
 	}
 
-	body, err := fetchStats(adminAddr, format)
+	body, err := rt.fetchStats(adminAddr, format)
 	if err != nil {
 		return runtimeExitErr(err)
 	}
@@ -92,20 +90,20 @@ func normalizeStatsAdminAddr(raw string) (string, error) {
 	return loopbackAdminAddr(trimmed), nil
 }
 
-func discoverAdminAddr(posArgs []string) (string, error) {
+func (rt *cliRuntime) discoverAdminAddr(posArgs []string) (string, error) {
 	var meta mountMeta
 	if len(posArgs) == 1 {
 		absMP, err := filepath.Abs(posArgs[0])
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve mountpoint path: %w", err)
 		}
-		m, ok := findMountMeta(absMP)
+		m, ok := rt.findMountMeta(absMP)
 		if !ok {
 			return "", fmt.Errorf("no active bowl mount process found for mountpoint %q", filepath.Clean(absMP))
 		}
 		meta = m
 	} else {
-		metas := listMountMetas()
+		metas := rt.listMountMetas()
 		switch len(metas) {
 		case 0:
 			return "", errors.New("no active bowl mounts found")
@@ -125,7 +123,7 @@ func discoverAdminAddr(posArgs []string) (string, error) {
 	return loopbackAdminAddr(meta.AdminAddr), nil
 }
 
-func fetchStats(addr, format string) ([]byte, error) {
+func (rt *cliRuntime) fetchStats(addr, format string) ([]byte, error) {
 	addr = loopbackAdminAddr(addr)
 	u := url.URL{Scheme: "http", Host: addr, Path: "/debug/stats", RawQuery: url.Values{"format": {format}}.Encode()}
 	ctx, cancel := context.WithTimeout(context.Background(), statsRequestTimeout)
@@ -134,7 +132,7 @@ func fetchStats(addr, format string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to build stats request: %w", err)
 	}
-	resp, err := statsHTTPClient.Do(req)
+	resp, err := rt.statsHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query admin endpoint %s: %w", addr, err)
 	}

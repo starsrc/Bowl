@@ -21,33 +21,24 @@ import (
 	"github.com/starsrc/bowl/client/internal/fusefs"
 )
 
-func withUmountToolStub(t *testing.T, availableTool, toolPath string, out []byte, err error) (calledName *string, calledArgs *[]string) {
-	t.Helper()
-	prevLook := lookPath
-	prevRun := runCommand
-
+func setUmountToolStub(rt *cliRuntime, availableTool, toolPath string, out []byte, err error) (calledName *string, calledArgs *[]string) {
 	var name string
 	var args []string
-	lookPath = func(file string) (string, error) {
+	rt.lookPath = func(file string) (string, error) {
 		if file == availableTool {
 			return toolPath, nil
 		}
 		return "", errors.New("not found")
 	}
-	runCommand = func(bin string, a ...string) ([]byte, error) {
+	rt.runCommand = func(bin string, a ...string) ([]byte, error) {
 		name = bin
 		args = append([]string(nil), a...)
 		return out, err
 	}
-	t.Cleanup(func() {
-		lookPath = prevLook
-		runCommand = prevRun
-	})
 	return &name, &args
 }
 
 func TestUmount_GivenHelpAndInvalidArgs_ReturnsExpectedExitCodes(t *testing.T) {
-
 	code, out, errOut := runCLI("umount", "-h")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -86,12 +77,12 @@ func TestUmount_GivenHelpAndInvalidArgs_ReturnsExpectedExitCodes(t *testing.T) {
 }
 
 func TestUmount_GivenForceFalseFlag_PreservesNormalUnmountAndDrain(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := "/mnt/bowl-force-false"
-	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+	setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	binName, binArgs := setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 
-	code, out, errOut := runCLI("umount", "--force=false", mp)
+	code, out, errOut := runCLIWithRuntime(rt, "umount", "--force=false", mp)
 
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
@@ -101,29 +92,29 @@ func TestUmount_GivenForceFalseFlag_PreservesNormalUnmountAndDrain(t *testing.T)
 }
 
 func TestUmount_GivenUnmountedOrUnreadableMountInfo_ReturnsExit1(t *testing.T) {
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt, "100 30 0:50 / /mnt/other rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	withMountInfoContent(t, "100 30 0:50 / /mnt/other rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-
-	code, out, errOut := runCLI("umount", "/mnt/not-mounted")
+	code, out, errOut := runCLIWithRuntime(rt, "umount", "/mnt/not-mounted")
 
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "is not a mounted filesystem")
 
-	withUnreadableMountInfo(t)
-	code, out, errOut = runCLI("umount", "/mnt/not-mounted")
+	setUnreadableMountInfo(t, rt)
+	code, out, errOut = runCLIWithRuntime(rt, "umount", "/mnt/not-mounted")
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "failed to check mountpoint status")
 }
 
 func TestUmount_GivenFusermount3Available_ExecutesNormalAndForceArgs(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := "/mnt/bowl-a"
-	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+	setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	binName, binArgs := setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 
-	code, out, errOut := runCLI("umount", mp)
+	code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
@@ -131,7 +122,7 @@ func TestUmount_GivenFusermount3Available_ExecutesNormalAndForceArgs(t *testing.
 	require.Equal(t, "/usr/bin/fusermount3", *binName)
 	require.Equal(t, []string{"-u", mp}, *binArgs)
 
-	code, out, errOut = runCLI("unmount", "-f", mp)
+	code, out, errOut = runCLIWithRuntime(rt, "unmount", "-f", mp)
 
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
@@ -140,73 +131,66 @@ func TestUmount_GivenFusermount3Available_ExecutesNormalAndForceArgs(t *testing.
 }
 
 func TestUmount_GivenFusermountAndUmountFallbacks_SelectsExpectedToolAndFlags(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := "/mnt/bowl-b"
-	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	binName, binArgs := withUmountToolStub(t, "fusermount", "/bin/fusermount", nil, nil)
+	setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	binName, binArgs := setUmountToolStub(rt, "fusermount", "/bin/fusermount", nil, nil)
 
-	code, _, errOut := runCLI("umount", "--force", mp)
+	code, _, errOut := runCLIWithRuntime(rt, "umount", "--force", mp)
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "/bin/fusermount", *binName)
 	require.Equal(t, []string{"-uz", mp}, *binArgs)
 
-	binName, binArgs = withUmountToolStub(t, "umount", "/bin/umount", nil, nil)
+	binName, binArgs = setUmountToolStub(rt, "umount", "/bin/umount", nil, nil)
 
-	code, _, errOut = runCLI("umount", mp)
+	code, _, errOut = runCLIWithRuntime(rt, "umount", mp)
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "/bin/umount", *binName)
 	require.Equal(t, []string{mp}, *binArgs)
 
-	code, _, errOut = runCLI("umount", "-f", mp)
+	code, _, errOut = runCLIWithRuntime(rt, "umount", "-f", mp)
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, []string{"-l", mp}, *binArgs)
 }
 
 func TestUmount_GivenMissingToolOrToolFailure_ReturnsExit1WithErrorMessage(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := "/mnt/bowl-c"
-	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	withUmountToolStub(t, "none", "", nil, nil)
+	setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	setUmountToolStub(rt, "none", "", nil, nil)
 
-	code, _, errOut := runCLI("umount", mp)
+	code, _, errOut := runCLIWithRuntime(rt, "umount", mp)
 
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "no system unmount tool found")
 
-	withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", []byte("device busy"), errors.New("exit status 1"))
+	setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", []byte("device busy"), errors.New("exit status 1"))
 
-	code, _, errOut = runCLI("umount", mp)
+	code, _, errOut = runCLIWithRuntime(rt, "umount", mp)
 
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "unmount failed")
 	require.Contains(t, errOut, "device busy")
 }
 
-func withUmountDrainStub(t *testing.T, timeout, poll time.Duration) {
-	t.Helper()
-	prevTimeout := umountDrainTimeout
-	prevPoll := umountDrainPollInterval
-	umountDrainTimeout = timeout
-	umountDrainPollInterval = poll
-	t.Cleanup(func() {
-		umountDrainTimeout = prevTimeout
-		umountDrainPollInterval = prevPoll
-	})
+func setUmountDrainStub(rt *cliRuntime, timeout, poll time.Duration) {
+	rt.umountDrainTimeout = timeout
+	rt.umountDrainPollInterval = poll
 }
 
 func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := "/mnt/bowl-drain"
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
-	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	withUmountDrainStub(t, 500*time.Millisecond, 5*time.Millisecond)
+	setTempMountMetaDirs(rt, metaDir)
+	setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	setUmountDrainStub(rt, 500*time.Millisecond, 5*time.Millisecond)
 
-	metaPath, err := writeMountMeta(&mountMeta{
+	metaPath, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: mp,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -215,27 +199,21 @@ func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t
 	})
 	require.NoError(t, err)
 
-	prevLook := lookPath
-	prevRun := runCommand
-	lookPath = func(file string) (string, error) {
+	rt.lookPath = func(file string) (string, error) {
 		if file == "fusermount3" {
 			return "/usr/bin/fusermount3", nil
 		}
 		return "", errors.New("not found")
 	}
-	runCommand = func(_ string, _ ...string) ([]byte, error) {
+	rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 		go func() {
 			time.Sleep(30 * time.Millisecond)
 			_ = os.Remove(metaPath)
 		}()
 		return nil, nil
 	}
-	t.Cleanup(func() {
-		lookPath = prevLook
-		runCommand = prevRun
-	})
 
-	code, out, errOut := runCLI("umount", mp)
+	code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
@@ -243,7 +221,7 @@ func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t
 	_, statErr := os.Stat(metaPath)
 	require.True(t, os.IsNotExist(statErr), "bowl umount 返回 0 时 mountMeta 必须已消失")
 
-	metaPath2, err := writeMountMeta(&mountMeta{
+	metaPath2, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: mp,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -251,28 +229,28 @@ func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t
 		StartedAt:  time.Now().UTC(),
 	})
 	require.NoError(t, err)
-	withUmountDrainStub(t, 30*time.Millisecond, 5*time.Millisecond)
-	runCommand = func(_ string, _ ...string) ([]byte, error) {
+	setUmountDrainStub(rt, 30*time.Millisecond, 5*time.Millisecond)
+	rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 		return nil, nil
 	}
 
-	code, _, errOut = runCLI("umount", mp)
+	code, _, errOut = runCLIWithRuntime(rt, "umount", mp)
 
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "timed out")
 
 	_, statErr2 := os.Stat(metaPath2)
 	require.NoError(t, statErr2)
-	code, out, errOut = runCLI("umount", "-f", mp)
+	code, out, errOut = runCLIWithRuntime(rt, "umount", "-f", mp)
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
 }
 
 func TestUmount_GivenDefaultDrainTimingAndNoTimeoutFlag_Enforces5mBudgetAndRejectsTimeoutFlag(t *testing.T) {
-
-	require.Equal(t, 5*time.Minute, umountDrainTimeout)
-	require.Equal(t, 20*time.Millisecond, umountDrainPollInterval)
+	rt := defaultCLIRuntime()
+	require.Equal(t, 5*time.Minute, rt.umountDrainTimeout)
+	require.Equal(t, 20*time.Millisecond, rt.umountDrainPollInterval)
 
 	code, out, errOut := runCLI("umount", "--timeout", "1s", "/mnt/a")
 	require.Equal(t, 2, code)
@@ -280,43 +258,22 @@ func TestUmount_GivenDefaultDrainTimingAndNoTimeoutFlag_Enforces5mBudgetAndRejec
 	require.Contains(t, errOut, "unknown flag: --timeout")
 }
 
-func withUmountProgressSeams(
-	t *testing.T,
+func setUmountProgressSeams(
+	rt *cliRuntime,
 	isTTY bool,
 	client *http.Client,
 	drainTimeout, drainPoll, progressPoll, nonTTYInterval, fallbackGrace, fallbackInterval time.Duration,
 ) {
-	t.Helper()
-	prevTTY := umountIsTerminal
-	prevClient := umountHTTPClient
-	prevTimeout := umountDrainTimeout
-	prevDrainPoll := umountDrainPollInterval
-	prevProgPoll := umountProgressPollInterval
-	prevNonTTY := umountNonTTYLogInterval
-	prevGrace := umountFallbackGracePeriod
-	prevFallback := umountFallbackLogInterval
-
-	umountIsTerminal = func(io.Writer) bool { return isTTY }
+	rt.umountIsTerminal = func(io.Writer) bool { return isTTY }
 	if client != nil {
-		umountHTTPClient = client
+		rt.umountHTTPClient = client
 	}
-	umountDrainTimeout = drainTimeout
-	umountDrainPollInterval = drainPoll
-	umountProgressPollInterval = progressPoll
-	umountNonTTYLogInterval = nonTTYInterval
-	umountFallbackGracePeriod = fallbackGrace
-	umountFallbackLogInterval = fallbackInterval
-
-	t.Cleanup(func() {
-		umountIsTerminal = prevTTY
-		umountHTTPClient = prevClient
-		umountDrainTimeout = prevTimeout
-		umountDrainPollInterval = prevDrainPoll
-		umountProgressPollInterval = prevProgPoll
-		umountNonTTYLogInterval = prevNonTTY
-		umountFallbackGracePeriod = prevGrace
-		umountFallbackLogInterval = prevFallback
-	})
+	rt.umountDrainTimeout = drainTimeout
+	rt.umountDrainPollInterval = drainPoll
+	rt.umountProgressPollInterval = progressPoll
+	rt.umountNonTTYLogInterval = nonTTYInterval
+	rt.umountFallbackGracePeriod = fallbackGrace
+	rt.umountFallbackLogInterval = fallbackInterval
 }
 
 func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t *testing.T) {
@@ -326,12 +283,12 @@ func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t
 			name = "TTY"
 		}
 		t.Run(name, func(t *testing.T) {
-
+			rt := defaultCLIRuntime()
 			mp := "/mnt/bowl-zero-progress"
 			dir1 := t.TempDir()
 			dir2 := t.TempDir()
-			withTempMountMetaDirs(t, dir1, dir2)
-			withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+			setTempMountMetaDirs(rt, dir1, dir2)
+			setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
 			staleData, err := json.Marshal(mountMeta{
 				Mountpoint: mp,
@@ -370,8 +327,8 @@ func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t
 					}, nil
 				}),
 			}
-			withUmountProgressSeams(
-				t,
+			setUmountProgressSeams(
+				rt,
 				isTTY,
 				client,
 				500*time.Millisecond,
@@ -382,27 +339,21 @@ func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t
 				40*time.Millisecond,
 			)
 
-			prevLook := lookPath
-			prevRun := runCommand
-			lookPath = func(file string) (string, error) {
+			rt.lookPath = func(file string) (string, error) {
 				if file == "fusermount3" {
 					return "/usr/bin/fusermount3", nil
 				}
 				return "", errors.New("not found")
 			}
-			runCommand = func(_ string, _ ...string) ([]byte, error) {
+			rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 				go func() {
 					time.Sleep(45 * time.Millisecond)
 					_ = os.Remove(liveMetaPath)
 				}()
 				return nil, nil
 			}
-			t.Cleanup(func() {
-				lookPath = prevLook
-				runCommand = prevRun
-			})
 
-			code, out, errOut := runCLI("umount", mp)
+			code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 
 			require.Equal(t, 0, code)
 			require.Empty(t, out)
@@ -421,18 +372,19 @@ func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t
 }
 
 func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Percent(t *testing.T) {
-
-	require.Equal(t, 100*time.Millisecond, umountProgressPollInterval)
-	require.Equal(t, 2*time.Second, umountNonTTYLogInterval)
-	require.Equal(t, 1*time.Second, umountFallbackGracePeriod)
-	require.Equal(t, 5*time.Second, umountFallbackLogInterval)
+	defaults := defaultCLIRuntime()
+	require.Equal(t, 100*time.Millisecond, defaults.umountProgressPollInterval)
+	require.Equal(t, 2*time.Second, defaults.umountNonTTYLogInterval)
+	require.Equal(t, 1*time.Second, defaults.umountFallbackGracePeriod)
+	require.Equal(t, 5*time.Second, defaults.umountFallbackLogInterval)
 
 	t.Run("PrintsFirstIntervalAndFinal100Percent", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-nontty-progress"
-		withTempMountMetaDirs(t, t.TempDir())
-		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setTempMountMetaDirs(rt, t.TempDir())
+		setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-		metaPath, err := writeMountMeta(&mountMeta{
+		metaPath, err := rt.writeMountMeta(&mountMeta{
 			Mountpoint: mp,
 			PID:        os.Getpid(),
 			DiskID:     testDiskID1,
@@ -477,8 +429,8 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 				}, nil
 			}),
 		}
-		withUmountProgressSeams(
-			t,
+		setUmountProgressSeams(
+			rt,
 			false,
 			client,
 			2*time.Second,
@@ -489,15 +441,13 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 			time.Second,
 		)
 
-		prevLook := lookPath
-		prevRun := runCommand
-		lookPath = func(file string) (string, error) {
+		rt.lookPath = func(file string) (string, error) {
 			if file == "fusermount3" {
 				return "/usr/bin/fusermount3", nil
 			}
 			return "", errors.New("not found")
 		}
-		runCommand = func(_ string, _ ...string) ([]byte, error) {
+		rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 			go func() {
 				<-midPrintedCh
 				time.Sleep(15 * time.Millisecond)
@@ -505,12 +455,8 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 			}()
 			return nil, nil
 		}
-		t.Cleanup(func() {
-			lookPath = prevLook
-			runCommand = prevRun
-		})
 
-		code, out, errOut := runCLI("umount", mp)
+		code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 
 		require.Equal(t, 0, code)
 		require.Empty(t, out)
@@ -526,11 +472,12 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 	})
 
 	t.Run("SkipsDuplicateFinalLineWhen100PercentAlreadyPrinted", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-nontty-dedup100"
-		withTempMountMetaDirs(t, t.TempDir())
-		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setTempMountMetaDirs(rt, t.TempDir())
+		setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-		metaPath, err := writeMountMeta(&mountMeta{
+		metaPath, err := rt.writeMountMeta(&mountMeta{
 			Mountpoint: mp,
 			PID:        os.Getpid(),
 			DiskID:     testDiskID1,
@@ -554,8 +501,8 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 				}, nil
 			}),
 		}
-		withUmountProgressSeams(
-			t,
+		setUmountProgressSeams(
+			rt,
 			false,
 			client,
 			time.Second,
@@ -566,27 +513,21 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 			time.Second,
 		)
 
-		prevLook := lookPath
-		prevRun := runCommand
-		lookPath = func(file string) (string, error) {
+		rt.lookPath = func(file string) (string, error) {
 			if file == "fusermount3" {
 				return "/usr/bin/fusermount3", nil
 			}
 			return "", errors.New("not found")
 		}
-		runCommand = func(_ string, _ ...string) ([]byte, error) {
+		rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 			go func() {
 				time.Sleep(25 * time.Millisecond)
 				_ = os.Remove(metaPath)
 			}()
 			return nil, nil
 		}
-		t.Cleanup(func() {
-			lookPath = prevLook
-			runCommand = prevRun
-		})
 
-		code, out, errOut := runCLI("umount", mp)
+		code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 
 		require.Equal(t, 0, code)
 		require.Empty(t, out)
@@ -595,12 +536,12 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 }
 
 func TestUmount_GivenTTYAndPendingWork_RendersSingleLineProgressBarTo100PercentWithNewline(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	mp := "/mnt/bowl-tty-progress"
-	withTempMountMetaDirs(t, t.TempDir())
-	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	setTempMountMetaDirs(rt, t.TempDir())
+	setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	metaPath, err := writeMountMeta(&mountMeta{
+	metaPath, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: mp,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -638,8 +579,8 @@ func TestUmount_GivenTTYAndPendingWork_RendersSingleLineProgressBarTo100PercentW
 			}, nil
 		}),
 	}
-	withUmountProgressSeams(
-		t,
+	setUmountProgressSeams(
+		rt,
 		true,
 		client,
 		2*time.Second,
@@ -650,15 +591,13 @@ func TestUmount_GivenTTYAndPendingWork_RendersSingleLineProgressBarTo100PercentW
 		time.Second,
 	)
 
-	prevLook := lookPath
-	prevRun := runCommand
-	lookPath = func(file string) (string, error) {
+	rt.lookPath = func(file string) (string, error) {
 		if file == "fusermount3" {
 			return "/usr/bin/fusermount3", nil
 		}
 		return "", errors.New("not found")
 	}
-	runCommand = func(_ string, _ ...string) ([]byte, error) {
+	rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 		go func() {
 			<-reachedMidCh
 			time.Sleep(15 * time.Millisecond)
@@ -666,12 +605,8 @@ func TestUmount_GivenTTYAndPendingWork_RendersSingleLineProgressBarTo100PercentW
 		}()
 		return nil, nil
 	}
-	t.Cleanup(func() {
-		lookPath = prevLook
-		runCommand = prevRun
-	})
 
-	code, out, errOut := runCLI("umount", mp)
+	code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
@@ -687,11 +622,12 @@ func TestUmount_GivenTTYAndPendingWork_RendersSingleLineProgressBarTo100PercentW
 func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeterminateAfterGrace(t *testing.T) {
 	t.Run("SilentDuringGracePeriod", func(t *testing.T) {
 		for _, isTTY := range []bool{false, true} {
+			rt := defaultCLIRuntime()
 			mp := "/mnt/bowl-fallback-silent"
-			withTempMountMetaDirs(t, t.TempDir())
-			withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+			setTempMountMetaDirs(rt, t.TempDir())
+			setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-			metaPath, err := writeMountMeta(&mountMeta{
+			metaPath, err := rt.writeMountMeta(&mountMeta{
 				Mountpoint: mp,
 				PID:        os.Getpid(),
 				DiskID:     testDiskID1,
@@ -700,8 +636,8 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 			})
 			require.NoError(t, err)
 
-			withUmountProgressSeams(
-				t,
+			setUmountProgressSeams(
+				rt,
 				isTTY,
 				nil,
 				time.Second,
@@ -711,18 +647,16 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 				150*time.Millisecond,
 				time.Second,
 			)
-			withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-			prevRun := runCommand
-			runCommand = func(_ string, _ ...string) ([]byte, error) {
+			setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+			rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 				go func() {
 					time.Sleep(20 * time.Millisecond)
 					_ = os.Remove(metaPath)
 				}()
 				return nil, nil
 			}
-			t.Cleanup(func() { runCommand = prevRun })
 
-			code, out, errOut := runCLI("umount", mp)
+			code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 			require.Equal(t, 0, code)
 			require.Empty(t, out)
 			require.Empty(t, errOut)
@@ -730,11 +664,12 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 	})
 
 	t.Run("NonTTY_AdminOff_LogsAtGraceAndInterval", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-fallback-nontty-off"
-		withTempMountMetaDirs(t, t.TempDir())
-		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setTempMountMetaDirs(rt, t.TempDir())
+		setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-		metaPath, err := writeMountMeta(&mountMeta{
+		metaPath, err := rt.writeMountMeta(&mountMeta{
 			Mountpoint: mp,
 			PID:        os.Getpid(),
 			DiskID:     testDiskID1,
@@ -743,8 +678,8 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 		})
 		require.NoError(t, err)
 
-		withUmountProgressSeams(
-			t,
+		setUmountProgressSeams(
+			rt,
 			false,
 			nil,
 			2*time.Second,
@@ -754,18 +689,16 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 			20*time.Millisecond,
 			30*time.Millisecond,
 		)
-		withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-		prevRun := runCommand
-		runCommand = func(_ string, _ ...string) ([]byte, error) {
+		setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 			go func() {
 				time.Sleep(70 * time.Millisecond)
 				_ = os.Remove(metaPath)
 			}()
 			return nil, nil
 		}
-		t.Cleanup(func() { runCommand = prevRun })
 
-		code, out, errOut := runCLI("umount", mp)
+		code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 		require.Equal(t, 0, code)
 		require.Empty(t, out)
 		require.NotContains(t, errOut, "\r")
@@ -775,11 +708,12 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 	})
 
 	t.Run("NonTTY_UnreachableEndpoint_FallsBackAfterGrace", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-fallback-nontty-err"
-		withTempMountMetaDirs(t, t.TempDir())
-		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setTempMountMetaDirs(rt, t.TempDir())
+		setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-		metaPath, err := writeMountMeta(&mountMeta{
+		metaPath, err := rt.writeMountMeta(&mountMeta{
 			Mountpoint: mp,
 			PID:        os.Getpid(),
 			DiskID:     testDiskID1,
@@ -793,8 +727,8 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 				return nil, errors.New("connection refused")
 			}),
 		}
-		withUmountProgressSeams(
-			t,
+		setUmountProgressSeams(
+			rt,
 			false,
 			client,
 			2*time.Second,
@@ -804,29 +738,28 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 			20*time.Millisecond,
 			35*time.Millisecond,
 		)
-		withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-		prevRun := runCommand
-		runCommand = func(_ string, _ ...string) ([]byte, error) {
+		setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 			go func() {
 				time.Sleep(50 * time.Millisecond)
 				_ = os.Remove(metaPath)
 			}()
 			return nil, nil
 		}
-		t.Cleanup(func() { runCommand = prevRun })
 
-		code, out, errOut := runCLI("umount", mp)
+		code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 		require.Equal(t, 0, code)
 		require.Empty(t, out)
 		require.Contains(t, errOut, "Syncing to cloud...\n")
 	})
 
 	t.Run("TTY_AdminOff_RendersSpinnerAndFinishesCleanly", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-fallback-tty-spinner"
-		withTempMountMetaDirs(t, t.TempDir())
-		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setTempMountMetaDirs(rt, t.TempDir())
+		setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-		metaPath, err := writeMountMeta(&mountMeta{
+		metaPath, err := rt.writeMountMeta(&mountMeta{
 			Mountpoint: mp,
 			PID:        os.Getpid(),
 			DiskID:     testDiskID1,
@@ -835,8 +768,8 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 		})
 		require.NoError(t, err)
 
-		withUmountProgressSeams(
-			t,
+		setUmountProgressSeams(
+			rt,
 			true,
 			nil,
 			2*time.Second,
@@ -846,18 +779,16 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 			20*time.Millisecond,
 			time.Second,
 		)
-		withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-		prevRun := runCommand
-		runCommand = func(_ string, _ ...string) ([]byte, error) {
+		setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 			go func() {
 				time.Sleep(60 * time.Millisecond)
 				_ = os.Remove(metaPath)
 			}()
 			return nil, nil
 		}
-		t.Cleanup(func() { runCommand = prevRun })
 
-		code, out, errOut := runCLI("umount", mp)
+		code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 		require.Equal(t, 0, code)
 		require.Empty(t, out)
 		require.Contains(t, errOut, "Syncing to cloud")
@@ -868,11 +799,12 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 	})
 
 	t.Run("TTY_UnreachableThenRecovered_TransitionsCleanlyToDeterminate", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-fallback-recover"
-		withTempMountMetaDirs(t, t.TempDir())
-		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setTempMountMetaDirs(rt, t.TempDir())
+		setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-		metaPath, err := writeMountMeta(&mountMeta{
+		metaPath, err := rt.writeMountMeta(&mountMeta{
 			Mountpoint: mp,
 			PID:        os.Getpid(),
 			DiskID:     testDiskID1,
@@ -905,8 +837,8 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 				}, nil
 			}),
 		}
-		withUmountProgressSeams(
-			t,
+		setUmountProgressSeams(
+			rt,
 			true,
 			client,
 			2*time.Second,
@@ -916,9 +848,8 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 			15*time.Millisecond,
 			time.Second,
 		)
-		withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-		prevRun := runCommand
-		runCommand = func(_ string, _ ...string) ([]byte, error) {
+		setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 			go func() {
 				time.Sleep(35 * time.Millisecond)
 				allowSuccess.Store(true)
@@ -928,9 +859,8 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 			}()
 			return nil, nil
 		}
-		t.Cleanup(func() { runCommand = prevRun })
 
-		code, out, errOut := runCLI("umount", mp)
+		code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 		require.Equal(t, 0, code)
 		require.Empty(t, out)
 		require.True(t, recovered.Load())
@@ -942,10 +872,11 @@ func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeter
 }
 
 func TestUmount_GivenDefaultTerminalDetector_ReturnsFalseForBuffersAndPipes(t *testing.T) {
+	rt := defaultCLIRuntime()
 	var nilFile *os.File
-	require.False(t, umountIsTerminal(nil))
-	require.False(t, umountIsTerminal(nilFile))
-	require.False(t, umountIsTerminal(&bytes.Buffer{}))
+	require.False(t, rt.umountIsTerminal(nil))
+	require.False(t, rt.umountIsTerminal(nilFile))
+	require.False(t, rt.umountIsTerminal(&bytes.Buffer{}))
 
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
@@ -953,23 +884,23 @@ func TestUmount_GivenDefaultTerminalDetector_ReturnsFalseForBuffersAndPipes(t *t
 		_ = r.Close()
 		_ = w.Close()
 	}()
-	require.False(t, umountIsTerminal(w))
+	require.False(t, rt.umountIsTerminal(w))
 }
 
 func TestUmount_GivenSymlinkMountpoint_PassesCanonicalPathToToolAndDrainsMeta(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	realMP := filepath.Join(t.TempDir(), "real-mp")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
-	canonMP := canonicalMountpoint(realMP)
+	canonMP := rt.canonicalMountpoint(realMP)
 	symMP := filepath.Join(t.TempDir(), "sym-mp")
 	require.NoError(t, os.Symlink(realMP, symMP))
 
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
-	withMountInfoContent(t, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	withUmountDrainStub(t, 500*time.Millisecond, 5*time.Millisecond)
+	setTempMountMetaDirs(rt, metaDir)
+	setMountInfoContent(t, rt, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	setUmountDrainStub(rt, 500*time.Millisecond, 5*time.Millisecond)
 
-	metaPath, err := writeMountMeta(&mountMeta{
+	metaPath, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: canonMP,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -978,11 +909,10 @@ func TestUmount_GivenSymlinkMountpoint_PassesCanonicalPathToToolAndDrainsMeta(t 
 	})
 	require.NoError(t, err)
 
-	_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-	prevRun := runCommand
+	_, _ = setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 	var calledBin string
 	var calledArgs []string
-	runCommand = func(bin string, args ...string) ([]byte, error) {
+	rt.runCommand = func(bin string, args ...string) ([]byte, error) {
 		calledBin = bin
 		calledArgs = append([]string(nil), args...)
 		go func() {
@@ -991,9 +921,8 @@ func TestUmount_GivenSymlinkMountpoint_PassesCanonicalPathToToolAndDrainsMeta(t 
 		}()
 		return nil, nil
 	}
-	t.Cleanup(func() { runCommand = prevRun })
 
-	code, out, errOut := runCLI("umount", symMP)
+	code, out, errOut := runCLIWithRuntime(rt, "umount", symMP)
 
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
@@ -1005,14 +934,14 @@ func TestUmount_GivenSymlinkMountpoint_PassesCanonicalPathToToolAndDrainsMeta(t 
 }
 
 func TestUmount_GivenUnmountedSymlink_ReportsOriginalAbsPath(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	realMP := filepath.Join(t.TempDir(), "unmounted-real")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
 	symMP := filepath.Join(t.TempDir(), "unmounted-sym")
 	require.NoError(t, os.Symlink(realMP, symMP))
-	withMountInfoContent(t, "100 30 0:50 / /mnt/other rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	setMountInfoContent(t, rt, "100 30 0:50 / /mnt/other rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	code, out, errOut := runCLI("umount", symMP)
+	code, out, errOut := runCLIWithRuntime(rt, "umount", symMP)
 
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
@@ -1021,7 +950,7 @@ func TestUmount_GivenUnmountedSymlink_ReportsOriginalAbsPath(t *testing.T) {
 }
 
 func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithoutMountRootLstat(t *testing.T) {
-
+	rt := defaultCLIRuntime()
 	const (
 		realWedgedMP = "/wedged-root/mnt"
 		realOkMP     = "/ok-root/mnt"
@@ -1029,20 +958,20 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 		symOkMP      = "/tmp/sym-ok"
 	)
 	metaDir := t.TempDir()
-	withTempMountMetaDirs(t, metaDir)
-	withMountInfoContent(t,
+	setTempMountMetaDirs(rt, metaDir)
+	setMountInfoContent(t, rt,
 		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
 			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
 			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
 	)
-	lstatCalls := withMountInfoNoRootLstatStub(t, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
+	lstatCalls := setMountInfoNoRootLstatStub(t, rt, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
 		"/tmp":      {mode: os.ModeDir | 0o755},
 		symWedgedMP: {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
 		symOkMP:     {mode: os.ModeSymlink | 0o777, target: realOkMP},
 	})
-	withUmountDrainStub(t, 500*time.Millisecond, 5*time.Millisecond)
+	setUmountDrainStub(rt, 500*time.Millisecond, 5*time.Millisecond)
 
-	_, err := writeMountMeta(&mountMeta{
+	_, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: realWedgedMP,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
@@ -1050,7 +979,7 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 		StartedAt:  time.Now().UTC(),
 	})
 	require.NoError(t, err)
-	okMetaPath, err := writeMountMeta(&mountMeta{
+	okMetaPath, err := rt.writeMountMeta(&mountMeta{
 		Mountpoint: realOkMP,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID2,
@@ -1059,20 +988,19 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 	})
 	require.NoError(t, err)
 
-	gotWedgedPath, gotWedgedMeta, okWedged := resolveUmountMountMeta(symWedgedMP)
+	gotWedgedPath, gotWedgedMeta, okWedged := rt.resolveUmountMountMeta(symWedgedMP)
 	require.True(t, okWedged)
 	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(realWedgedMP)), gotWedgedPath)
 	require.Equal(t, realWedgedMP, gotWedgedMeta.Mountpoint)
 
-	gotOkPath, gotOkMeta, okHealthy := resolveUmountMountMeta(symOkMP)
+	gotOkPath, gotOkMeta, okHealthy := rt.resolveUmountMountMeta(symOkMP)
 	require.True(t, okHealthy)
 	require.Equal(t, okMetaPath, gotOkPath)
 	require.Equal(t, realOkMP, gotOkMeta.Mountpoint)
 
-	_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-	prevRun := runCommand
+	_, _ = setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 	var calledArgs []string
-	runCommand = func(_ string, args ...string) ([]byte, error) {
+	rt.runCommand = func(_ string, args ...string) ([]byte, error) {
 		calledArgs = append([]string(nil), args...)
 		go func() {
 			time.Sleep(15 * time.Millisecond)
@@ -1080,9 +1008,8 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 		}()
 		return nil, nil
 	}
-	t.Cleanup(func() { runCommand = prevRun })
 
-	code, out, errOut := runCLI("umount", symOkMP)
+	code, out, errOut := runCLIWithRuntime(rt, "umount", symOkMP)
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
@@ -1090,7 +1017,7 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 	_, statErr := os.Stat(okMetaPath)
 	require.True(t, os.IsNotExist(statErr))
 
-	code, out, errOut = runCLI("umount", "-f", symWedgedMP)
+	code, out, errOut = runCLIWithRuntime(rt, "umount", "-f", symWedgedMP)
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
@@ -1101,15 +1028,15 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 }
 
 func TestUmount_GivenForceAndWedgedMountPaths_AvoidsLstatOnMountRootAndPassesCanonicalPath(t *testing.T) {
-
-	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{
+	rt := defaultCLIRuntime()
+	setMountInfoContent(t, rt, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	lstatCalls := setMountInfoFSStub(t, rt, map[string]fakeFSNode{
 		"/tmp":     {mode: os.ModeDir | 0o755},
 		"/tmp/sym": {mode: os.ModeSymlink | 0o777, target: "/data/mnt"},
 	})
-	binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+	binName, binArgs := setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 
-	code, out, errOut := runCLI("umount", "-f", "/data/mnt")
+	code, out, errOut := runCLIWithRuntime(rt, "umount", "-f", "/data/mnt")
 
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
@@ -1118,7 +1045,7 @@ func TestUmount_GivenForceAndWedgedMountPaths_AvoidsLstatOnMountRootAndPassesCan
 	require.Equal(t, []string{"-uz", "/data/mnt"}, *binArgs)
 	require.Empty(t, *lstatCalls)
 
-	code, out, errOut = runCLI("umount", "-f", "/tmp/sym")
+	code, out, errOut = runCLIWithRuntime(rt, "umount", "-f", "/tmp/sym")
 
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
@@ -1204,32 +1131,27 @@ func TestUmount_GivenNonBowlMounts_RejectsWithoutInvokingTool(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			withMountInfoContent(t, tc.mountInfo)
+			rt := defaultCLIRuntime()
+			setMountInfoContent(t, rt, tc.mountInfo)
 			if tc.fsNodes != nil {
-				withMountInfoFSStub(t, tc.fsNodes)
+				setMountInfoFSStub(t, rt, tc.fsNodes)
 			}
 
-			prevLook := lookPath
-			prevRun := runCommand
 			lookCalled := false
 			runCalled := false
-			lookPath = func(file string) (string, error) {
+			rt.lookPath = func(file string) (string, error) {
 				lookCalled = true
 				if file == "fusermount3" {
 					return "/usr/bin/fusermount3", nil
 				}
 				return "", errors.New("not found")
 			}
-			runCommand = func(_ string, _ ...string) ([]byte, error) {
+			rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 				runCalled = true
 				return nil, nil
 			}
-			t.Cleanup(func() {
-				lookPath = prevLook
-				runCommand = prevRun
-			})
 
-			code, out, errOut := runCLI(tc.args...)
+			code, out, errOut := runCLIWithRuntime(rt, tc.args...)
 
 			require.Equal(t, 1, code, "args=%v stderr=%s", tc.args, errOut)
 			require.Empty(t, out)
@@ -1291,10 +1213,11 @@ func TestUmount_GivenBowlMountsAndBowlStackedOverNonBowl_InvokesUnmountTool(t *t
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			withMountInfoContent(t, tc.mountInfo)
-			binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+			rt := defaultCLIRuntime()
+			setMountInfoContent(t, rt, tc.mountInfo)
+			binName, binArgs := setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 
-			code, out, errOut := runCLI(tc.args...)
+			code, out, errOut := runCLIWithRuntime(rt, tc.args...)
 
 			require.Equal(t, 0, code, "args=%v stderr=%s", tc.args, errOut)
 			require.Empty(t, out)
@@ -1306,7 +1229,8 @@ func TestUmount_GivenBowlMountsAndBowlStackedOverNonBowl_InvokesUnmountTool(t *t
 }
 
 func TestUmount_GivenWildcardLegacyMetaAdminAddr_NormalizesToLoopbackAndKeepsDefaultClient(t *testing.T) {
-	require.Same(t, http.DefaultClient, umountHTTPClient)
+	rt := defaultCLIRuntime()
+	require.Same(t, http.DefaultClient, rt.umountHTTPClient)
 
 	cases := []struct {
 		raw  string
@@ -1352,20 +1276,12 @@ func TestUmount_GivenWildcardLegacyMetaAdminAddr_NormalizesToLoopbackAndKeepsDef
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "")
 
-	prevPoll := umountProgressPollInterval
-	prevDrain := umountDrainPollInterval
-	prevTimeout := umountDrainTimeout
-	umountProgressPollInterval = 10 * time.Millisecond
-	umountDrainPollInterval = 10 * time.Millisecond
-	umountDrainTimeout = 2 * time.Second
-	t.Cleanup(func() {
-		umountProgressPollInterval = prevPoll
-		umountDrainPollInterval = prevDrain
-		umountDrainTimeout = prevTimeout
-	})
+	rt.umountProgressPollInterval = 10 * time.Millisecond
+	rt.umountDrainPollInterval = 10 * time.Millisecond
+	rt.umountDrainTimeout = 2 * time.Second
 
 	var stderr bytes.Buffer
-	err = waitMountMetaDrained(&stderr, metaPath, &mountMeta{
+	err = rt.waitMountMetaDrained(&stderr, metaPath, &mountMeta{
 		PID:       os.Getpid(),
 		AdminAddr: "0.0.0.0:" + port,
 	})
@@ -1376,14 +1292,15 @@ func TestUmount_GivenWildcardLegacyMetaAdminAddr_NormalizesToLoopbackAndKeepsDef
 
 func TestUmount_GivenMountMetaOverwrittenByRemount_TreatsOldInstanceAsDrained(t *testing.T) {
 	t.Run("OverwrittenByDifferentPID", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-remount-diff-pid"
 		metaDir := t.TempDir()
-		withTempMountMetaDirs(t, metaDir)
-		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-		withUmountDrainStub(t, 300*time.Millisecond, 5*time.Millisecond)
+		setTempMountMetaDirs(rt, metaDir)
+		setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setUmountDrainStub(rt, 300*time.Millisecond, 5*time.Millisecond)
 
 		startedA := time.Now().UTC()
-		metaPath, err := writeMountMeta(&mountMeta{
+		metaPath, err := rt.writeMountMeta(&mountMeta{
 			Mountpoint: mp,
 			PID:        os.Getpid(),
 			DiskID:     testDiskID1,
@@ -1399,18 +1316,16 @@ func TestUmount_GivenMountMetaOverwrittenByRemount_TreatsOldInstanceAsDrained(t 
 			AdminAddr:  "off",
 			StartedAt:  startedA.Add(time.Second),
 		}
-		_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-		prevRun := runCommand
-		runCommand = func(_ string, _ ...string) ([]byte, error) {
+		_, _ = setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 			go func() {
 				time.Sleep(20 * time.Millisecond)
-				_, _ = writeMountMeta(&mountB)
+				_, _ = rt.writeMountMeta(&mountB)
 			}()
 			return nil, nil
 		}
-		t.Cleanup(func() { runCommand = prevRun })
 
-		code, out, errOut := runCLI("umount", mp)
+		code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 		require.Equal(t, 0, code, "scene=remount_diff_pid want=0 got=%d stderr=%s", code, errOut)
 		require.Empty(t, out)
 		require.Empty(t, errOut)
@@ -1423,14 +1338,15 @@ func TestUmount_GivenMountMetaOverwrittenByRemount_TreatsOldInstanceAsDrained(t 
 	})
 
 	t.Run("OverwrittenBySamePIDNewStartedAt", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-remount-same-pid"
 		metaDir := t.TempDir()
-		withTempMountMetaDirs(t, metaDir)
-		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-		withUmountDrainStub(t, 300*time.Millisecond, 5*time.Millisecond)
+		setTempMountMetaDirs(rt, metaDir)
+		setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		setUmountDrainStub(rt, 300*time.Millisecond, 5*time.Millisecond)
 
 		startedA := time.Now().UTC()
-		metaPath, err := writeMountMeta(&mountMeta{
+		metaPath, err := rt.writeMountMeta(&mountMeta{
 			Mountpoint: mp,
 			PID:        os.Getpid(),
 			DiskID:     testDiskID1,
@@ -1446,18 +1362,16 @@ func TestUmount_GivenMountMetaOverwrittenByRemount_TreatsOldInstanceAsDrained(t 
 			AdminAddr:  "off",
 			StartedAt:  startedA.Add(2 * time.Second),
 		}
-		_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
-		prevRun := runCommand
-		runCommand = func(_ string, _ ...string) ([]byte, error) {
+		_, _ = setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		rt.runCommand = func(_ string, _ ...string) ([]byte, error) {
 			go func() {
 				time.Sleep(20 * time.Millisecond)
-				_, _ = writeMountMeta(&mountB)
+				_, _ = rt.writeMountMeta(&mountB)
 			}()
 			return nil, nil
 		}
-		t.Cleanup(func() { runCommand = prevRun })
 
-		code, out, errOut := runCLI("umount", mp)
+		code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 		require.Equal(t, 0, code, "scene=remount_same_pid want=0 got=%d stderr=%s", code, errOut)
 		require.Empty(t, out)
 		require.Empty(t, errOut)
@@ -1483,23 +1397,24 @@ func TestUmount_GivenCorruptOrZeroPIDMountMeta_SkipsDrainWaitAndExits0(t *testin
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			rt := defaultCLIRuntime()
 			mp := "/mnt/bowl-bad-meta"
 			metaDir := t.TempDir()
-			withTempMountMetaDirs(t, metaDir)
-			withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
-			withUmountDrainStub(t, 200*time.Millisecond, 5*time.Millisecond)
-			withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+			setTempMountMetaDirs(rt, metaDir)
+			setMountInfoContent(t, rt, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+			setUmountDrainStub(rt, 200*time.Millisecond, 5*time.Millisecond)
+			setUmountToolStub(rt, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 
 			metaPath := filepath.Join(metaDir, mountMetaFileName(mp))
 			require.NoError(t, os.WriteFile(metaPath, []byte(tc.content), 0o644))
 
-			gotPath, gotMeta, ok := resolveUmountMountMeta(mp)
+			gotPath, gotMeta, ok := rt.resolveUmountMountMeta(mp)
 			require.False(t, ok, "scene=%s want=ok_false got=ok_true path=%s pid=%d", tc.name, gotPath, gotMeta.PID)
 			require.Empty(t, gotPath)
 			require.Zero(t, gotMeta.PID)
 
 			start := time.Now()
-			code, out, errOut := runCLI("umount", mp)
+			code, out, errOut := runCLIWithRuntime(rt, "umount", mp)
 			elapsed := time.Since(start)
 
 			require.Equal(t, 0, code, "scene=%s want=0 got=%d stderr=%s", tc.name, code, errOut)
@@ -1510,10 +1425,11 @@ func TestUmount_GivenCorruptOrZeroPIDMountMeta_SkipsDrainWaitAndExits0(t *testin
 	}
 
 	t.Run("CorruptInFirstDirFallsThroughToLiveInSecondDir", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		mp := "/mnt/bowl-corrupt-then-live"
 		dir1 := t.TempDir()
 		dir2 := t.TempDir()
-		withTempMountMetaDirs(t, dir1, dir2)
+		setTempMountMetaDirs(rt, dir1, dir2)
 
 		require.NoError(t, os.WriteFile(filepath.Join(dir1, mountMetaFileName(mp)), []byte("{broken"), 0o644))
 		liveBytes, err := json.Marshal(mountMeta{
@@ -1527,19 +1443,20 @@ func TestUmount_GivenCorruptOrZeroPIDMountMeta_SkipsDrainWaitAndExits0(t *testin
 		livePath := filepath.Join(dir2, mountMetaFileName(mp))
 		require.NoError(t, os.WriteFile(livePath, liveBytes, 0o644))
 
-		gotPath, gotMeta, ok := resolveUmountMountMeta(mp)
+		gotPath, gotMeta, ok := rt.resolveUmountMountMeta(mp)
 		require.True(t, ok)
 		require.Equal(t, livePath, gotPath)
 		require.Equal(t, os.Getpid(), gotMeta.PID)
 	})
 
 	t.Run("WaitMountMetaDrainedWithNilOrZeroPIDReturnsImmediately", func(t *testing.T) {
+		rt := defaultCLIRuntime()
 		metaPath := filepath.Join(t.TempDir(), "existing.json")
 		require.NoError(t, os.WriteFile(metaPath, []byte(`{"pid":0}`), 0o644))
-		withUmountDrainStub(t, 200*time.Millisecond, 5*time.Millisecond)
+		setUmountDrainStub(rt, 200*time.Millisecond, 5*time.Millisecond)
 
-		require.NoError(t, waitMountMetaDrained(nil, metaPath, nil))
-		require.NoError(t, waitMountMetaDrained(nil, metaPath, &mountMeta{PID: 0}))
-		require.NoError(t, waitMountMetaDrained(nil, metaPath, &mountMeta{PID: -1}))
+		require.NoError(t, rt.waitMountMetaDrained(nil, metaPath, nil))
+		require.NoError(t, rt.waitMountMetaDrained(nil, metaPath, &mountMeta{PID: 0}))
+		require.NoError(t, rt.waitMountMetaDrained(nil, metaPath, &mountMeta{PID: -1}))
 	})
 }

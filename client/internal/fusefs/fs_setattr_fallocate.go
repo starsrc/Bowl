@@ -150,9 +150,6 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
-	if valid&fuse.FATTR_SIZE != 0 && isRegularOrUnknownInode(resp.Msg.GetInode()) {
-		fs.markDirty(ino)
-	}
 
 	fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
 	fs.stage.ObserveServerInode(ino, resp.Msg.GetInode(), valid&fuse.FATTR_SIZE != 0 && input.Size == 0)
@@ -242,16 +239,8 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
-	fs.markDirty(ino)
 	fs.stage.InvalidateKnownSize(ino)
 	fs.caps.markAbsent(input.NodeId)
 
 	return fuse.OK
-}
-
-func isRegularOrUnknownInode(inode *storagev1.Inode) bool {
-	if inode == nil || inode.GetAttr() == nil {
-		return true
-	}
-	return inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFREG
 }

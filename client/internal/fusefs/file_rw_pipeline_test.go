@@ -714,7 +714,7 @@ func TestTmpfile与OnUnmount_匿名文件具名化本地零RPC与关闭同步(t 
 		requireStatus(t, "tmpB 双清零后 GetAttr", fuse.ENOENT, fs.GetAttr(nil, &fuse.GetAttrIn{InHeader: fuse.InHeader{NodeId: tmpB.NodeId}}, &attrAfter))
 	})
 
-	t.Run("OnUnmount对所有仍存活的脏节点各执行一次Fsync同步", func(t *testing.T) {
+	t.Run("OnUnmount对多个脏文件仅执行一次根FsyncDir且重复调用幂等", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
@@ -725,13 +725,18 @@ func TestTmpfile与OnUnmount_匿名文件具名化本地零RPC与关闭同步(t 
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f1.NodeId}, Fh: f1.Fh})
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f2.NodeId}, Fh: f2.Fh})
 		fsyncBefore := srv.fsyncCalls.Load()
+		fsyncDirBefore := srv.fsyncDirCalls.Load()
 
 		fs.OnUnmount()
 		fsyncAfterFirst := srv.fsyncCalls.Load()
+		fsyncDirAfterFirst := srv.fsyncDirCalls.Load()
 		fs.OnUnmount()
 		fsyncAfterSecond := srv.fsyncCalls.Load()
+		fsyncDirAfterSecond := srv.fsyncDirCalls.Load()
 
-		require.Equal(t, fsyncBefore+2, fsyncAfterFirst, "OnUnmount 必须为每个存活脏节点精确触发 1 次 Fsync")
-		require.Equal(t, fsyncAfterFirst, fsyncAfterSecond, "重复调用 OnUnmount 不得重复 Fsync 已同步节点")
+		require.Equal(t, fsyncBefore, fsyncAfterFirst, "OnUnmount 不得发送逐 inode Fsync")
+		require.Equal(t, fsyncAfterFirst, fsyncAfterSecond, "重复调用 OnUnmount 不得触发 Fsync")
+		require.Equal(t, fsyncDirBefore+1, fsyncDirAfterFirst, "OnUnmount 必须仅执行 1 次根 FsyncDir")
+		require.Equal(t, fsyncDirAfterFirst, fsyncDirAfterSecond, "重复调用 OnUnmount 不得重复执行 FsyncDir")
 	})
 }

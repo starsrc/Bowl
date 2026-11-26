@@ -47,41 +47,35 @@ func runCLI(args ...string) (exitCode int, stdout, stderr string) {
 	return code, outBuf.String(), errBuf.String()
 }
 
-func withMountInfoContent(t *testing.T, content string) {
+func runCLIWithRuntime(rt *cliRuntime, args ...string) (exitCode int, stdout, stderr string) {
+	var outBuf, errBuf bytes.Buffer
+	code := executeWithRuntime(rt, args, &outBuf, &errBuf)
+	return code, outBuf.String(), errBuf.String()
+}
+
+func setMountInfoContent(t *testing.T, rt *cliRuntime, content string) {
 	t.Helper()
-	prev := mountInfoPath
 	path := filepath.Join(t.TempDir(), "mountinfo")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
-	mountInfoPath = path
-	t.Cleanup(func() { mountInfoPath = prev })
+	rt.mountInfoPath = path
 }
 
-func withMissingMountInfo(t *testing.T) {
+func setMissingMountInfo(t *testing.T, rt *cliRuntime) {
 	t.Helper()
-	prev := mountInfoPath
-	mountInfoPath = filepath.Join(t.TempDir(), "nonexistent-mountinfo")
-	t.Cleanup(func() { mountInfoPath = prev })
+	rt.mountInfoPath = filepath.Join(t.TempDir(), "nonexistent-mountinfo")
 }
 
-func withUnreadableMountInfo(t *testing.T) {
+func setUnreadableMountInfo(t *testing.T, rt *cliRuntime) {
 	t.Helper()
-	prev := mountInfoPath
-	mountInfoPath = t.TempDir()
-	t.Cleanup(func() { mountInfoPath = prev })
+	rt.mountInfoPath = t.TempDir()
 }
 
-func withDiskStdin(t *testing.T, r io.Reader) {
-	t.Helper()
-	prev := diskStdin
-	diskStdin = r
-	t.Cleanup(func() { diskStdin = prev })
+func setDiskStdin(rt *cliRuntime, r io.Reader) {
+	rt.diskStdin = r
 }
 
-func withTempMountMetaDirs(t *testing.T, dirs ...string) {
-	t.Helper()
-	prev := mountMetaDirs
-	mountMetaDirs = func() []string { return dirs }
-	t.Cleanup(func() { mountMetaDirs = prev })
+func setTempMountMetaDirs(rt *cliRuntime, dirs ...string) {
+	rt.mountMetaDirs = func() []string { return dirs }
 }
 
 type errReader struct{ err error }
@@ -105,6 +99,7 @@ type fakeStorage struct {
 	lastAuth            string
 	lastTraceparent     string
 	lastRequestID       string
+	getDiskCalls        int
 	deleteCalls         int
 	updateCalls         int
 	forkBranchCalls     int
@@ -312,6 +307,7 @@ func (f *fakeStorage) CreateDisk(_ context.Context, req *connect.Request[storage
 func (f *fakeStorage) GetDisk(_ context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.getDiskCalls++
 	f.recordHeaders(req.Header())
 	if err := f.forcedErr["GetDisk"]; err != nil {
 		return nil, err
@@ -1149,18 +1145,12 @@ func newFakeStorageHTTPClient(f *fakeStorage) *http.Client {
 	}
 }
 
-func withDiskStorageFake(t *testing.T, f *fakeStorage) {
-	t.Helper()
-	prev := diskHTTPClient
-	diskHTTPClient = newFakeStorageHTTPClient(f)
-	t.Cleanup(func() { diskHTTPClient = prev })
+func setDiskStorageFake(rt *cliRuntime, f *fakeStorage) {
+	rt.diskHTTPClient = newFakeStorageHTTPClient(f)
 }
 
-func withMountStorageFake(t *testing.T, f *fakeStorage) {
-	t.Helper()
-	prev := mountHTTPClient
-	mountHTTPClient = newFakeStorageHTTPClient(f)
-	t.Cleanup(func() { mountHTTPClient = prev })
+func setMountStorageFake(rt *cliRuntime, f *fakeStorage) {
+	rt.mountHTTPClient = newFakeStorageHTTPClient(f)
 }
 
 func requireSpanByName(t *testing.T, spans tracetest.SpanStubs, name string) *tracetest.SpanStub {
@@ -1299,4 +1289,41 @@ func TestExecute_GivenCompletionCommand_GeneratesScriptsAndRejectsExtraArgsOrBad
 		require.Empty(t, out, "args=%v", badArgs)
 		require.Contains(t, errOut, "Error:", "args=%v", badArgs)
 	}
+}
+
+func TestExecuteWithRuntime_GivenIsolatedRuntimes_DoesNotShareStateAcrossInstances(t *testing.T) {
+	rtA := defaultCLIRuntime()
+	storageA := newFakeStorage()
+	storageA.seedDisk(testDiskID1, "disk-a", 1<<30, 0)
+	setDiskStorageFake(rtA, storageA)
+	setMountInfoContent(t, rtA, "100 30 0:50 / /mnt/disk-a rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+	rtB := defaultCLIRuntime()
+	storageB := newFakeStorage()
+	storageB.seedDisk(testDiskID2, "disk-b", 2<<30, 0)
+	setDiskStorageFake(rtB, storageB)
+	setMissingMountInfo(t, rtB)
+
+	var wg sync.WaitGroup
+	var (
+		codeA, codeB     int
+		outA, outB       string
+		errOutA, errOutB string
+	)
+	wg.Go(func() {
+		codeA, outA, errOutA = runCLIWithRuntime(rtA, "disk", "delete", testDiskID1, "-y")
+	})
+	wg.Go(func() {
+		codeB, outB, errOutB = runCLIWithRuntime(rtB, "disk", "get", testDiskID2)
+	})
+	wg.Wait()
+
+	require.Equal(t, 1, codeA)
+	require.Empty(t, outA)
+	require.Contains(t, errOutA, "bowl umount /mnt/disk-a")
+	require.Zero(t, storageA.deleteCalls)
+
+	require.Equal(t, 0, codeB, errOutB)
+	require.Empty(t, errOutB)
+	require.Contains(t, outB, "disk-b")
 }

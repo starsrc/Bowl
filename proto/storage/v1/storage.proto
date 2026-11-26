@@ -159,7 +159,10 @@ service StorageService {
 
 // LookupRequest defines input parameters for Lookup.
 message LookupRequest {
-  uint64 parent_ino = 1 [(buf.validate.field).uint64.gt = 0];
+  uint64 parent_ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
 
   bytes name = 2 [
     (buf.validate.field).bytes.max_len = 255,

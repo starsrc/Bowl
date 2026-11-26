@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"math"
 
 	"connectrpc.com/connect"
 
@@ -17,10 +16,7 @@ const (
 
 func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Uid > math.MaxInt32 || msg.Gid > math.MaxInt32 || msg.Flags&oTmpfileFlag != 0 {
+	if msg.Flags&oTmpfileFlag != 0 {
 		return nil, toConnectError(engine.ErrInvalid)
 	}
 	diskID, err := parseRequiredUUID(msg.DiskId)
@@ -54,12 +50,6 @@ func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.Crea
 
 func (s *Server) CreateTmpfile(ctx context.Context, req *connect.Request[storagev1.CreateTmpfileRequest]) (*connect.Response[storagev1.CreateTmpfileResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.GetEpoch()); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.GetUid() > math.MaxInt32 || msg.GetGid() > math.MaxInt32 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
@@ -84,12 +74,6 @@ func (s *Server) CreateTmpfile(ctx context.Context, req *connect.Request[storage
 
 func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.FsyncRequest]) (*connect.Response[storagev1.FsyncResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -106,12 +90,6 @@ func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.Fsync
 
 func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.FsyncDirRequest]) (*connect.Response[storagev1.FsyncDirResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -128,9 +106,6 @@ func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.Fs
 
 func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.ReadDirRequest]) (*connect.Response[storagev1.ReadDirResponse], error) {
 	msg := req.Msg
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -162,9 +137,6 @@ func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.Rea
 
 func (s *Server) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1.ReadDirPlusRequest]) (*connect.Response[storagev1.ReadDirPlusResponse], error) {
 	msg := req.Msg
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -204,12 +176,6 @@ func (s *Server) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1
 
 func (s *Server) Fallocate(ctx context.Context, req *connect.Request[storagev1.FallocateRequest]) (*connect.Response[storagev1.FallocateResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)

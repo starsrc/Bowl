@@ -12,15 +12,12 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/fx"
 
 	"github.com/starsrc/pkg/observability"
 	"github.com/starsrc/pkg/observability/telemetry"
 
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
-
-type TracingReady struct{}
 
 func ConfigureRuntimeProfilesFromEnv() {
 	if raw := strings.TrimSpace(os.Getenv("PPROF_MUTEX_FRACTION")); raw != "" {
@@ -145,37 +142,24 @@ func NewStorageTracerProvider(ctx context.Context, cfg telemetry.Config) (*sdktr
 	}
 }
 
-type TracingParams struct {
-	fx.In
-
-	Lifecycle fx.Lifecycle           `optional:"true"`
-	Runtime   *observability.Runtime `optional:"true"`
-	Telemetry telemetry.Config       `optional:"true"`
-	ObsReady  observability.Ready    `optional:"true"`
-}
-
-func ConfigureStorageTracerProvider(p TracingParams) (TracingReady, error) {
+func ConfigureStorageTracerProvider(
+	ctx context.Context,
+	rt *observability.Runtime,
+	telCfg telemetry.Config,
+) (*sdktrace.TracerProvider, error) {
 	ConfigureRuntimeProfilesFromEnv()
 
-	if p.Telemetry == nil || !p.Telemetry.Enabled() {
-		return TracingReady{}, nil
+	if telCfg == nil || !telCfg.Enabled() {
+		return nil, nil
 	}
-	if p.Runtime != nil && p.Runtime.TracerProvider() != nil {
-		return TracingReady{}, errors.New("server: runtime default tracer provider must be disabled before configuring storage tracer provider")
+	if rt != nil && rt.TracerProvider() != nil {
+		return nil, errors.New("server: runtime default tracer provider must be disabled before configuring storage tracer provider")
 	}
 
-	tp, err := NewStorageTracerProvider(context.Background(), p.Telemetry)
+	tp, err := NewStorageTracerProvider(ctx, telCfg)
 	if err != nil {
-		return TracingReady{}, err
+		return nil, err
 	}
 	telemetry.RegisterGlobalTracer(tp)
-
-	if p.Lifecycle != nil {
-		p.Lifecycle.Append(fx.Hook{
-			OnStop: func(stopCtx context.Context) error {
-				return tp.Shutdown(stopCtx)
-			},
-		})
-	}
-	return TracingReady{}, nil
+	return tp, nil
 }

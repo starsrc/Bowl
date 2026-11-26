@@ -13,7 +13,6 @@ import (
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/pkg/rpccodec"
-	"github.com/starsrc/bowl/pkg/validator"
 )
 
 const (
@@ -281,7 +280,7 @@ func TestWriteCodec_OrphanCleanupAndInterceptorRelease(t *testing.T) {
 	require.NoError(t, codec.Unmarshal(raw, msg))
 	require.Equal(t, 1, leasedWritePayloadCount())
 
-	val, err := validator.NewStorageValidator()
+	val, err := NewStorageValidator()
 	require.NoError(t, err)
 	releaseInterceptor := newWritePayloadReleaseInterceptor()
 	valInterceptor := NewValidationInterceptor(val)

@@ -12,8 +12,6 @@ connectrpc.com/connect/v2 v2.0.0 h1:PVVpWl2Xv9dIWN2gijs4HK40NSnPFzLqCEEmZ8fCUQ8=
 connectrpc.com/connect/v2 v2.0.0/go.mod h1:N32OLrstcPUzkykFynnefFro3+xzSdOrZlK2jHmS/xo=
 connectrpc.com/otelconnect v0.12.0 h1:SOQ2LvyPUON2WekzWUWhXEy2NHusTevV64xa6kAHsrQ=
 connectrpc.com/otelconnect v0.12.0/go.mod h1:BB9a3Z9DDsx8AAJREAdKVIENfa70XB1KQXWKRbfpLxw=
-connectrpc.com/validate v0.9.0 h1:NLl+dbx87CZh1LId4FF87t92L5tsdmS0qDXxjZRe054=
-connectrpc.com/validate v0.9.0/go.mod h1:dBEUzscHj4InQpm6J5xF8zX51MIUAPWZ7Jq8aNXRY9Y=
 github.com/DataDog/zstd v1.5.7 h1:ybO8RBeh29qrxIhCA9E8gKY6xfONU9T6G6aP9DTKfLE=
 github.com/DataDog/zstd v1.5.7/go.mod h1:g4AWEaM3yOg3HYfnJ3YIawPnVdXJh9QME85blwSAmyw=
 github.com/RaduBerinde/axisds v0.1.0 h1:YItk/RmU5nvlsv/awo2Fjx97Mfpt4JfgtEVAGPrLdz8=
@@ -128,8 +126,6 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/starsrc/pkg/observability v0.1.0 h1:leM/FoNE595mflRXwhmwwCskBaZiPm8pyUezKpsy8g0=
 github.com/starsrc/pkg/observability v0.1.0/go.mod h1:QewBniPrtW8O9MLWsRwytvcUPtn3rAPBxRHNwncTgfg=
-github.com/starsrc/pkg/serverx v0.1.0 h1:tbiWFnKjqDbXHLqDmVAAwyZSJ11AIE1F5JIxxV0q1zg=
-github.com/starsrc/pkg/serverx v0.1.0/go.mod h1:cuijqlO2Q7wtfgbUZSJgDU/gqdHvkYUQapd1gf6a7Hw=
 github.com/starsrc/pkg/tx v0.1.0 h1:EeDR8h9dkN/ENyfsZUcY/pmf2VR1eLyq2QdzADNUu34=
 github.com/starsrc/pkg/tx v0.1.0/go.mod h1:aGWyILNcJ11Xa9wITDo1KY0ysZbF9lk+/qLU8CJ9d3U=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

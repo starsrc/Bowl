@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -10,16 +11,17 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"connectrpc.com/otelconnect"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/starsrc/pkg/observability/slogx"
 	"github.com/starsrc/pkg/observability/telemetry"
-	"github.com/starsrc/pkg/serverx"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
-	"github.com/starsrc/bowl/pkg/validator"
 )
 
 const (
@@ -29,11 +31,12 @@ const (
 
 	headerRequestID = "X-Request-Id"
 
-	attrKeyBowlDiskID    = "bowl.disk_id"
-	attrKeyBowlBranch    = "bowl.branch"
-	attrKeyBowlEpoch     = "bowl.epoch"
-	attrKeyBowlIno       = "bowl.ino"
-	attrKeyBowlRequestID = "bowl.request_id"
+	attrKeyRPCErrorReason = "rpc.error_reason"
+	attrKeyBowlDiskID     = "bowl.disk_id"
+	attrKeyBowlBranch     = "bowl.branch"
+	attrKeyBowlEpoch      = "bowl.epoch"
+	attrKeyBowlIno        = "bowl.ino"
+	attrKeyBowlRequestID  = "bowl.request_id"
 
 	logKeyDiskID    = "disk_id"
 	logKeyBranch    = "branch"
@@ -41,6 +44,11 @@ const (
 	logKeyIno       = "ino"
 	logKeyRequestID = "request_id"
 )
+
+type ObservabilityConfig interface {
+	slogx.Config
+	TrustRemote() bool
+}
 
 type (
 	diskIDGetter    interface{ GetDiskId() string }
@@ -61,11 +69,11 @@ type telemetryObsAdapter struct {
 	slogx.LogConfig
 }
 
-func toObservabilityConfig(cfg telemetry.Config) serverx.ObservabilityConfig {
+func toObservabilityConfig(cfg telemetry.Config) ObservabilityConfig {
 	if cfg == nil {
 		return nil
 	}
-	if oc, ok := cfg.(serverx.ObservabilityConfig); ok {
+	if oc, ok := cfg.(ObservabilityConfig); ok {
 		return oc
 	}
 	return telemetryObsAdapter{
@@ -75,6 +83,54 @@ func toObservabilityConfig(cfg telemetry.Config) serverx.ObservabilityConfig {
 			LogFormat:         "json",
 			LogConnectMessage: slogx.DefaultConnectMessage,
 		},
+	}
+}
+
+type errorReasonInterceptor struct{}
+
+func recordErrorReason(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	if cErr, ok := errors.AsType[*connect.Error](err); ok && cErr.Meta().Get("traceparent") == "" {
+		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(cErr.Meta()))
+	}
+	info := ExtractErrorInfo(err)
+	if info == nil || info.GetReason() == "" {
+		return
+	}
+	attr := attribute.String(attrKeyRPCErrorReason, info.GetReason())
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(attr)
+	}
+	if labeler, ok := otelconnect.LabelerFromContext(ctx); ok {
+		labeler.Add(attr)
+	}
+}
+
+func (errorReasonInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		res, err := next(ctx, req)
+		if err != nil {
+			recordErrorReason(ctx, err)
+		}
+		return res, err
+	}
+}
+
+func (errorReasonInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
+		return next(ctx, spec)
+	}
+}
+
+func (errorReasonInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		err := next(ctx, conn)
+		if err != nil {
+			recordErrorReason(ctx, err)
+		}
+		return err
 	}
 }
 
@@ -319,26 +375,36 @@ func logSlowStorageRPC(
 }
 
 func BuildInterceptors(
-	obsCfg serverx.ObservabilityConfig,
+	obsCfg ObservabilityConfig,
 	logger *slog.Logger,
 ) ([]connect.Interceptor, error) {
-	val, err := validator.NewStorageValidator()
+	val, err := NewStorageValidator()
 	if err != nil {
 		return nil, fmt.Errorf("create storage validator: %w", err)
 	}
-	valInterceptor := NewValidationInterceptor(val)
 
-	logOpts := serverx.WithConnectLogOptions(
-		slogx.WithLevelClassifier(classifyStorageLogLevel),
-		slogx.WithAttrExtractor(extractStorageAttrs),
-	)
-	obsInterceptor := NewStorageObservabilityInterceptor(logger)
+	otelOpts := []otelconnect.Option{
+		otelconnect.WithPropagateResponseHeader(),
+	}
+	if obsCfg != nil && obsCfg.TrustRemote() {
+		otelOpts = append(otelOpts, otelconnect.WithTrustRemote())
+	}
+	otelInterceptor, err := otelconnect.NewInterceptor(otelOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("create otelconnect interceptor: %w", err)
+	}
 
-	return serverx.NewInterceptorsWithValidator(
-		logger,
-		obsCfg,
-		valInterceptor,
-		logOpts,
-		obsInterceptor,
-	)
+	return []connect.Interceptor{
+		slogx.NewMaskInterceptor(logger),
+		otelInterceptor,
+		errorReasonInterceptor{},
+		slogx.NewConnectInterceptor(
+			obsCfg,
+			logger,
+			slogx.WithLevelClassifier(classifyStorageLogLevel),
+			slogx.WithAttrExtractor(extractStorageAttrs),
+		),
+		NewStorageObservabilityInterceptor(logger),
+		NewValidationInterceptor(val),
+	}, nil
 }

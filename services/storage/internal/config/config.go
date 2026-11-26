@@ -10,7 +10,6 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/starsrc/pkg/observability"
-	"github.com/starsrc/pkg/serverx"
 	"github.com/starsrc/pkg/tx"
 )
 
@@ -44,23 +43,37 @@ func normalizeOTLPEnvVars() {
 	}
 }
 
-type ServerConfig = serverx.ServerConfig
-
 type ObservabilityConfig = observability.EnvConfig
 
 type DBPoolConfig = tx.PoolConfig
 
+type noDefaultMetricsObsConfig struct {
+	*ObservabilityConfig
+}
+
+func (noDefaultMetricsObsConfig) IsMetricsEnabled() bool {
+	return false
+}
+
+func (noDefaultMetricsObsConfig) Enabled() bool {
+	return false
+}
+
+func NewObservabilityConfig(cfg *ObservabilityConfig) observability.Config {
+	if cfg == nil {
+		return nil
+	}
+	return noDefaultMetricsObsConfig{ObservabilityConfig: cfg}
+}
+
 type Config struct {
-	serverx.ServerConfig
+	ServerConfig
 	observability.EnvConfig
 	tx.PoolConfig
 	Meta MetaConfig
 }
 
-var (
-	_ serverx.AdminServerConfig      = (*Config)(nil)
-	_ observability.AdminRouteConfig = (*Config)(nil)
-)
+var _ observability.AdminRouteConfig = (*Config)(nil)
 
 func (c *Config) InternalPort() int {
 	if c == nil {

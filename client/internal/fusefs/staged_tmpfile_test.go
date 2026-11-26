@@ -1239,7 +1239,6 @@ func TestStagedTmpfile_LinkPromotion_WhenFencedBeforePromote_ReturnsEBUSYAndSkip
 	requireStatus(t, "fenced linkTmp", fuse.EBUSY, st)
 	require.Zero(t, linkOut.NodeId, "scene=fenced_linktmp_entryout want=0 got=%d", linkOut.NodeId)
 	snap := fs.Snapshot()
-	require.Zero(t, snap.Queues.DirtyInodes, "scene=fenced_linktmp_dirty want=0 got=%d", snap.Queues.DirtyInodes)
 	require.Zero(t, snap.TmpFile.Promotes, "scene=fenced_linktmp_promotes want=0 got=%d", snap.TmpFile.Promotes)
 	require.Zero(t, snap.TmpFile.ActiveFiles, "scene=fenced_linktmp_active_files want=0 got=%d", snap.TmpFile.ActiveFiles)
 	require.Zero(t, snap.TmpFile.ResidentBytes, "scene=fenced_linktmp_resident_bytes want=0 got=%d", snap.TmpFile.ResidentBytes)

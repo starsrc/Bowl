@@ -666,9 +666,9 @@ func TestRawFS_OnUnmount_HealthySlowUploads_ResetStallTimerUpToStageTimeout(t *t
 	})
 }
 
-func TestRawFS_OnUnmount_FsyncTimeout_BoundsPhase2AndStopsDispatchingNewDirtyInodes(t *testing.T) {
+func TestRawFS_OnUnmount_FsyncTimeout_BoundsPhase2FsyncDir(t *testing.T) {
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
-	srv.fsyncHook = func(ctx context.Context, _ *storagev1.FsyncRequest) error {
+	srv.fsyncDirHook = func(ctx context.Context, _ *storagev1.FsyncDirRequest) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -693,9 +693,10 @@ func TestRawFS_OnUnmount_FsyncTimeout_BoundsPhase2AndStopsDispatchingNewDirtyIno
 	}
 
 	require.Less(t, time.Since(start), 500*time.Millisecond)
-	require.LessOrEqual(t, srv.fsyncCalls.Load(), int64(fusefs.DefaultUnmountFsyncConcurrency),
-		"workers must stop dispatching new dirty inodes after fsync timeout: got=%d", srv.fsyncCalls.Load())
-	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 100, Total: 100}, fs.UnmountProgress())
+	require.Zero(t, srv.fsyncCalls.Load())
+	require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
+	require.Equal(t, uint64(1), fs.Snapshot().Queues.DirtyFlushErrors)
 }
 
 func TestRawFS_OnUnmount_TotalBudgetExhausted_SkipsPhase2AndReportsZeroRemainingBudget(t *testing.T) {

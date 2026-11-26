@@ -317,7 +317,6 @@ type subsystemGauges struct {
 	openFiles               int
 	openDirs                int
 	inodeLockActive         int
-	dirtyInodes             int
 	orphanInodes            int
 	releaseQueue            int
 	stagePendingChunks      int64
@@ -1126,7 +1125,6 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- m.inodeLockWaitHist.constHistogram(m.inodeLockWaitDurationDesc)
 	ch <- prometheus.MustNewConstMetric(m.inodeLockActiveDesc, prometheus.GaugeValue, float64(gauges.inodeLockActive))
 
-	ch <- prometheus.MustNewConstMetric(m.queueDepthDesc, prometheus.GaugeValue, float64(gauges.dirtyInodes), "dirty_inodes")
 	ch <- prometheus.MustNewConstMetric(m.queueDepthDesc, prometheus.GaugeValue, float64(gauges.orphanInodes), "orphan_inodes")
 	ch <- prometheus.MustNewConstMetric(m.queueDepthDesc, prometheus.GaugeValue, float64(gauges.releaseQueue), "release_queue")
 
@@ -1235,7 +1233,6 @@ type InodeLockStats struct {
 }
 
 type AsyncQueueStats struct {
-	DirtyInodes             int    `json:"dirty_inodes"`
 	OrphanInodes            int    `json:"orphan_inodes"`
 	ReleaseQueueDepth       int    `json:"release_queue_depth"`
 	DirtyFlushOK            uint64 `json:"dirty_flush_ok"`
@@ -1426,7 +1423,6 @@ func (m *Metrics) Snapshot() Snapshot {
 			ActiveEntries:         gauges.inodeLockActive,
 		},
 		Queues: AsyncQueueStats{
-			DirtyInodes:             gauges.dirtyInodes,
 			OrphanInodes:            gauges.orphanInodes,
 			ReleaseQueueDepth:       gauges.releaseQueue,
 			DirtyFlushOK:            m.dirtyFlushOK.Load(),
@@ -1489,8 +1485,8 @@ func (s *Snapshot) FormatText() string {
 		s.InodeLocks.ActiveEntries, s.InodeLocks.FastAcquisitions,
 		s.InodeLocks.ContendedAcquisitions, s.InodeLocks.WaitSeconds,
 	)
-	fmt.Fprintf(&b, "Queues: dirty=%d orphan=%d release=%d flush_ok=%d flush_err=%d reclaim_ok=%d reclaim_err=%d release_ok=%d release_err=%d fuse_waiting=%d fuse_congestion=%d\n",
-		s.Queues.DirtyInodes, s.Queues.OrphanInodes, s.Queues.ReleaseQueueDepth,
+	fmt.Fprintf(&b, "Queues: orphan=%d release=%d flush_ok=%d flush_err=%d reclaim_ok=%d reclaim_err=%d release_ok=%d release_err=%d fuse_waiting=%d fuse_congestion=%d\n",
+		s.Queues.OrphanInodes, s.Queues.ReleaseQueueDepth,
 		s.Queues.DirtyFlushOK, s.Queues.DirtyFlushErrors,
 		s.Queues.OrphanReclaimOK, s.Queues.OrphanReclaimErrors,
 		s.Queues.AsyncReleaseOK, s.Queues.AsyncReleaseErrors,
@@ -1643,7 +1639,6 @@ func (s *Snapshot) FormatStatsFile() string {
 	writeF64("bowl_client_inodelock_wait_seconds_total", s.InodeLocks.WaitSeconds)
 	writeI64("bowl_client_inodelock_active", int64(s.InodeLocks.ActiveEntries))
 
-	writeI64("bowl_client_queue_dirty_inodes", int64(s.Queues.DirtyInodes))
 	writeI64("bowl_client_queue_orphan_inodes", int64(s.Queues.OrphanInodes))
 	writeI64("bowl_client_queue_release_depth", int64(s.Queues.ReleaseQueueDepth))
 	writeU64("bowl_client_queue_dirty_flush_ok_total", s.Queues.DirtyFlushOK)

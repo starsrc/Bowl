@@ -65,8 +65,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		}
 	}
 
-	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending() ||
-		(input.Flags&(renameExchange|renameNoReplace) == 0 && fs.hasDirtyInodes() && (!targetKnown || (target != 0 && (targetAttr == nil || targetAttr.GetAttr() == nil))))
+	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending()
 	if needLookup {
 		old, oldStatus := fs.lookupInodeWithContext(opCtx, cancel, input.NodeId, oldName)
 		if oldStatus != fuse.OK {
@@ -114,7 +113,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		defer unlock()
 		if target != source && input.Flags&(renameExchange|renameNoReplace) == 0 {
 			needRevalidate := fs.topologySeq.Load() != seq0 &&
-				(fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes())
+				(fs.handles.AnyOpen() || fs.stage.HasAnyPending())
 			needOpenTargetAttr := fs.handles.IsOpen(target) && (targetAttr == nil || targetAttr.GetAttr() == nil)
 			if needRevalidate || needOpenTargetAttr {
 				refreshed, refSt := fs.getInodeWithContext(barrierCtx, nil, target)
@@ -241,7 +240,6 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		} else if hasTargetServerIno {
 			fs.stage.DiscardInode(targetServerIno)
 			fs.readAhead.InvalidateInode(targetServerIno)
-			fs.clearDirty(targetServerIno)
 			fs.forgetInodeSpecial(target)
 		}
 	}

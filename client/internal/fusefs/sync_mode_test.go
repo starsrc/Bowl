@@ -231,11 +231,11 @@ func TestTmpfile_SyncMode_UnlinkedLifecycle_RoutesAllFileOpsToServerAndReclaimsO
 	require.Equal(t, int64(2), srv.reclaimOrphanCalls.Load(), "scene=last_handle_release want=2 got=%d", srv.reclaimOrphanCalls.Load())
 	require.False(t, srv.hasNode(tmpOut.NodeId))
 	require.Zero(t, syncFS.Snapshot().Queues.OrphanInodes)
-	require.Zero(t, syncFS.Snapshot().Queues.DirtyInodes)
 
 	fsyncBeforeUnmount := srv.fsyncCalls.Load()
 	syncFS.OnUnmount()
 	require.Equal(t, fsyncBeforeUnmount, srv.fsyncCalls.Load(), "scene=unmount_after_reclaim want=no_extra_fsync")
+	require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=unmount_after_reclaim want=1_fsyncdir got=%d", srv.fsyncDirCalls.Load())
 }
 
 func TestTmpfile_SyncMode_OpenHandleFailure_ImmediatelyReclaimsServerOrphan(t *testing.T) {
@@ -299,7 +299,6 @@ func TestTmpfile_SyncMode_LinkPromotion_ClearsOrphanPreservesDirtyAndCountsSingl
 	}, &tmpOut))
 	mustWriteAt(t, syncFS, tmpOut.NodeId, tmpOut.Fh, 0, []byte("promoted-payload"))
 	require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes)
-	require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes)
 
 	var linkOut fuse.EntryOut
 	requireStatus(t, "promote Link", fuse.OK, syncFS.Link(nil, &fuse.LinkIn{
@@ -322,14 +321,14 @@ func TestTmpfile_SyncMode_LinkPromotion_ClearsOrphanPreservesDirtyAndCountsSingl
 	require.True(t, srv.hasNode(tmpOut.NodeId))
 	require.Equal(t, uint32(2), linkOut2.Nlink)
 	require.Equal(t, uint64(1), syncFS.Snapshot().TmpFile.Promotes, "scene=second_hard_link want=promotes_still_1")
-	require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes, "scene=promoted_dirty_preserved want=1")
 
 	looked := mustLookup(t, syncFS, fuse.FUSE_ROOT_ID, "promoted.bin")
 	require.Equal(t, tmpOut.NodeId, looked.NodeId)
 	require.Equal(t, uint64(16), looked.Size)
 
 	syncFS.OnUnmount()
-	require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=unmount_flushes_promoted_dirty want=1 got=%d", srv.fsyncCalls.Load())
+	require.Zero(t, srv.fsyncCalls.Load(), "scene=unmount_promoted_no_per_inode_fsync want=0 got=%d", srv.fsyncCalls.Load())
+	require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=unmount_flushes_promoted_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 }
 
 func TestTmpfile_SyncMode_LinkFailure_PreservesOrphanStateAndReclaimsOnRelease(t *testing.T) {

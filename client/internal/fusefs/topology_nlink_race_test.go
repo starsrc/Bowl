@@ -160,7 +160,6 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 
 		midSnap := syncFS.Snapshot()
 		require.Zero(t, midSnap.Queues.OrphanInodes, "scene=cached_unlink_link_race_orphans want=0 got=%d", midSnap.Queues.OrphanInodes)
-		require.Equal(t, 1, midSnap.Queues.DirtyInodes, "scene=cached_unlink_link_race_dirty want=1 got=%d", midSnap.Queues.DirtyInodes)
 
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
 		require.Zero(t, srv.reclaimOrphanCalls.Load(), "scene=cached_unlink_link_race_reclaim want=0 got=%d", srv.reclaimOrphanCalls.Load())
@@ -168,7 +167,8 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		require.Equal(t, uint32(1), srv.nodeNlink(tmpOut.NodeId), "scene=cached_unlink_link_race_nlink want=1 got=%d", srv.nodeNlink(tmpOut.NodeId))
 
 		syncFS.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=cached_unlink_link_race_unmount_fsync want=1 got=%d", srv.fsyncCalls.Load())
+		require.Zero(t, srv.fsyncCalls.Load(), "scene=cached_unlink_link_race_unmount_fsync want=0 got=%d", srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=cached_unlink_link_race_unmount_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 	})
 
 	t.Run("uncached AttrTimeout=0 on promoted sync O_TMPFILE with open handle and dirty data", func(t *testing.T) {
@@ -219,17 +219,17 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 
 		midSnap := syncFS.Snapshot()
 		require.Zero(t, midSnap.Queues.OrphanInodes, "scene=zero_ttl_unlink_link_race_orphans want=0 got=%d", midSnap.Queues.OrphanInodes)
-		require.Equal(t, 1, midSnap.Queues.DirtyInodes, "scene=zero_ttl_unlink_link_race_dirty want=1 got=%d", midSnap.Queues.DirtyInodes)
 
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
 		require.Zero(t, srv.reclaimOrphanCalls.Load(), "scene=zero_ttl_unlink_link_race_reclaim want=0 got=%d", srv.reclaimOrphanCalls.Load())
 		require.True(t, srv.hasNode(tmpOut.NodeId), "scene=zero_ttl_unlink_link_race_node_alive want=true")
 
 		syncFS.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=zero_ttl_unlink_link_race_unmount_fsync want=1 got=%d", srv.fsyncCalls.Load())
+		require.Zero(t, srv.fsyncCalls.Load(), "scene=zero_ttl_unlink_link_race_unmount_fsync want=0 got=%d", srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=zero_ttl_unlink_link_race_unmount_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 	})
 
-	t.Run("closed dirty file with zero open handles preserves dirtyInodes when raced by Link", func(t *testing.T) {
+	t.Run("closed written file with zero open handles flushes via single FsyncDir when raced by Link", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
@@ -241,7 +241,6 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 			nil, &fuse.SetXAttrIn{InHeader: fuse.InHeader{NodeId: created.NodeId}}, "user.k", []byte("v"),
 		))
 		require.Zero(t, syncFS.Snapshot().Handles.OpenFiles)
-		require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes)
 
 		linkEntered, unblockLink := installFirstLinkGate(srv, "closed-b.bin")
 		defer unblockLink()
@@ -256,20 +255,18 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		}()
 		<-linkEntered
 
-		beforeEntries := syncFS.Snapshot().NamespaceCache.Entries
 		unlinkStCh := make(chan fuse.Status, 1)
 		go func() {
 			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "closed-a.bin")
 		}()
-		waitForNamespaceEntriesAtLeast(t, syncFS, beforeEntries+1)
 
 		unblockLink()
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 
-		require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes, "scene=closed_dirty_unlink_link_race want=1 got=%d", syncFS.Snapshot().Queues.DirtyInodes)
 		syncFS.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=closed_dirty_unmount_fsync want=1 got=%d", srv.fsyncCalls.Load())
+		require.Zero(t, srv.fsyncCalls.Load(), "scene=closed_dirty_unmount_fsync want=0 got=%d", srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=closed_dirty_unmount_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 	})
 }
 
@@ -335,7 +332,6 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 
 		preSnap := stagedFS.Snapshot()
 		require.Zero(t, preSnap.Handles.OpenFiles)
-		require.Zero(t, preSnap.Queues.DirtyInodes)
 		require.Positive(t, preSnap.Stage.PendingChunks)
 
 		firstUnlinkEntered, secondUnlinkEntered, unblockFirstUnlink := installTwoStepUnlinkGate(srv, "s1.bin", "s2.bin")
@@ -361,9 +357,9 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 		requireStatus(t, "Unlink s2.bin", fuse.OK, <-u2StCh)
 
 		require.Zero(t, stagedFS.Snapshot().Stage.PendingChunks, "scene=double_unlink_stage_discarded want=0 got=%d", stagedFS.Snapshot().Stage.PendingChunks)
-		require.Zero(t, stagedFS.Snapshot().Queues.DirtyInodes, "scene=double_unlink_stage_dirty want=0 got=%d", stagedFS.Snapshot().Queues.DirtyInodes)
 		stagedFS.OnUnmount()
 		require.Zero(t, srv.fsyncCalls.Load(), "scene=double_unlink_no_dirty_fsync want=0 got=%d", srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=double_unlink_single_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 	})
 }
 
@@ -408,7 +404,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 
 		midSnap := syncFS.Snapshot()
 		require.Zero(t, midSnap.Queues.OrphanInodes, "scene=cached_rename_link_race_orphans want=0 got=%d", midSnap.Queues.OrphanInodes)
-		require.Equal(t, 1, midSnap.Queues.DirtyInodes, "scene=cached_rename_link_race_dirty want=1 got=%d", midSnap.Queues.DirtyInodes)
 
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: target.NodeId}, Fh: target.Fh})
 		require.Zero(t, srv.reclaimOrphanCalls.Load(), "scene=cached_rename_link_race_reclaim want=0 got=%d", srv.reclaimOrphanCalls.Load())
@@ -416,7 +411,8 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		require.Equal(t, uint32(1), srv.nodeNlink(target.NodeId), "scene=cached_rename_link_race_nlink want=1 got=%d", srv.nodeNlink(target.NodeId))
 
 		syncFS.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=cached_rename_link_race_unmount_fsync want=1 got=%d", srv.fsyncCalls.Load())
+		require.Zero(t, srv.fsyncCalls.Load(), "scene=cached_rename_link_race_unmount_fsync want=0 got=%d", srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=cached_rename_link_race_unmount_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 	})
 
 	t.Run("uncached AttrTimeout=0 overwriting open dirty promoted sync O_TMPFILE target raced by Link", func(t *testing.T) {
@@ -472,17 +468,17 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 
 		midSnap := syncFS.Snapshot()
 		require.Zero(t, midSnap.Queues.OrphanInodes, "scene=zero_ttl_rename_link_race_orphans want=0 got=%d", midSnap.Queues.OrphanInodes)
-		require.Equal(t, 1, midSnap.Queues.DirtyInodes, "scene=zero_ttl_rename_link_race_dirty want=1 got=%d", midSnap.Queues.DirtyInodes)
 
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpTarget.NodeId}, Fh: tmpTarget.Fh})
 		require.Zero(t, srv.reclaimOrphanCalls.Load(), "scene=zero_ttl_rename_link_race_reclaim want=0 got=%d", srv.reclaimOrphanCalls.Load())
 		require.True(t, srv.hasNode(tmpTarget.NodeId), "scene=zero_ttl_rename_link_race_node_alive want=true")
 
 		syncFS.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=zero_ttl_rename_link_race_unmount_fsync want=1 got=%d", srv.fsyncCalls.Load())
+		require.Zero(t, srv.fsyncCalls.Load(), "scene=zero_ttl_rename_link_race_unmount_fsync want=0 got=%d", srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=zero_ttl_rename_link_race_unmount_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 	})
 
-	t.Run("closed dirty target with zero open handles preserves dirtyInodes when raced by Link", func(t *testing.T) {
+	t.Run("closed written target with zero open handles flushes via single FsyncDir when raced by Link", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
@@ -497,7 +493,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 			nil, &fuse.SetXAttrIn{InHeader: fuse.InHeader{NodeId: target.NodeId}}, "user.k", []byte("v"),
 		))
 		require.Zero(t, syncFS.Snapshot().Handles.OpenFiles)
-		require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes)
 
 		linkEntered, unblockLink := installFirstLinkGate(srv, "target-closed-keep.bin")
 		defer unblockLink()
@@ -512,7 +507,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		}()
 		<-linkEntered
 
-		beforeEntries := syncFS.Snapshot().NamespaceCache.Entries
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -520,15 +514,14 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "src-closed.bin", "target-closed.bin")
 		}()
-		waitForNamespaceEntriesAtLeast(t, syncFS, beforeEntries+1)
 
 		unblockLink()
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
 		requireStatus(t, "concurrent Rename", fuse.OK, <-renameStCh)
 
-		require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes, "scene=closed_dirty_rename_link_race want=1 got=%d", syncFS.Snapshot().Queues.DirtyInodes)
 		syncFS.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=closed_dirty_rename_unmount_fsync want=1 got=%d", srv.fsyncCalls.Load())
+		require.Zero(t, srv.fsyncCalls.Load(), "scene=closed_dirty_rename_unmount_fsync want=0 got=%d", srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=closed_dirty_rename_unmount_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 	})
 }
 
@@ -579,7 +572,7 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 		require.False(t, srv.hasNode(target.NodeId), "scene=unlink_rename_server_node_deleted want=false")
 	})
 
-	t.Run("closed 2-hardlink dirty target overwritten concurrently with Unlink clears dirtyInodes", func(t *testing.T) {
+	t.Run("closed 2-hardlink target overwritten concurrently with Unlink flushes via single FsyncDir on unmount", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		targetIno := srv.seedFile(1, "dt1.bin", 0o644, nil)
@@ -597,7 +590,6 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 		}, "dt2.bin", &linkOut))
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: targetIno}, Fh: targetOpen.Fh})
 		require.Zero(t, syncFS.Snapshot().Handles.OpenFiles)
-		require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes)
 
 		unlinkEntered, unblockUnlink := installFirstUnlinkGate(srv, "dt2.bin")
 		defer unblockUnlink()
@@ -608,7 +600,6 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 		}()
 		<-unlinkEntered
 
-		beforeEntries := syncFS.Snapshot().NamespaceCache.Entries
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -616,15 +607,14 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "drepl.bin", "dt1.bin")
 		}()
-		waitForNamespaceEntriesAtLeast(t, syncFS, beforeEntries+1)
 
 		unblockUnlink()
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 		requireStatus(t, "concurrent Rename", fuse.OK, <-renameStCh)
 
-		require.Zero(t, syncFS.Snapshot().Queues.DirtyInodes, "scene=unlink_rename_closed_dirty_cleared want=0 got=%d", syncFS.Snapshot().Queues.DirtyInodes)
 		syncFS.OnUnmount()
 		require.Zero(t, srv.fsyncCalls.Load(), "scene=unlink_rename_closed_no_fsync want=0 got=%d", srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load(), "scene=unlink_rename_closed_single_fsyncdir want=1 got=%d", srv.fsyncDirCalls.Load())
 	})
 }
 
@@ -784,21 +774,6 @@ func installFirstGetAttrGate(srv *fakeStorage, targetIno uint64) (entered <-chan
 	return enteredCh, unblock
 }
 
-func waitForAtomicInt64AtLeast(t *testing.T, counter interface{ Load() int64 }, minVal int64, scene string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	for {
-		if counter.Load() >= minVal {
-			return
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("scene=%s want>=%d got=%d", scene, minVal, counter.Load())
-		}
-		runtime.Gosched()
-	}
-}
-
 func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENOENT(t *testing.T) {
 	t.Run("GivenCachedSingleLinkFile_WhenUnlinkWinsLock_ThenOpenReturnsENOENTWithZeroDanglingHandles", func(t *testing.T) {
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
@@ -865,12 +840,14 @@ func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENO
 		}()
 		<-getAttrEntered
 
-		lookupsBefore := srv.lookupCalls.Load()
+		entryHitsBefore := syncFS.Snapshot().NamespaceCache.EntryHits
 		unlinkStCh := make(chan fuse.Status, 1)
 		go func() {
 			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "open-wins-unlink.bin")
 		}()
-		waitForAtomicInt64AtLeast(t, &srv.lookupCalls, lookupsBefore+1, "unlink_lookup_before_lock")
+		require.Eventually(t, func() bool {
+			return syncFS.Snapshot().NamespaceCache.EntryHits > entryHitsBefore
+		}, 3*time.Second, 5*time.Millisecond, "scene=unlink_entry_hit_before_lock")
 		time.Sleep(20 * time.Millisecond)
 
 		releaseGetAttr()
@@ -957,7 +934,7 @@ func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENO
 		}()
 		<-getAttrEntered
 
-		lookupsBefore := srv.lookupCalls.Load()
+		entryHitsBefore := syncFS.Snapshot().NamespaceCache.EntryHits
 		renameStCh := make(chan fuse.Status, 1)
 		go func() {
 			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
@@ -965,7 +942,9 @@ func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENO
 				Newdir:   fuse.FUSE_ROOT_ID,
 			}, "ren-ow-src.bin", "ren-ow-target.bin")
 		}()
-		waitForAtomicInt64AtLeast(t, &srv.lookupCalls, lookupsBefore+1, "rename_lookup_before_lock")
+		require.Eventually(t, func() bool {
+			return syncFS.Snapshot().NamespaceCache.EntryHits >= entryHitsBefore+2
+		}, 3*time.Second, 5*time.Millisecond, "scene=rename_entry_hits_before_lock")
 		time.Sleep(20 * time.Millisecond)
 
 		releaseGetAttr()

@@ -176,14 +176,23 @@ func TestMetrics与Prometheus与Snapshot_验证38个FUSE操作与26桶直方图�
 		jsonBytes, jsonErr := snap.FormatJSON()
 		require.NoError(t, jsonErr)
 		require.Contains(t, string(jsonBytes), `"fuse"`)
+		require.NotContains(t, string(jsonBytes), `"dirty_inodes"`)
 		require.Contains(t, snap.FormatText(), "FUSE")
+		require.NotContains(t, snap.FormatText(), "dirty=")
 		require.Contains(t, snap.FormatStatsFile(), "bowl_client_fuse_ops_total")
+		require.NotContains(t, snap.FormatStatsFile(), "bowl_client_queue_dirty_inodes")
 
 		reg := prometheus.NewRegistry()
 		require.NoError(t, reg.Register(fs.Collector()))
 		durMF := findMetricFamily(t, reg, "bowl_client_fuse_op_duration_seconds")
 		require.NotEmpty(t, durMF.GetMetric())
 		require.Len(t, durMF.GetMetric()[0].GetHistogram().GetBucket(), 26, "FUSE 操作直方图必须精确为 26 桶")
+		queueDepthMF := findMetricFamily(t, reg, "bowl_client_queue_depth")
+		for _, metric := range queueDepthMF.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				require.NotEqual(t, "dirty_inodes", label.GetValue())
+			}
+		}
 	})
 }
 
@@ -507,12 +516,12 @@ func (b *syncBuffer) String() string {
 }
 
 func TestStructuredLogging_关键异常事件输出结构化JSON日志(t *testing.T) {
-	t.Run("OnUnmount遇到Fsync失败输出unmount_fsync_failed", func(t *testing.T) {
+	t.Run("OnUnmount遇到FsyncDir失败输出unmount_fsync_failed", func(t *testing.T) {
 
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		srv.fsyncHook = func(context.Context, *storagev1.FsyncRequest) error {
+		srv.fsyncDirHook = func(context.Context, *storagev1.FsyncDirRequest) error {
 			return errnoError(connect.CodeInternal, "EIO")
 		}
 		fs := newTestRawFS(t, srv, withDirectIO(false), withLogger(logger))

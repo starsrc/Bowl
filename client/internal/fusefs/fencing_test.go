@@ -702,7 +702,7 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 		mustWriteAt(t, fs, dirtyFile.NodeId, dirtyFile.Fh, 0, []byte("committed-dirty"))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirtyFile.NodeId}, Fh: dirtyFile.Fh})
 		require.Eventually(t, func() bool {
-			return fs.Snapshot().Queues.DirtyInodes == 1 && fs.Snapshot().Stage.PendingChunks == 0
+			return srv.writeCalls.Load() >= 1 && fs.Snapshot().Stage.PendingChunks == 0 && fs.Snapshot().Stage.UsedBytes == 0
 		}, 2*time.Second, 5*time.Millisecond)
 
 		orphanFile := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orphan.bin", syscall.O_RDWR, 0o644)
@@ -741,7 +741,6 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 		require.Zero(t, snap.Handles.OpenFiles)
 		require.Zero(t, snap.NamespaceCache.Entries)
 		require.Zero(t, snap.TmpFile.ActiveFiles)
-		require.Zero(t, snap.Queues.DirtyInodes)
 		require.Zero(t, snap.Queues.OrphanInodes)
 		require.Zero(t, snap.Queues.ReleaseQueueDepth)
 		_, statErr := os.Stat(instDir)

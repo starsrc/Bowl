@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -41,18 +40,6 @@ func currentGoroutineID() uint64 {
 	return id
 }
 
-func updateMaxInt64(target *atomic.Int64, candidate int64) {
-	for {
-		cur := target.Load()
-		if candidate <= cur {
-			return
-		}
-		if target.CompareAndSwap(cur, candidate) {
-			return
-		}
-	}
-}
-
 func createDirtySyncFiles(t *testing.T, fs *fusefs.RawFS, count int) []uint64 {
 	t.Helper()
 	inos := make([]uint64, 0, count)
@@ -65,111 +52,144 @@ func createDirtySyncFiles(t *testing.T, fs *fusefs.RawFS, count int) []uint64 {
 	return inos
 }
 
-func pollUnmountProgressUntilDone(t *testing.T, fs *fusefs.RawFS, unmountDone <-chan struct{}) {
-	t.Helper()
-	var prevCompleted uint64
-	for {
-		prog := fs.UnmountProgress()
-		require.GreaterOrEqual(t, prog.Completed, prevCompleted, "UnmountProgress.Completed decreased")
-		require.LessOrEqual(t, prog.Completed, prog.Total)
-		prevCompleted = prog.Completed
-
-		select {
-		case <-unmountDone:
-			return
-		default:
-			runtime.Gosched()
-		}
-	}
-}
-
-func TestRawFS_OnUnmount_BoundedConcurrentFsync_BoundsAt64AndAdvancesMonotonically(t *testing.T) {
-
-	srv := newFakeStorage(t, withTTL(1.0, 1.0))
-	var inflight atomic.Int64
-	var maxInflight atomic.Int64
-	var holdSeq atomic.Int64
-	allWorkersReached := make(chan struct{})
-	var reachedOnce sync.Once
-	releaseGate := make(chan struct{})
-
-	srv.fsyncHook = func(ctx context.Context, _ *storagev1.FsyncRequest) error {
-		cur := inflight.Add(1)
-		updateMaxInt64(&maxInflight, cur)
-		defer inflight.Add(-1)
-
-		if cur == 64 {
-			reachedOnce.Do(func() { close(allWorkersReached) })
-		}
-		if holdSeq.Add(1) <= 64 {
+func TestRawFS_OnUnmount_MultiFileWrites_IssuesSingleFsyncDirRootInoInline(t *testing.T) {
+	t.Run("SyncMode200FilesIssuesSingleFsyncDirOnRootIno", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(42), withTTL(1.0, 1.0))
+		entered := make(chan uint64, 2)
+		gate := make(chan struct{})
+		srv.fsyncDirHook = func(ctx context.Context, req *storagev1.FsyncDirRequest) error {
+			entered <- req.GetIno()
 			select {
-			case <-releaseGate:
+			case <-gate:
+				return nil
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
-		return nil
-	}
 
-	fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
-	t.Cleanup(func() {
+		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
+		t.Cleanup(func() {
+			select {
+			case <-gate:
+			default:
+				close(gate)
+			}
+		})
+		createDirtySyncFiles(t, fs, 200)
+
+		unmountDone := make(chan struct{})
+		go func() {
+			fs.OnUnmount()
+			close(unmountDone)
+		}()
+
+		var gotIno uint64
 		select {
-		case <-releaseGate:
-		default:
-			close(releaseGate)
+		case gotIno = <-entered:
+		case <-unmountDone:
+			t.Fatal("OnUnmount returned without calling FsyncDir")
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for single FsyncDir RPC")
 		}
-	})
-	createDirtySyncFiles(t, fs, 200)
 
-	unmountDone := make(chan struct{})
-	go func() {
+		require.Equal(t, uint64(42), gotIno)
+		require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 0, Total: 1}, fs.UnmountProgress())
+
+		close(gate)
+		<-unmountDone
+
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
+		snap := fs.Snapshot()
+		require.Equal(t, uint64(1), snap.Queues.DirtyFlushOK)
+		require.Zero(t, snap.Queues.DirtyFlushErrors)
+
 		fs.OnUnmount()
-		close(unmountDone)
-	}()
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
+	})
 
-	select {
-	case <-allWorkersReached:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("OnUnmount did not reach 64 concurrent Fsync RPCs, maxInflight=%d", maxInflight.Load())
-	}
+	t.Run("SingleFileWriteRunsFsyncDirInlineOnCallerGoroutine", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(19), withTTL(1.0, 1.0))
+		var hookGoroutineID atomic.Uint64
+		var gotIno atomic.Uint64
+		srv.fsyncDirHook = func(_ context.Context, req *storagev1.FsyncDirRequest) error {
+			hookGoroutineID.Store(currentGoroutineID())
+			gotIno.Store(req.GetIno())
+			return nil
+		}
+		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
+		createDirtySyncFiles(t, fs, 1)
 
-	midProg := fs.UnmountProgress()
-	require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 0, Total: 200}, midProg)
+		callerID := currentGoroutineID()
+		fs.OnUnmount()
 
-	close(releaseGate)
-	pollUnmountProgressUntilDone(t, fs, unmountDone)
+		require.NotZero(t, callerID)
+		require.Equal(t, callerID, hookGoroutineID.Load())
+		require.Equal(t, uint64(19), gotIno.Load())
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
+		snap := fs.Snapshot()
+		require.Equal(t, uint64(1), snap.Queues.DirtyFlushOK)
+		require.Zero(t, snap.Queues.DirtyFlushErrors)
+	})
 
-	require.Equal(t, 64, fusefs.DefaultUnmountFsyncConcurrency)
-	require.Equal(t, int64(64), maxInflight.Load())
-	require.Equal(t, int64(200), srv.fsyncCalls.Load())
-	require.Zero(t, srv.fsyncDirCalls.Load())
-	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 200, Total: 200}, fs.UnmountProgress())
-	snap := fs.Snapshot()
-	require.Equal(t, uint64(200), snap.Queues.DirtyFlushOK)
-	require.Zero(t, snap.Queues.DirtyFlushErrors)
-}
+	t.Run("StagedModeMultiFileWritesIssueSingleFsyncDir", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(33), withTTL(1.0, 1.0))
+		var gotIno atomic.Uint64
+		srv.fsyncDirHook = func(_ context.Context, req *storagev1.FsyncDirRequest) error {
+			gotIno.Store(req.GetIno())
+			return nil
+		}
+		fs := newTestRawFS(t, srv, withDirectIO(false), withStageSize(16*1024*1024))
+		for i := range 5 {
+			f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, fmt.Sprintf("staged-%d.bin", i), syscall.O_RDWR, 0o644)
+			mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("staged-payload"))
+			fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
+		}
 
-func TestRawFS_OnUnmount_SingleDirtyInode_RunsFsyncInlineOnCallerGoroutine(t *testing.T) {
+		fs.OnUnmount()
 
-	srv := newFakeStorage(t, withTTL(1.0, 1.0))
-	var hookGoroutineID atomic.Uint64
-	srv.fsyncHook = func(_ context.Context, _ *storagev1.FsyncRequest) error {
-		hookGoroutineID.Store(currentGoroutineID())
-		return nil
-	}
-	fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
-	createDirtySyncFiles(t, fs, 1)
+		require.Equal(t, uint64(33), gotIno.Load())
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		snap := fs.Snapshot()
+		require.Equal(t, uint64(1), snap.Queues.DirtyFlushOK)
+		require.Zero(t, snap.Queues.DirtyFlushErrors)
+	})
 
-	callerID := currentGoroutineID()
-	fs.OnUnmount()
+	t.Run("StagedTmpfileWithDataLinkPromotionIssuesSingleFsyncDir", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(34), withTTL(1.0, 1.0))
+		var gotIno atomic.Uint64
+		srv.fsyncDirHook = func(_ context.Context, req *storagev1.FsyncDirRequest) error {
+			gotIno.Store(req.GetIno())
+			return nil
+		}
+		fs := newTestRawFS(t, srv, withDirectIO(false), withStageSize(16*1024*1024))
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o600,
+		}, &tmpOut))
+		mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, []byte("promoted-tmp-data"))
+		var linkOut fuse.EntryOut
+		requireStatus(t, "Link", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: tmpOut.NodeId,
+		}, "promoted-data.bin", &linkOut))
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
 
-	require.NotZero(t, callerID)
-	require.Equal(t, callerID, hookGoroutineID.Load())
-	require.Equal(t, int64(1), srv.fsyncCalls.Load())
-	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
-	snap := fs.Snapshot()
-	require.Equal(t, uint64(1), snap.Queues.DirtyFlushOK)
-	require.Zero(t, snap.Queues.DirtyFlushErrors)
+		fs.OnUnmount()
+
+		require.Equal(t, uint64(34), gotIno.Load())
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, uint64(1), fs.Snapshot().Queues.DirtyFlushOK)
+	})
 }
 
 func collectUnmountFsyncLogInodes(t *testing.T, raw string) []uint64 {
@@ -187,51 +207,13 @@ func collectUnmountFsyncLogInodes(t *testing.T, raw string) []uint64 {
 	return inos
 }
 
-func TestRawFS_OnUnmount_ConcurrentFsyncErrors_AccountsMetricsLogsAndCompletesProgress(t *testing.T) {
-
-	var logBuf syncBuffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
-	srv := newFakeStorage(t, withTTL(1.0, 1.0))
-	fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false), withLogger(logger))
-	inos := createDirtySyncFiles(t, fs, 5)
-	failInos := map[uint64]bool{inos[1]: true, inos[3]: true}
-	unimplIno := inos[2]
-
-	srv.fsyncHook = func(_ context.Context, req *storagev1.FsyncRequest) error {
-		if failInos[req.GetIno()] {
-			return errnoError(connect.CodeInternal, "EIO")
-		}
-		if req.GetIno() == unimplIno {
-			return connect.NewError(connect.CodeUnimplemented, nil)
-		}
-		return nil
-	}
-
-	fs.OnUnmount()
-
-	require.Equal(t, int64(5), srv.fsyncCalls.Load())
-	require.Zero(t, srv.fsyncDirCalls.Load())
-	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 5, Total: 5}, fs.UnmountProgress())
-	snap := fs.Snapshot()
-	require.Equal(t, uint64(3), snap.Queues.DirtyFlushOK)
-	require.Equal(t, uint64(2), snap.Queues.DirtyFlushErrors)
-
-	loggedInos := collectUnmountFsyncLogInodes(t, logBuf.String())
-	require.ElementsMatch(t, []uint64{inos[1], inos[3]}, loggedInos)
-}
-
-func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmount(t *testing.T) {
-	t.Run("OpenWithOTruncMarksRegularFileDirtyAndFlushesFsync", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		ino := srv.seedFile(1, "trunc-open.bin", 0o644, []byte("existing-payload"))
-		var fsyncedInos []uint64
-		var mu sync.Mutex
-		srv.fsyncHook = func(_ context.Context, req *storagev1.FsyncRequest) error {
-			mu.Lock()
-			fsyncedInos = append(fsyncedInos, req.GetIno())
-			mu.Unlock()
+func TestRawFS_OnUnmount_OpenTruncateSetAttrSizeAndFallocate_IssuesSingleFsyncDirRootIno(t *testing.T) {
+	t.Run("OpenWithOTruncIssuesSingleFsyncDir", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(61), withTTL(1.0, 1.0))
+		ino := srv.seedFile(61, "trunc-open.bin", 0o644, []byte("existing-payload"))
+		var gotIno atomic.Uint64
+		srv.fsyncDirHook = func(_ context.Context, req *storagev1.FsyncDirRequest) error {
+			gotIno.Store(req.GetIno())
 			return nil
 		}
 		fs := newTestRawFS(t, srv, withDirectIO(false))
@@ -239,22 +221,18 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 		opened := mustOpenFile(t, fs, ino, uint32(syscall.O_RDWR|syscall.O_TRUNC))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 
-		require.Equal(t, 1, fs.Snapshot().Queues.DirtyInodes)
 		fs.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load())
-		require.Equal(t, []uint64{ino}, fsyncedInos)
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, uint64(61), gotIno.Load())
 	})
 
-	t.Run("SetAttrFATTRSIZEMarksRegularFileDirtyAndFlushesFsync", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		ino := srv.seedFile(1, "trunc-setattr.bin", 0o644, []byte("0123456789"))
-		var fsyncedInos []uint64
-		var mu sync.Mutex
-		srv.fsyncHook = func(_ context.Context, req *storagev1.FsyncRequest) error {
-			mu.Lock()
-			fsyncedInos = append(fsyncedInos, req.GetIno())
-			mu.Unlock()
+	t.Run("SetAttrFATTRSIZEIssuesSingleFsyncDir", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(62), withTTL(1.0, 1.0))
+		ino := srv.seedFile(62, "trunc-setattr.bin", 0o644, []byte("0123456789"))
+		var gotIno atomic.Uint64
+		srv.fsyncDirHook = func(_ context.Context, req *storagev1.FsyncDirRequest) error {
+			gotIno.Store(req.GetIno())
 			return nil
 		}
 		fs := newTestRawFS(t, srv, withDirectIO(false))
@@ -269,22 +247,18 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 		}, &out)
 		requireStatus(t, "SetAttr truncate", fuse.OK, st)
 
-		require.Equal(t, 1, fs.Snapshot().Queues.DirtyInodes)
 		fs.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load())
-		require.Equal(t, []uint64{ino}, fsyncedInos)
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, uint64(62), gotIno.Load())
 	})
 
-	t.Run("FallocateMarksRegularFileDirtyAndFlushesFsync", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		ino := srv.seedFile(1, "alloc.bin", 0o644, []byte("0123456789"))
-		var fsyncedInos []uint64
-		var mu sync.Mutex
-		srv.fsyncHook = func(_ context.Context, req *storagev1.FsyncRequest) error {
-			mu.Lock()
-			fsyncedInos = append(fsyncedInos, req.GetIno())
-			mu.Unlock()
+	t.Run("FallocateIssuesSingleFsyncDir", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(63), withTTL(1.0, 1.0))
+		ino := srv.seedFile(63, "alloc.bin", 0o644, []byte("0123456789"))
+		var gotIno atomic.Uint64
+		srv.fsyncDirHook = func(_ context.Context, req *storagev1.FsyncDirRequest) error {
+			gotIno.Store(req.GetIno())
 			return nil
 		}
 		fs := newTestRawFS(t, srv, withDirectIO(false))
@@ -300,16 +274,20 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 		requireStatus(t, "Fallocate punch hole", fuse.OK, st)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 
-		require.Equal(t, 1, fs.Snapshot().Queues.DirtyInodes)
 		fs.OnUnmount()
-		require.Equal(t, int64(1), srv.fsyncCalls.Load())
-		require.Equal(t, []uint64{ino}, fsyncedInos)
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, uint64(63), gotIno.Load())
 	})
 
-	t.Run("DirectoryAndNonSizeSetAttrDoNotMarkDirtyInodes", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		regIno := srv.seedFile(1, "chmod-only.bin", 0o644, []byte("data"))
+	t.Run("DirectoryAndNonSizeSetAttrIssueSingleFsyncDir", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(64), withTTL(1.0, 1.0))
+		regIno := srv.seedFile(64, "chmod-only.bin", 0o644, []byte("data"))
+		var gotIno atomic.Uint64
+		srv.fsyncDirHook = func(_ context.Context, req *storagev1.FsyncDirRequest) error {
+			gotIno.Store(req.GetIno())
+			return nil
+		}
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		dir := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "sub", 0o755)
 
@@ -329,9 +307,10 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 			},
 		}, &out))
 
-		require.Zero(t, fs.Snapshot().Queues.DirtyInodes)
 		fs.OnUnmount()
 		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, uint64(64), gotIno.Load())
 	})
 }
 
@@ -507,6 +486,24 @@ func TestRawFS_OnUnmount_MetadataOnlyMutations_IssuesSingleFsyncDirRootIno(t *te
 				fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
 			},
 		},
+		{
+			name:    "StagedTmpfileLinkPromotion",
+			rootIno: 42,
+			mutate: func(t *testing.T, _ *fakeStorage, fs *fusefs.RawFS, _ uint64) {
+				var tmpOut fuse.CreateOut
+				requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+					InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+					Flags:    uint32(syscall.O_RDWR),
+					Mode:     0o600,
+				}, &tmpOut))
+				var linkOut fuse.EntryOut
+				requireStatus(t, "Link", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+					InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+					Oldnodeid: tmpOut.NodeId,
+				}, "promoted-tmp.bin", &linkOut))
+				fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -539,7 +536,6 @@ func TestRawFS_OnUnmount_MetadataOnlyMutations_IssuesSingleFsyncDirRootIno(t *te
 			})
 
 			tc.mutate(t, srv, fs, tc.rootIno)
-			require.Zero(t, fs.Snapshot().Queues.DirtyInodes)
 			require.Zero(t, srv.fsyncCalls.Load())
 			require.Zero(t, srv.fsyncDirCalls.Load())
 
@@ -740,9 +736,8 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 	})
 
-	t.Run("UnmountFileFsyncSkipsRedundantFsyncDir", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+	t.Run("MixedDataAndMetadataMutationsIssueSingleFsyncDir", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(44), withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "d4", 0o755)
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "f4.bin", syscall.O_RDWR, 0o644)
@@ -751,15 +746,14 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 
 		fs.OnUnmount()
 
-		require.Equal(t, int64(1), srv.fsyncCalls.Load())
-		require.Zero(t, srv.fsyncDirCalls.Load())
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
 	})
 
-	t.Run("AllUnmountFileFsyncsFailDoesNotHangOrCallFsyncDir", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		srv.fsyncHook = func(context.Context, *storagev1.FsyncRequest) error {
+	t.Run("MultiFileUnmountFsyncDirFailureDoesNotHangOrRetry", func(t *testing.T) {
+		srv := newFakeStorage(t, withRootIno(45), withTTL(1.0, 1.0))
+		srv.fsyncDirHook = func(context.Context, *storagev1.FsyncDirRequest) error {
 			return errnoError(connect.CodeInternal, "EIO")
 		}
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
@@ -768,16 +762,16 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 
 		fs.OnUnmount()
 
-		require.Equal(t, int64(3), srv.fsyncCalls.Load())
-		require.Zero(t, srv.fsyncDirCalls.Load())
-		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 3, Total: 3}, fs.UnmountProgress())
-		require.Equal(t, uint64(3), fs.Snapshot().Queues.DirtyFlushErrors)
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
+		require.Equal(t, uint64(1), fs.Snapshot().Queues.DirtyFlushErrors)
 
 		fs.OnUnmount()
-		require.Equal(t, int64(3), srv.fsyncCalls.Load())
-		require.Zero(t, srv.fsyncDirCalls.Load())
-		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 3, Total: 3}, fs.UnmountProgress())
-		require.Equal(t, uint64(3), fs.Snapshot().Queues.DirtyFlushErrors)
+		require.Zero(t, srv.fsyncCalls.Load())
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
+		require.Equal(t, uint64(1), fs.Snapshot().Queues.DirtyFlushErrors)
 	})
 }
 

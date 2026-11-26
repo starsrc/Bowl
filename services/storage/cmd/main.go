@@ -96,11 +96,11 @@ func runWithConfig(ctx context.Context, cfg *config.Config) error {
 	}
 
 	node, err := engine.OpenNode(engine.NodeOptions{
-		DataDir:      cfg.Meta.DataDir(),
-		Logger:       obsRT.Logger(),
-		ActorIdleTTL: cfg.Meta.ActorIdleTTL(),
-		GCMode:       gcMode,
-		GCInterval:   gcInterval,
+		DataDir:     cfg.Meta.DataDir(),
+		Logger:      obsRT.Logger(),
+		DiskIdleTTL: cfg.Meta.DiskIdleTTL(),
+		GCMode:      gcMode,
+		GCInterval:  gcInterval,
 	})
 	if err != nil {
 		return abort(fmt.Errorf("open node store: %w", err))

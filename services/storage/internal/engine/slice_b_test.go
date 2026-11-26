@@ -3,53 +3,81 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestStep5_BranchActor_CreatedOnDemandAndEvictedSafelyWithoutClosingDisk(t *testing.T) {
+func TestStep12_ConcurrentBranchWritesAndDeleteBranch_Race(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	now := time.Unix(1700000000, 0)
 	disk, err := openTestDisk(testDiskOptions{
 		Dir:       dir,
-		DiskID:    "disk-evict",
+		DiskID:    "disk-del-race",
 		BlockSize: 4096,
-		Now:       func() time.Time { return now },
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, disk.Close())
 	})
 
-	require.Empty(t, disk.ActiveBranchActors())
+	for round := range 8 {
+		bName := fmt.Sprintf("ephemeral-%d", round)
+		_, _, fErr := disk.Fork(ctx, DefaultBranchName, bName, "fork")
+		require.NoError(t, fErr)
 
-	root, err := disk.GetAttr(ctx, DefaultBranchName, RootIno)
-	require.NoError(t, err)
-	require.Equal(t, RootIno, root.Ino)
-	require.Empty(t, disk.ActiveBranchActors())
+		f, cErr := disk.Create(ctx, bName, RootIno, "seed.bin", 0o644, 0, 0)
+		require.NoError(t, cErr)
 
-	fileIno, err := disk.Create(ctx, DefaultBranchName, RootIno, "a.txt", 0o644, 0, 0)
-	require.NoError(t, err)
-	require.Equal(t, []string{DefaultBranchName}, disk.ActiveBranchActors())
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		unexpectedErrs := make(chan error, 4)
+		for w := range 4 {
+			wg.Add(1)
+			go func(worker int) {
+				defer wg.Done()
+				<-start
+				for i := range 10 {
+					_, wErr := disk.Write(ctx, bName, f.Ino, int64((worker*10+i)*64), bytes.Repeat([]byte{byte(worker + 1)}, 64))
+					if wErr != nil {
+						if !errors.Is(wErr, ErrNotFound) {
+							unexpectedErrs <- wErr
+						}
+						return
+					}
+					_, crErr := disk.Create(ctx, bName, RootIno, fmt.Sprintf("w-%d-%d", worker, i), 0o644, 0, 0)
+					if crErr != nil && !errors.Is(crErr, ErrExist) {
+						if !errors.Is(crErr, ErrNotFound) {
+							unexpectedErrs <- crErr
+						}
+						return
+					}
+				}
+			}(w)
+		}
 
-	now = now.Add(10 * time.Second)
-	evicted := disk.EvictIdleActors(5 * time.Second)
-	require.Equal(t, 1, evicted)
-	require.Empty(t, disk.ActiveBranchActors())
+		var delErr error
+		wg.Go(func() {
+			<-start
+			delErr = disk.DeleteBranch(ctx, bName)
+		})
 
-	n, err := disk.Write(ctx, DefaultBranchName, fileIno.Ino, 0, []byte("after-evict"))
-	require.NoError(t, err)
-	require.Equal(t, 11, n)
-	require.Equal(t, []string{DefaultBranchName}, disk.ActiveBranchActors())
+		close(start)
+		wg.Wait()
+		close(unexpectedErrs)
+		for uErr := range unexpectedErrs {
+			require.NoError(t, uErr)
+		}
+		require.NoError(t, delErr)
 
-	got, err := disk.Read(ctx, DefaultBranchName, fileIno.Ino, 0, 64)
-	require.NoError(t, err)
-	require.Equal(t, []byte("after-evict"), got)
+		_, gErr := disk.GetBranch(bName)
+		require.ErrorIs(t, gErr, ErrNotFound)
+	}
 }
 
 func TestStep3_POSIXOverlay_FileDirXattrUnlinkRenameAndPersistenceAcrossReopen(t *testing.T) {

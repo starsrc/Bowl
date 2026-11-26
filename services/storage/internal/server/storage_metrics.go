@@ -15,7 +15,6 @@ type StorageMetricsCollector struct {
 	logicalBytesDesc              *prometheus.Desc
 	packPhysicalBytesDesc         *prometheus.Desc
 	inodesDesc                    *prometheus.Desc
-	branchActorsLoadedDesc        *prometheus.Desc
 	pebbleWALBytesInDesc          *prometheus.Desc
 	pebbleWALBytesWrittenDesc     *prometheus.Desc
 	pebbleL0SublevelsDesc         *prometheus.Desc
@@ -57,12 +56,6 @@ func NewStorageMetricsCollector(node *engine.NodeStore) *StorageMetricsCollector
 		inodesDesc: prometheus.NewDesc(
 			"bowl_storage_inodes",
 			"Total allocated inodes across all loaded disks.",
-			nil,
-			nil,
-		),
-		branchActorsLoadedDesc: prometheus.NewDesc(
-			"bowl_storage_branch_actors_loaded",
-			"Total active branch actors across all loaded disks.",
 			nil,
 			nil,
 		),
@@ -167,7 +160,6 @@ func (c *StorageMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.logicalBytesDesc
 	ch <- c.packPhysicalBytesDesc
 	ch <- c.inodesDesc
-	ch <- c.branchActorsLoadedDesc
 	ch <- c.pebbleWALBytesInDesc
 	ch <- c.pebbleWALBytesWrittenDesc
 	ch <- c.pebbleL0SublevelsDesc
@@ -226,7 +218,6 @@ func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.logicalBytesDesc, prometheus.GaugeValue, float64(snap.LogicalBytes))
 	ch <- prometheus.MustNewConstMetric(c.packPhysicalBytesDesc, prometheus.GaugeValue, float64(snap.PackPhysicalBytes))
 	ch <- prometheus.MustNewConstMetric(c.inodesDesc, prometheus.GaugeValue, float64(snap.Inodes))
-	ch <- prometheus.MustNewConstMetric(c.branchActorsLoadedDesc, prometheus.GaugeValue, float64(snap.ActiveBranchActors))
 	ch <- prometheus.MustNewConstMetric(c.pebbleWALBytesInDesc, prometheus.CounterValue, float64(walBytesIn))
 	ch <- prometheus.MustNewConstMetric(c.pebbleWALBytesWrittenDesc, prometheus.CounterValue, float64(walBytesWritten))
 	ch <- prometheus.MustNewConstMetric(c.pebbleL0SublevelsDesc, prometheus.GaugeValue, float64(l0Sublevels))

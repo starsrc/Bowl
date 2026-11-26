@@ -26,7 +26,7 @@ const (
 	defaultBloomBitsPerKey  = 10
 	pebbleLevelCount        = 7
 	DefaultMountLeaseTTL    = 30 * time.Second
-	DefaultActorIdleTTL     = 5 * time.Minute
+	DefaultDiskIdleTTL      = 5 * time.Minute
 	DefaultGCInterval       = 30 * time.Second
 	nodeSlotStripes         = 1024
 	nodeSlotCacheLine       = 64
@@ -48,7 +48,7 @@ type NodeOptions struct {
 	CacheSizeBytes int64
 	Now            func() time.Time
 	MountLeaseTTL  time.Duration
-	ActorIdleTTL   time.Duration
+	DiskIdleTTL    time.Duration
 	GCMode         GCMode
 	GCInterval     time.Duration
 	Logger         *slog.Logger
@@ -95,13 +95,12 @@ type MergeBranchResult struct {
 }
 
 type NodeMetricsSnapshot struct {
-	DisksLoaded        int
-	LogicalBytes       uint64
-	PackPhysicalBytes  uint64
-	Inodes             uint64
-	ActiveBranchActors int
-	Pebble             *pebble.Metrics
-	BlockCache         pebble.CacheMetrics
+	DisksLoaded       int
+	LogicalBytes      uint64
+	PackPhysicalBytes uint64
+	Inodes            uint64
+	Pebble            *pebble.Metrics
+	BlockCache        pebble.CacheMetrics
 }
 
 type nodeStripeDisk struct {
@@ -130,6 +129,12 @@ type dirtyPackEntry struct {
 	gen   uint64
 }
 
+type walSyncWave struct {
+	done      chan struct{}
+	syncedGen uint64
+	err       error
+}
+
 type NodeStore struct {
 	dataDir           string
 	disksDir          string
@@ -140,17 +145,22 @@ type NodeStore struct {
 	blockSize         uint32
 	maxPackSize       uint32
 	mountLeaseTTL     time.Duration
-	actorIdleTTL      time.Duration
+	diskIdleTTL       time.Duration
 	touchIntervalNano int64
 	gcMode            GCMode
 	gcInterval        time.Duration
 
 	slots [nodeSlotStripes]nodeDiskSlot
 
-	syncGate      sync.RWMutex
-	dirtyPacksMu  sync.Mutex
-	dirtyPacks    map[uuid.UUID]*dirtyPackEntry
-	walCommitHook func(sync bool)
+	syncGate       sync.RWMutex
+	walWriteGen    atomic.Uint64
+	walSyncedGen   atomic.Uint64
+	walSyncMu      sync.Mutex
+	activeSyncWave *walSyncWave
+	syncWaveWG     sync.WaitGroup
+	dirtyPacksMu   sync.Mutex
+	dirtyPacks     map[uuid.UUID]*dirtyPackEntry
+	walCommitHook  func(sync bool)
 
 	idleEvictions atomic.Uint64
 
@@ -195,7 +205,7 @@ func OpenNode(opts NodeOptions) (*NodeStore, error) {
 	if opts.MountLeaseTTL < 0 {
 		return nil, ErrInvalid
 	}
-	if opts.ActorIdleTTL < 0 {
+	if opts.DiskIdleTTL < 0 {
 		return nil, ErrInvalid
 	}
 	if opts.GCMode < GCModePeriodic || opts.GCMode > GCModeDisabled {
@@ -249,8 +259,8 @@ func OpenNode(opts NodeOptions) (*NodeStore, error) {
 	}
 
 	var touchIntervalNano int64
-	if opts.ActorIdleTTL > 0 {
-		touchIntervalNano = max(opts.ActorIdleTTL.Nanoseconds()/8, int64(1))
+	if opts.DiskIdleTTL > 0 {
+		touchIntervalNano = max(opts.DiskIdleTTL.Nanoseconds()/8, int64(1))
 	}
 
 	pebbleDir := filepath.Join(opts.DataDir, "pebble")
@@ -280,7 +290,7 @@ func OpenNode(opts NodeOptions) (*NodeStore, error) {
 		blockSize:         blockSize,
 		maxPackSize:       maxPackSize,
 		mountLeaseTTL:     leaseTTL,
-		actorIdleTTL:      opts.ActorIdleTTL,
+		diskIdleTTL:       opts.DiskIdleTTL,
 		touchIntervalNano: touchIntervalNano,
 		gcMode:            opts.GCMode,
 		gcInterval:        gcInterval,
@@ -289,7 +299,7 @@ func OpenNode(opts NodeOptions) (*NodeStore, error) {
 		bgCancel:          bgCancel,
 	}
 
-	if n.actorIdleTTL > 0 {
+	if n.diskIdleTTL > 0 {
 		n.bgWG.Go(n.runMaintenanceLoop)
 	}
 
@@ -323,7 +333,10 @@ func (n *NodeStore) Close(ctx context.Context) error {
 		n.closeMu.Lock()
 		defer n.closeMu.Unlock()
 
+		n.walSyncMu.Lock()
 		n.closed.Store(true)
+		n.walSyncMu.Unlock()
+		n.syncWaveWG.Wait()
 
 		var detached []nodeStripeDisk
 		for i := range n.slots {
@@ -471,14 +484,14 @@ func (s *nodeDiskSlot) remove(diskID uuid.UUID) (*nodeDiskEntry, bool) {
 
 func (n *NodeStore) newDiskEntry(ds *DiskStore) *nodeDiskEntry {
 	entry := &nodeDiskEntry{store: ds}
-	if n.actorIdleTTL > 0 {
+	if n.diskIdleTTL > 0 {
 		entry.lastUsedNano.Store(n.now().UnixNano())
 	}
 	return entry
 }
 
 func (n *NodeStore) touchLastUsed(entry *nodeDiskEntry) {
-	if n.actorIdleTTL <= 0 {
+	if n.diskIdleTTL <= 0 {
 		return
 	}
 	nowNano := n.now().UnixNano()
@@ -512,6 +525,25 @@ func (n *NodeStore) hasDirtyPack(diskID uuid.UUID) bool {
 	_, ok := n.dirtyPacks[diskID]
 	n.dirtyPacksMu.Unlock()
 	return ok
+}
+
+func (n *NodeStore) hasAnyDirtyPack() bool {
+	n.dirtyPacksMu.Lock()
+	has := len(n.dirtyPacks) > 0
+	n.dirtyPacksMu.Unlock()
+	return has
+}
+
+func (n *NodeStore) advanceWalSyncedGen(target uint64) {
+	for {
+		cur := n.walSyncedGen.Load()
+		if cur >= target {
+			return
+		}
+		if n.walSyncedGen.CompareAndSwap(cur, target) {
+			return
+		}
+	}
 }
 
 func (n *NodeStore) flushDirtyPacks(ctx context.Context) error {
@@ -568,7 +600,11 @@ func (n *NodeStore) commitBatchNoSync(batch *pebble.Batch, diskHook func(sync bo
 	if n.walCommitHook != nil {
 		n.walCommitHook(false)
 	}
-	return batch.Commit(pebble.NoSync)
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	n.walWriteGen.Add(1)
+	return nil
 }
 
 func (n *NodeStore) runWithSyncBarrier(ctx context.Context, diskHook func(sync bool), op func() error) error {
@@ -591,16 +627,107 @@ func (n *NodeStore) runWithSyncBarrier(ctx context.Context, diskHook func(sync b
 	if n.walCommitHook != nil {
 		n.walCommitHook(true)
 	}
-	return op()
+	if err := op(); err != nil {
+		return err
+	}
+	gen := n.walWriteGen.Add(1)
+	n.advanceWalSyncedGen(gen)
+	return nil
 }
 
-func (n *NodeStore) commitTickSync(ctx context.Context, batch *pebble.Batch, diskHook func(sync bool)) error {
-	return n.runWithSyncBarrier(ctx, diskHook, func() error {
-		if batch.Count() > 0 {
-			return batch.Commit(pebble.Sync)
+func (n *NodeStore) SyncWAL(ctx context.Context, targetGen uint64, diskHook func(sync bool)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if n.closed.Load() {
+		return ErrClosed
+	}
+	if n.walSyncedGen.Load() >= targetGen && !n.hasAnyDirtyPack() {
+		return nil
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return n.db.LogData(nil, pebble.Sync)
-	})
+		n.walSyncMu.Lock()
+		if n.closed.Load() {
+			n.walSyncMu.Unlock()
+			return ErrClosed
+		}
+		if n.walSyncedGen.Load() >= targetGen && !n.hasAnyDirtyPack() {
+			n.walSyncMu.Unlock()
+			return nil
+		}
+		w := n.activeSyncWave
+		if w == nil {
+			w = &walSyncWave{done: make(chan struct{})}
+			n.activeSyncWave = w
+			n.syncWaveWG.Add(1)
+			go n.runSyncWave(w, diskHook)
+		}
+		n.walSyncMu.Unlock()
+
+		select {
+		case <-w.done:
+			if w.err != nil {
+				return w.err
+			}
+			if w.syncedGen >= targetGen {
+				return nil
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (n *NodeStore) runSyncWave(w *walSyncWave, diskHook func(sync bool)) {
+	defer n.syncWaveWG.Done()
+
+	waveCtx := n.bgCtx
+	if waveCtx == nil {
+		waveCtx = context.Background()
+	}
+
+	var (
+		waveErr       error
+		syncTargetGen uint64
+	)
+	if err := n.flushDirtyPacks(waveCtx); err != nil {
+		waveErr = err
+	} else {
+		n.syncGate.Lock()
+		syncTargetGen = n.walWriteGen.Load()
+		if err := n.flushDirtyPacks(waveCtx); err != nil {
+			waveErr = err
+		} else {
+			if diskHook != nil {
+				diskHook(true)
+			}
+			if n.walCommitHook != nil {
+				n.walCommitHook(true)
+			}
+			if err := n.db.LogData(nil, pebble.Sync); err != nil {
+				waveErr = err
+			} else {
+				n.advanceWalSyncedGen(syncTargetGen)
+			}
+		}
+		n.syncGate.Unlock()
+	}
+
+	n.walSyncMu.Lock()
+	w.err = waveErr
+	w.syncedGen = syncTargetGen
+	if n.activeSyncWave == w {
+		n.activeSyncWave = nil
+	}
+	close(w.done)
+	n.walSyncMu.Unlock()
 }
 
 func (n *NodeStore) commitBatchSync(ctx context.Context, batch *pebble.Batch, diskHook func(sync bool)) error {
@@ -626,17 +753,16 @@ func (n *NodeStore) instantiateDiskStore(diskID uuid.UUID, meta DiskMeta, fresh 
 		return nil, ErrInvalid
 	}
 	ds := &DiskStore{
-		node:         n,
-		diskID:       diskID,
-		keys:         newDiskKeys(diskID),
-		dir:          n.diskDir(diskID),
-		db:           n.db,
-		now:          n.now,
-		blockSize:    meta.BlockSize,
-		actorIdleTTL: n.actorIdleTTL,
-		meta:         meta,
-		branchActors: make(map[string]*BranchActor),
-		commitActors: make(map[uint64]*BranchActor),
+		node:        n,
+		diskID:      diskID,
+		keys:        newDiskKeys(diskID),
+		dir:         n.diskDir(diskID),
+		db:          n.db,
+		now:         n.now,
+		blockSize:   meta.BlockSize,
+		meta:        meta,
+		branchLocks: make(map[string]*branchLockEntry),
+		commitCache: make(map[uint64]commitLink),
 	}
 
 	if fresh {
@@ -1522,7 +1648,6 @@ func (n *NodeStore) MetricsSnapshot() NodeMetricsSnapshot {
 					snap.LogicalBytes += ds.UsedBytes()
 					snap.PackPhysicalBytes += ds.PackPhysicalBytes()
 					snap.Inodes += ds.allocatedInodes()
-					snap.ActiveBranchActors += ds.activeBranchActorCount()
 				}
 			}
 		}
@@ -1538,7 +1663,7 @@ func (n *NodeStore) MetricsSnapshot() NodeMetricsSnapshot {
 }
 
 func (n *NodeStore) runMaintenanceLoop() {
-	interval := min(max(n.actorIdleTTL/2, 5*time.Millisecond), time.Second)
+	interval := min(max(n.diskIdleTTL/2, 5*time.Millisecond), time.Second)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -1555,7 +1680,7 @@ func (n *NodeStore) runMaintenanceLoop() {
 }
 
 func (n *NodeStore) evictIdleDisks(ctx context.Context) int {
-	if n.actorIdleTTL <= 0 {
+	if n.diskIdleTTL <= 0 {
 		return 0
 	}
 	if ctx == nil {
@@ -1563,7 +1688,7 @@ func (n *NodeStore) evictIdleDisks(ctx context.Context) int {
 	}
 
 	evicted := 0
-	ttlNano := n.actorIdleTTL.Nanoseconds()
+	ttlNano := n.diskIdleTTL.Nanoseconds()
 	var (
 		hasNow  bool
 		nowNano int64
@@ -1585,11 +1710,6 @@ func (n *NodeStore) evictIdleDisks(ctx context.Context) int {
 				break
 			}
 			if nowNano-item.entry.lastUsedNano.Load() < ttlNano {
-				n.slots[i].opMu.RLock()
-				if cur := lookupLoadedEntry(&n.slots[i], item.id); cur != nil {
-					cur.store.EvictIdleActors(n.actorIdleTTL)
-				}
-				n.slots[i].opMu.RUnlock()
 				continue
 			}
 			if n.tryEvictIdleDisk(&n.slots[i], item.id, ttlNano) {
@@ -1614,13 +1734,11 @@ func (n *NodeStore) tryEvictIdleDisk(slot *nodeDiskSlot, diskID uuid.UUID, ttlNa
 
 	now := n.now()
 	if now.UnixNano()-entry.lastUsedNano.Load() < ttlNano {
-		entry.store.EvictIdleActors(n.actorIdleTTL)
 		return false
 	}
 
 	mounted, err := hasActiveMountOnReader(n.db, entry.store.keys, "", now.UnixNano(), false)
 	if err != nil || mounted {
-		entry.store.EvictIdleActors(n.actorIdleTTL)
 		return false
 	}
 

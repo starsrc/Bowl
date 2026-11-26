@@ -169,8 +169,6 @@ func TestStep5_MultiBranch_ParallelBranchActorsCommitAndCoalesceConcurrently(t *
 		require.NoError(t, e)
 	}
 
-	require.Len(t, disk.ActiveBranchActors(), numBranches)
-
 	for bIdx, bName := range branchNames {
 		entries, listErr := disk.ReadDir(ctx, bName, RootIno)
 		require.NoError(t, listErr)

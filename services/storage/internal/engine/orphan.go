@@ -123,7 +123,8 @@ func purgeOrphanFromLayer(batch *pebble.Batch, dk diskKeys, workLayerID uint64, 
 	return batch.Delete(dk.LayerInodeKey(workLayerID, ino), nil)
 }
 
-func migrateOrphansAcrossLayerSwap(batch *pebble.Batch, dk diskKeys, oldWorkLayer, newWorkLayer, headCommitID uint64) (migratedOwned, orphanEffective uint64, err error) {
+func (d *DiskStore) migrateOrphansAcrossLayerSwap(batch *pebble.Batch, oldWorkLayer, newWorkLayer, headCommitID uint64) (migratedOwned, orphanEffective uint64, err error) {
+	dk := d.keys
 	orphans, err := collectLayerOrphans(batch, dk, oldWorkLayer)
 	if err != nil || len(orphans) == 0 {
 		return 0, 0, err
@@ -131,7 +132,7 @@ func migrateOrphansAcrossLayerSwap(batch *pebble.Batch, dk diskKeys, oldWorkLaye
 
 	var ancestorLayers []uint64
 	if headCommitID != 0 {
-		_, ancestorLayers, err = resolveCommitLayers(batch, dk, headCommitID)
+		_, ancestorLayers, err = d.resolveCommitLayers(batch, headCommitID)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -225,7 +226,8 @@ func migrateOrphansAcrossLayerSwap(batch *pebble.Batch, dk diskKeys, oldWorkLaye
 	return migratedOwned, orphanEffective, nil
 }
 
-func sweepOrphansInWorkLayer(batch *pebble.Batch, dk diskKeys, workLayerID, headCommitID uint64) (freedWork, freedLogical uint64, err error) {
+func (d *DiskStore) sweepOrphansInWorkLayer(batch *pebble.Batch, workLayerID, headCommitID uint64) (freedWork, freedLogical uint64, err error) {
+	dk := d.keys
 	orphans, err := collectLayerOrphans(batch, dk, workLayerID)
 	if err != nil || len(orphans) == 0 {
 		return 0, 0, err
@@ -233,7 +235,7 @@ func sweepOrphansInWorkLayer(batch *pebble.Batch, dk diskKeys, workLayerID, head
 
 	var ancestorLayers []uint64
 	if headCommitID != 0 {
-		_, ancestorLayers, err = resolveCommitLayers(batch, dk, headCommitID)
+		_, ancestorLayers, err = d.resolveCommitLayers(batch, headCommitID)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -269,14 +271,6 @@ func sweepOrphansInWorkLayer(batch *pebble.Batch, dk diskKeys, workLayerID, head
 	return freedWork, freedLogical, nil
 }
 
-type createTmpfileReq struct {
-	parentIno uint64
-	mode      uint32
-	uid       uint32
-	gid       uint32
-	exclusive bool
-}
-
 func (d *DiskStore) CreateTmpfile(ctx context.Context, branch string, parentIno uint64, mode, uid, gid uint32, exclusive bool) (Inode, error) {
 	if parentIno == 0 || parentIno > math.MaxInt64 {
 		return Inode{}, ErrInvalid
@@ -288,147 +282,112 @@ func (d *DiskStore) CreateTmpfile(ctx context.Context, branch string, parentIno 
 	if modeType != 0 && modeType != ModeRegular {
 		return Inode{}, ErrInvalid
 	}
-	actor, release, err := d.acquireBranchActor(branch)
-	if err != nil {
-		return Inode{}, err
-	}
-	defer release()
+	normMode := ModeRegular | (mode & ModePermMask)
 
-	resp, err := actor.submit(ctx, branchOpCreateTmpfile, &createTmpfileReq{
-		parentIno: parentIno,
-		mode:      ModeRegular | (mode & ModePermMask),
-		uid:       uid,
-		gid:       gid,
-		exclusive: exclusive,
+	var child Inode
+	err := d.execBranchWrite(ctx, branch, func(batch *pebble.Batch, _ *opQuotaTracker, bm BranchMeta, cursor *branchLayerCursor) error {
+		parent, err := cursor.getInode(parentIno)
+		if err != nil {
+			return err
+		}
+		if parent.Mode&ModeTypeMask != ModeDir {
+			return ErrNotDir
+		}
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		inoNum, err := d.allocIno()
+		if err != nil {
+			return err
+		}
+		childGID := gid
+		if parent.Mode&ModeSetGID != 0 {
+			childGID = parent.GID
+		}
+		nowNano := d.now().UnixNano()
+		child = Inode{
+			Ino:        inoNum,
+			ParentIno:  0,
+			Mode:       normMode,
+			Nlink:      0,
+			UID:        uid,
+			GID:        childGID,
+			Atime:      nowNano,
+			Mtime:      nowNano,
+			Ctime:      nowNano,
+			Generation: 1,
+			WriteSeq:   1,
+		}
+		childRaw, err := EncodeInode(child)
+		if err != nil {
+			return err
+		}
+		kind := OrphanTmpfileLinkable
+		if exclusive {
+			kind = OrphanTmpfileExcl
+		}
+
+		work := bm.WorkLayerID
+		dk := d.keys
+		if setErr := batch.Set(dk.LayerInodeKey(work, child.Ino), EncodeLiveEnvelope(childRaw), nil); setErr != nil {
+			return setErr
+		}
+		return batch.Set(dk.LayerOrphanKey(work, child.Ino), []byte{kind}, nil)
 	})
 	if err != nil {
 		return Inode{}, err
 	}
-	ino, ok := resp.(Inode)
-	if !ok {
-		return Inode{}, ErrInvalidValue
-	}
-	return ino, nil
-}
-
-func (a *BranchActor) execCreateTmpfile(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) (Inode, error) {
-	req, ok := raw.(*createTmpfileReq)
-	if !ok {
-		return Inode{}, ErrInvalid
-	}
-	parent, err := overlayGetInode(batch, a.disk.keys, layers, req.parentIno)
-	if err != nil {
-		return Inode{}, err
-	}
-	if parent.Mode&ModeTypeMask != ModeDir {
-		return Inode{}, ErrNotDir
-	}
-	if parent.Nlink == 0 {
-		return Inode{}, ErrNotFound
-	}
-
-	inoNum, err := a.disk.allocIno()
-	if err != nil {
-		return Inode{}, err
-	}
-	gid := req.gid
-	if parent.Mode&ModeSetGID != 0 {
-		gid = parent.GID
-	}
-	nowNano := a.disk.now().UnixNano()
-	child := Inode{
-		Ino:        inoNum,
-		ParentIno:  0,
-		Mode:       req.mode,
-		Nlink:      0,
-		UID:        req.uid,
-		GID:        gid,
-		Atime:      nowNano,
-		Mtime:      nowNano,
-		Ctime:      nowNano,
-		Generation: 1,
-		WriteSeq:   1,
-	}
-	childRaw, err := EncodeInode(child)
-	if err != nil {
-		return Inode{}, err
-	}
-	kind := OrphanTmpfileLinkable
-	if req.exclusive {
-		kind = OrphanTmpfileExcl
-	}
-
-	work := branch.WorkLayerID
-	dk := a.disk.keys
-	if setErr := batch.Set(dk.LayerInodeKey(work, child.Ino), EncodeLiveEnvelope(childRaw), nil); setErr != nil {
-		return Inode{}, setErr
-	}
-	if setErr := batch.Set(dk.LayerOrphanKey(work, child.Ino), []byte{kind}, nil); setErr != nil {
-		return Inode{}, setErr
-	}
 	return child, nil
-}
-
-type purgeOrphanReq struct {
-	ino uint64
 }
 
 func (d *DiskStore) PurgeOrphanInode(ctx context.Context, branch string, ino uint64) error {
 	if ino == 0 || ino > math.MaxInt64 {
 		return ErrInvalid
 	}
-	actor, release, err := d.acquireBranchActor(branch)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	_, err = actor.submit(ctx, branchOpPurgeOrphan, &purgeOrphanReq{ino: ino})
-	return err
-}
-
-func (a *BranchActor) execPurgeOrphan(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, layers []uint64, raw any) error {
-	req, ok := raw.(*purgeOrphanReq)
-	if !ok {
-		return ErrInvalid
-	}
-	work := branch.WorkLayerID
-	dk := a.disk.keys
-	inode, err := overlayGetInode(batch, dk, layers, req.ino)
-	if errors.Is(err, ErrNotFound) {
-		return batch.Delete(dk.LayerOrphanKey(work, req.ino), nil)
-	}
-	if err != nil {
-		return err
-	}
-	if inode.Nlink > 0 {
-		return nil
-	}
-	_, hasOrphan, err := readLayerOrphanKind(batch, dk, work, req.ino)
-	if err != nil {
-		return err
-	}
-	if !hasOrphan {
-		return nil
-	}
-	_, dropWorkBytes, dropEffBytes, err := overlayCollectLiveBlocksRange(batch, dk, layers, req.ino, 0, math.MaxUint64)
-	if err != nil {
-		return err
-	}
-	var ancestorLayers []uint64
-	if len(layers) > 1 {
-		ancestorLayers = layers[1:]
-	}
-	if purgeErr := purgeOrphanFromLayer(batch, dk, work, ancestorLayers, req.ino); purgeErr != nil {
-		return purgeErr
-	}
-	if dropWorkBytes > 0 || dropEffBytes > 0 {
-		branch.WorkOwnedBytes = saturatingSub(branch.WorkOwnedBytes, dropWorkBytes)
-		branch.LogicalBytes = saturatingSub(branch.LogicalBytes, dropEffBytes)
-		if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
-			return setErr
+	return d.execBranchWrite(ctx, branch, func(batch *pebble.Batch, quota *opQuotaTracker, bm BranchMeta, cursor *branchLayerCursor) error {
+		work := bm.WorkLayerID
+		dk := d.keys
+		inode, err := cursor.getInode(ino)
+		if errors.Is(err, ErrNotFound) {
+			return batch.Delete(dk.LayerOrphanKey(work, ino), nil)
 		}
-		quota.release(dropWorkBytes)
-	}
-	return nil
+		if err != nil {
+			return err
+		}
+		if inode.Nlink > 0 {
+			return nil
+		}
+		_, hasOrphan, err := readLayerOrphanKind(batch, dk, work, ino)
+		if err != nil {
+			return err
+		}
+		if !hasOrphan {
+			return nil
+		}
+		layers, err := cursor.allLayers()
+		if err != nil {
+			return err
+		}
+		_, dropWorkBytes, dropEffBytes, err := overlayCollectLiveBlocksRange(batch, dk, layers, ino, 0, math.MaxUint64)
+		if err != nil {
+			return err
+		}
+		var ancestorLayers []uint64
+		if len(layers) > 1 {
+			ancestorLayers = layers[1:]
+		}
+		if purgeErr := purgeOrphanFromLayer(batch, dk, work, ancestorLayers, ino); purgeErr != nil {
+			return purgeErr
+		}
+		if dropWorkBytes > 0 || dropEffBytes > 0 {
+			bm.WorkOwnedBytes = saturatingSub(bm.WorkOwnedBytes, dropWorkBytes)
+			bm.LogicalBytes = saturatingSub(bm.LogicalBytes, dropEffBytes)
+			if setErr := batch.Set(dk.MetaBranchKey(bm.Name), EncodeBranchMeta(bm), nil); setErr != nil {
+				return setErr
+			}
+			quota.release(dropWorkBytes)
+		}
+		return nil
+	})
 }

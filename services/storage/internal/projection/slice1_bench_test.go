@@ -241,7 +241,7 @@ func BenchmarkPoolScan(b *testing.B) {
 
 			b.Run("Collect", func(b *testing.B) {
 				collector := NewStorageMetricsCollector(mgr)
-				ch := make(chan prometheus.Metric, 32)
+				ch := make(chan prometheus.Metric, 64)
 				b.ReportAllocs()
 				b.ResetTimer()
 				for b.Loop() {
@@ -251,8 +251,8 @@ func BenchmarkPoolScan(b *testing.B) {
 						<-ch
 						count++
 					}
-					if count != 20 {
-						b.Fatalf("expected 20 metrics, got %d", count)
+					if count != 31 {
+						b.Fatalf("expected 31 metrics, got %d", count)
 					}
 				}
 			})

@@ -267,6 +267,35 @@ func TestVirtualStatsFile_校验stats只读读取越界EOF与jfsStats不拦截�
 	require.Equal(t, int64(1), srv.lookupCalls.Load())
 }
 
+func TestStep19_VirtualStatsFile_SameHandleRepeatedOffsetZeroReadReturnsIdenticalSnapshot(t *testing.T) {
+	srv := newFakeStorage(t, withTTL(1.0, 1.0))
+	fs := newTestRawFS(t, srv, withStatsFile(true))
+
+	var openOut fuse.OpenOut
+	requireStatus(t, "Open .stats", fuse.OK, fs.Open(nil, &fuse.OpenIn{
+		InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno},
+		Flags:    uint32(syscall.O_RDONLY),
+	}, &openOut))
+
+	first := mustReadAt(t, fs, fusefs.VirtualStatsIno, openOut.Fh, 0, 64<<10)
+	require.NotEmpty(t, first)
+	require.Contains(t, string(first), "bowl_client_fuse_read_bytes_total 0\n")
+
+	second := mustReadAt(t, fs, fusefs.VirtualStatsIno, openOut.Fh, 0, 64<<10)
+	require.Equal(t, first, second)
+
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno}, Fh: openOut.Fh})
+
+	var openOut2 fuse.OpenOut
+	requireStatus(t, "Reopen .stats", fuse.OK, fs.Open(nil, &fuse.OpenIn{
+		InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno},
+		Flags:    uint32(syscall.O_RDONLY),
+	}, &openOut2))
+	fresh := mustReadAt(t, fs, fusefs.VirtualStatsIno, openOut2.Fh, 0, 64<<10)
+	require.NotContains(t, string(fresh), "bowl_client_fuse_read_bytes_total 0\n")
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno}, Fh: openOut2.Fh})
+}
+
 func makeStageBPGateHook(targetInflight int32, entered chan<- struct{}, gate <-chan struct{}) func(context.Context, *storagev1.WriteRequest) (uint32, error) {
 	var once sync.Once
 	var enteredCount atomic.Int32

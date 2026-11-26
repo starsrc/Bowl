@@ -132,10 +132,9 @@ func newSandboxCmd() *cobra.Command {
 		newSandboxStopCmd(true),
 		newSandboxStopCmd(false),
 		newSandboxServeCmd(),
-		newSandboxMoveCmd(),
 	)
 	cmd.PersistentFlags().StringVar(&runtimeFlag, "runtime", "", "Sandbox runtime: microvm, container or docker (default: $BOWL_SANDBOX_RUNTIME, else microvm when /dev/kvm exists, else docker)")
-	cmd.PersistentFlags().BoolVar(&sboxLocal, "local", false, "Keep system disks as image files in the state directory instead of Bowl disks (microvm only; no fork, diff, merge or move). "+
+	cmd.PersistentFlags().BoolVar(&sboxLocal, "local", false, "Keep system disks as image files in the state directory instead of Bowl disks (microvm only; no fork, diff or merge). "+
 		"Put --state-dir on a reflink filesystem (XFS, btrfs), or every create writes a full copy of the template to disk. Also $BOWL_SANDBOX_STORAGE=local")
 	cmd.PersistentFlags().StringVar(&stateDir, "state-dir", "", "MicroVM state directory holding vmlinux and bowl-sandbox-guest (default /var/lib/bowl-sandbox)")
 	return cmd

@@ -2,7 +2,7 @@
 
 [computesdk/benchmarks](https://github.com/computesdk/benchmarks) 的 sandbox TTI 量的是:从发出创建请求,到 sandbox 里第一条命令(`node -v`)成功返回。这里把 `bowl-sandbox` 接成它的一个 provider。
 
-量的是 MicroVM 这一层,不经过 Bowl:`bowl-sandbox --local` 把系统盘放成本机的镜像文件。fork、diff、merge、move 要 Bowl 盘,这个模式下没有。
+量的是 MicroVM 这一层,不经过 Bowl:`bowl-sandbox --local` 把系统盘放成本机的镜像文件。fork、diff、merge 要 Bowl 盘,这个模式下没有。
 
 ## 怎么跑
 

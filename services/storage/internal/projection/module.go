@@ -1,15 +1,11 @@
 package projection
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/prometheus/client_golang/prometheus"
-	"go.uber.org/fx"
 
-	"github.com/starsrc/pkg/observability/obsfx"
 	"github.com/starsrc/pkg/tx"
 
 	"github.com/starsrc/bowl/services/storage/internal/config"
@@ -23,32 +19,15 @@ func OpenPool(cfg config.DBPoolConfig) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-type PoolParams struct {
-	fx.In
-	Lifecycle fx.Lifecycle
-	Config    config.DBPoolConfig
-}
-
-func ProvidePool(params PoolParams) (*pgxpool.Pool, error) {
-	pool, err := OpenPool(params.Config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize dbpool: %w", err)
-	}
-	tx.RegisterPoolLifecycle(params.Lifecycle, pool)
-	return pool, nil
-}
-
 func ProvideStore(pool *pgxpool.Pool) Store {
 	return NewPGStore(pool)
 }
 
 type ControlManagerParams struct {
-	fx.In
-	Lifecycle fx.Lifecycle       `optional:"true"`
-	Store     Store              `optional:"true"`
-	MetaCfg   *config.MetaConfig `optional:"true"`
-	MetaVal   config.MetaConfig  `optional:"true"`
-	Logger    *slog.Logger       `optional:"true"`
+	Store   Store
+	MetaCfg *config.MetaConfig
+	MetaVal config.MetaConfig
+	Logger  *slog.Logger
 }
 
 func ProvideControlManager(params ControlManagerParams) (*ControlManager, error) {
@@ -81,26 +60,5 @@ func ProvideControlManager(params ControlManagerParams) (*ControlManager, error)
 		return nil, fmt.Errorf("failed to initialize control manager: %w", err)
 	}
 
-	if params.Lifecycle != nil {
-		params.Lifecycle.Append(fx.Hook{
-			OnStop: func(ctx context.Context) error {
-				return mgr.Close(ctx)
-			},
-		})
-	}
 	return mgr, nil
 }
-
-func provideStorageMetricsCollector(c *StorageMetricsCollector) prometheus.Collector {
-	return c
-}
-
-var Module = fx.Module("projection",
-	fx.Provide(
-		ProvidePool,
-		ProvideStore,
-		ProvideControlManager,
-		NewStorageMetricsCollector,
-		obsfx.AsCollector(provideStorageMetricsCollector),
-	),
-)

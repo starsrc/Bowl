@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/pkg/validator"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
 	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
@@ -18,8 +17,8 @@ import (
 const validTestDiskUUID = "019440e0-5b9a-7a31-a8d0-1b2c3d4e5f60"
 const validTestMountUUID = "019440e0-5b9a-7a31-a8d0-1b2c3d4e5f61"
 
-func TestValidatorFastPath_Step23BranchValidation(t *testing.T) {
-	v, err := validator.NewStorageValidator()
+func TestValidationInterceptor_GivenReadWriteBranchVariants_WhenValidatedUnconditionally_ThenMatchesProtoContract(t *testing.T) {
+	v, err := NewStorageValidator()
 	require.NoError(t, err)
 	interceptor := NewValidationInterceptor(v)
 	noopNext := func(_ context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
@@ -52,12 +51,11 @@ func TestValidatorFastPath_Step23BranchValidation(t *testing.T) {
 				Epoch:  2,
 				Branch: tc.branch,
 			}
-			require.Equal(t, tc.wantValid, isValidFastPathDataReq(msg))
 			_, callErr := wrapped(context.Background(), connect.NewRequest(msg))
 			if tc.wantValid {
 				require.NoError(t, callErr)
 			} else {
-				requireConnectErr(t, callErr, connect.CodeInvalidArgument, "")
+				requireConnectErr(t, callErr, connect.CodeInvalidArgument, ReasonInvalidArgument)
 			}
 		})
 
@@ -70,19 +68,18 @@ func TestValidatorFastPath_Step23BranchValidation(t *testing.T) {
 				DiskId: validTestDiskUUID,
 				Branch: tc.branch,
 			}
-			require.Equal(t, tc.wantValid, isValidFastPathDataReq(msg))
 			_, callErr := wrapped(context.Background(), connect.NewRequest(msg))
 			if tc.wantValid {
 				require.NoError(t, callErr)
 			} else {
-				requireConnectErr(t, callErr, connect.CodeInvalidArgument, "")
+				requireConnectErr(t, callErr, connect.CodeInvalidArgument, ReasonInvalidArgument)
 			}
 		})
 	}
 }
 
 func TestValidator_Step23AndStep24RPCRequests(t *testing.T) {
-	v, err := validator.NewStorageValidator()
+	v, err := NewStorageValidator()
 	require.NoError(t, err)
 	interceptor := NewValidationInterceptor(v)
 	noopNext := func(_ context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
@@ -97,6 +94,10 @@ func TestValidator_Step23AndStep24RPCRequests(t *testing.T) {
 		{
 			name: "Lookup empty branch",
 			req:  connect.NewRequest(&storagev1.LookupRequest{DiskId: validTestDiskUUID, ParentIno: 1, Name: []byte("f")}),
+		},
+		{
+			name: "Lookup parent_ino over max int64",
+			req:  connect.NewRequest(&storagev1.LookupRequest{DiskId: validTestDiskUUID, Branch: "main", ParentIno: (1 << 63), Name: []byte("f")}),
 		},
 		{
 			name: "GetAttr empty branch",

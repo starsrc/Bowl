@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"math"
 	"time"
 
 	"connectrpc.com/connect"
@@ -27,13 +26,6 @@ func parseOptionalUUID(raw *string) (uuid.UUID, error) {
 		return uuid.Nil, nil
 	}
 	return parseRequiredUUID(*raw)
-}
-
-func validateWriteEpoch(epoch uint64) error {
-	if epoch == 0 || epoch > math.MaxInt64 {
-		return engine.ErrInvalid
-	}
-	return nil
 }
 
 func toProtoAttribute(inode engine.Inode) *storagev1.InodeAttribute {
@@ -386,12 +378,6 @@ func (s *Server) GetAttr(ctx context.Context, req *connect.Request[storagev1.Get
 }
 
 func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.SetAttrRequest]) (*connect.Response[storagev1.SetAttrResponse], error) {
-	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if req.Msg.Fh != nil && (*req.Msg.Fh == 0 || *req.Msg.Fh > math.MaxInt64) {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -432,12 +418,6 @@ func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.Set
 }
 
 func (s *Server) Mknod(ctx context.Context, req *connect.Request[storagev1.MknodRequest]) (*connect.Response[storagev1.MknodResponse], error) {
-	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -460,12 +440,6 @@ func (s *Server) Mknod(ctx context.Context, req *connect.Request[storagev1.Mknod
 }
 
 func (s *Server) Mkdir(ctx context.Context, req *connect.Request[storagev1.MkdirRequest]) (*connect.Response[storagev1.MkdirResponse], error) {
-	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -488,12 +462,6 @@ func (s *Server) Mkdir(ctx context.Context, req *connect.Request[storagev1.Mkdir
 }
 
 func (s *Server) Symlink(ctx context.Context, req *connect.Request[storagev1.SymlinkRequest]) (*connect.Response[storagev1.SymlinkResponse], error) {
-	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)

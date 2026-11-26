@@ -203,9 +203,6 @@ func (s *Server) ReadCommitNode(ctx context.Context, req *connect.Request[storag
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if req.Msg.Size > maxReadWriteSize {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	var res engine.CommitNodeResult
 	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var rErr error

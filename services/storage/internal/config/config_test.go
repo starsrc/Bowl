@@ -11,7 +11,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
-	"go.uber.org/fx"
 
 	"github.com/starsrc/pkg/observability/telemetry"
 
@@ -532,10 +531,45 @@ func TestConfig_GivenNilPointers_WhenAccessorsCalled_ThenHandlesSafely(t *testin
 	require.Error(t, zeroMeta.Validate(), "未经过默认填充的零值 MetaConfig.Validate 应拒绝空 AtimeMode")
 }
 
-func TestConfigModule_GivenLoadedConfig_WhenFxAppValidated_ThenSucceeds(t *testing.T) {
-	isolateConfigEnv(t)
-	t.Setenv("DB_DSN", validTestDSN)
-	cfg, err := loadConfigWithinDeadline(t)
-	require.NoError(t, err)
-	require.NoError(t, fx.ValidateApp(fx.Supply(cfg), config.Module), "config.Module 依赖图校验应通过")
+func TestServerConfig_GivenDualPortsAndTimeouts_WhenValidated_ThenMatchesContract(t *testing.T) {
+	zero := config.ServerConfig{}
+	require.Equal(t, 10*time.Second, zero.ReadHeaderTimeout())
+	require.Equal(t, 10*time.Second, zero.StopTimeout())
+	require.Equal(t, 7*time.Second, zero.ShutdownTimeout())
+	require.Equal(t, int64(128<<10), zero.ReadMaxBytes())
+
+	custom := config.ServerConfig{
+		ServerHost:              "127.0.0.1",
+		ServerPort:              9000,
+		InternalServerHost:      "127.0.0.1",
+		InternalServerPort:      9090,
+		ServerReadHeaderTimeout: 3 * time.Second,
+		ServerStopTimeout:       20 * time.Second,
+		ServerReadMaxBytes:      4096,
+	}
+	require.Equal(t, "127.0.0.1:9000", custom.Addr())
+	require.Equal(t, "127.0.0.1:9090", custom.InternalAddr())
+	require.Equal(t, 3*time.Second, custom.ReadHeaderTimeout())
+	require.Equal(t, 20*time.Second, custom.StopTimeout())
+	require.Equal(t, 14*time.Second, custom.ShutdownTimeout())
+	require.Equal(t, int64(4096), custom.ReadMaxBytes())
+	require.NoError(t, custom.ValidateDualPorts())
+
+	conflictCases := []config.ServerConfig{
+		{ServerHost: "::", ServerPort: 9000, InternalServerHost: "127.0.0.1", InternalServerPort: 9000},
+		{ServerHost: "::ffff:127.0.0.1", ServerPort: 9000, InternalServerHost: "127.0.0.1", InternalServerPort: 9000},
+		{ServerHost: "LOCALHOST", ServerPort: 9000, InternalServerHost: "localhost", InternalServerPort: 9000},
+		{ServerHost: "", ServerPort: 9000, InternalServerHost: "127.0.0.1", InternalServerPort: 9000},
+	}
+	for _, tc := range conflictCases {
+		require.Error(t, tc.ValidateDualPorts())
+	}
+
+	distinctHost := config.ServerConfig{
+		ServerHost:         "127.0.0.1",
+		ServerPort:         9000,
+		InternalServerHost: "127.0.0.2",
+		InternalServerPort: 9000,
+	}
+	require.NoError(t, distinctHost.ValidateDualPorts())
 }

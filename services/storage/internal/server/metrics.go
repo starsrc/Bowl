@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.uber.org/fx"
 
 	"github.com/starsrc/pkg/observability"
 	"github.com/starsrc/pkg/observability/telemetry"
@@ -109,8 +107,6 @@ func classifyHTTPStatus(code int) string {
 	}
 }
 
-type FineBucketsReady struct{}
-
 func NewFineBucketMeterProvider(cfg telemetry.Config, reg *prometheus.Registry) (*sdkmetric.MeterProvider, error) {
 	if reg == nil {
 		reg = telemetry.NewRegistry()
@@ -150,41 +146,27 @@ func NewFineBucketMeterProvider(cfg telemetry.Config, reg *prometheus.Registry) 
 	return mp, nil
 }
 
-type FineBucketParams struct {
-	fx.In
-
-	Lifecycle fx.Lifecycle                   `optional:"true"`
-	Runtime   *observability.Runtime         `optional:"true"`
-	Telemetry telemetry.Config               `optional:"true"`
-	AdminCfg  observability.AdminRouteConfig `optional:"true"`
-	ObsReady  observability.Ready            `optional:"true"`
-}
-
-func ConfigureFineBucketMeterProvider(p FineBucketParams) (FineBucketsReady, error) {
-	if p.Runtime == nil {
-		return FineBucketsReady{}, nil
+func ConfigureFineBucketMeterProvider(
+	rt *observability.Runtime,
+	telCfg telemetry.Config,
+	adminCfg observability.AdminRouteConfig,
+) (*sdkmetric.MeterProvider, error) {
+	if rt == nil {
+		return nil, nil
 	}
-	if p.AdminCfg != nil && !p.AdminCfg.IsMetricsEnabled() {
-		return FineBucketsReady{}, nil
+	if adminCfg != nil && !adminCfg.IsMetricsEnabled() {
+		return nil, nil
 	}
-	if p.Runtime.MeterProvider() != nil {
-		return FineBucketsReady{}, errors.New("server: runtime default meter provider must be disabled before configuring fine-bucket meter provider")
+	if rt.MeterProvider() != nil {
+		return nil, errors.New("server: runtime default meter provider must be disabled before configuring fine-bucket meter provider")
 	}
 
-	mp, err := NewFineBucketMeterProvider(p.Telemetry, p.Runtime.Registry())
+	mp, err := NewFineBucketMeterProvider(telCfg, rt.Registry())
 	if err != nil {
-		return FineBucketsReady{}, err
+		return nil, err
 	}
 	otel.SetMeterProvider(mp)
-
-	if p.Lifecycle != nil {
-		p.Lifecycle.Append(fx.Hook{
-			OnStop: func(stopCtx context.Context) error {
-				return mp.Shutdown(stopCtx)
-			},
-		})
-	}
-	return FineBucketsReady{}, nil
+	return mp, nil
 }
 
 var _ prometheus.Collector = (*HTTPMetrics)(nil)

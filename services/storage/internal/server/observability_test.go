@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -23,13 +22,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/fx"
 
 	"github.com/starsrc/pkg/observability"
-	"github.com/starsrc/pkg/observability/obsfx"
 	"github.com/starsrc/pkg/observability/slogx"
 	"github.com/starsrc/pkg/observability/telemetry"
-	"github.com/starsrc/pkg/serverx"
 	"github.com/starsrc/pkg/tx"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -204,28 +200,38 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 		EnvConfig:    obsCfg,
 	}
 
-	var (
-		srv   *Server
-		obsRT *observability.Runtime
+	httpMetrics := NewHTTPMetrics()
+	storageCollector := projection.NewStorageMetricsCollector(mgr)
+	obsRT, err := observability.Setup(
+		ctx,
+		config.NewObservabilityConfig(&fullCfg.EnvConfig),
+		observability.WithSetDefaultLogger(false),
+		observability.WithCollectors(httpMetrics, storageCollector),
 	)
-	app := fx.New(
-		fx.NopLogger,
-		fx.Supply(fullCfg),
-		config.Module,
-		obsfx.Module,
-		fx.Decorate(func() *slog.Logger { return logger }),
-		fx.Provide(
-			func() *projection.ControlManager { return mgr },
-			projection.NewStorageMetricsCollector,
-			obsfx.AsCollector(func(c *projection.StorageMetricsCollector) prometheus.Collector { return c }),
-		),
-		Module,
-		fx.Populate(&srv, &obsRT),
-	)
-	require.NoError(t, app.Start(ctx))
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, app.Stop(context.Background()))
+		require.NoError(t, obsRT.Shutdown(context.Background()))
 	})
+
+	mp, err := ConfigureFineBucketMeterProvider(obsRT, &fullCfg.TelemetryConfig, fullCfg)
+	require.NoError(t, err)
+	require.NotNil(t, mp)
+	t.Cleanup(func() {
+		require.NoError(t, mp.Shutdown(context.Background()))
+	})
+
+	srv, err := New(Params{
+		Config:        fullCfg.ServerConfig,
+		MetaVal:       fullCfg.Meta,
+		Manager:       mgr,
+		Observability: fullCfg,
+		Telemetry:     &fullCfg.TelemetryConfig,
+		AdminCfg:      fullCfg,
+		Gatherer:      obsRT.Gatherer(),
+		HTTPMetrics:   httpMetrics,
+		Logger:        logger,
+	})
+	require.NoError(t, err)
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -463,4 +469,4 @@ func withSpecProcedure(req connect.AnyRequest, proc string) connect.AnyRequest {
 	return specOverrideReq{AnyRequest: req, proc: proc}
 }
 
-var _ serverx.ObservabilityConfig = (*telemetryObsAdapter)(nil)
+var _ ObservabilityConfig = (*telemetryObsAdapter)(nil)

@@ -9,13 +9,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/fx"
 
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
-func TestProjectionModule_GivenInvalidOrValidPoolConfig_WhenOpenPoolOrFxValidated_ThenMatchesContract(t *testing.T) {
+func TestProjectionBootstrap_GivenInvalidOrValidPoolConfig_WhenOpenPoolCalled_ThenMatchesContract(t *testing.T) {
 	_, err := OpenPool(config.DBPoolConfig{DSN: "://bad-dsn"})
 	require.Error(t, err)
 
@@ -26,6 +25,11 @@ func TestProjectionModule_GivenInvalidOrValidPoolConfig_WhenOpenPoolOrFxValidate
 		MaxConnLifetime: time.Minute,
 		MaxConnIdleTime: time.Minute,
 	}
+	pool, err := OpenPool(poolCfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	require.NotNil(t, ProvideStore(pool))
+
 	metaCfg := config.MetaConfig{
 		AtimeModeVal:              config.DefaultAtimeMode,
 		EntryTimeoutSecondsVal:    config.DefaultEntryTimeoutSeconds,
@@ -35,10 +39,12 @@ func TestProjectionModule_GivenInvalidOrValidPoolConfig_WhenOpenPoolOrFxValidate
 		GCIntervalVal:             config.DefaultGCInterval,
 		StorageDataDirVal:         t.TempDir(),
 	}
-	require.NoError(t, fx.ValidateApp(
-		fx.Supply(poolCfg, metaCfg),
-		Module,
-	))
+	mgr, err := ProvideControlManager(ControlManagerParams{
+		Store:   NewMemStore(),
+		MetaVal: metaCfg,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, mgr.Close(context.Background())) })
 }
 
 func TestProvideControlManager_WiresGCIntervalFromMetaConfig(t *testing.T) {

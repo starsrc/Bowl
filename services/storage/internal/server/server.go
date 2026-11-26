@@ -9,11 +9,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
-	"go.uber.org/fx"
 
 	"github.com/starsrc/pkg/observability"
 	"github.com/starsrc/pkg/observability/telemetry"
-	"github.com/starsrc/pkg/serverx"
 
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 	"github.com/starsrc/bowl/services/storage/internal/config"
@@ -114,24 +112,17 @@ func (s *Server) leaseTTLSeconds() uint32 {
 }
 
 type Params struct {
-	fx.In
-
 	Config        config.ServerConfig
-	MetaCfg       *config.MetaConfig `optional:"true"`
-	MetaVal       config.MetaConfig  `optional:"true"`
+	MetaCfg       *config.MetaConfig
+	MetaVal       config.MetaConfig
 	Manager       *projection.ControlManager
-	Observability serverx.ObservabilityConfig    `optional:"true"`
-	Telemetry     telemetry.Config               `optional:"true"`
-	AdminCfg      observability.AdminRouteConfig `optional:"true"`
-	Gatherer      prometheus.Gatherer            `optional:"true"`
-	Pool          *pgxpool.Pool                  `optional:"true"`
-	ObsReady      observability.Ready            `optional:"true"`
-	FineBuckets   FineBucketsReady               `optional:"true"`
-	Tracing       TracingReady                   `optional:"true"`
-	HTTPMetrics   *HTTPMetrics                   `optional:"true"`
-	Logger        *slog.Logger                   `optional:"true"`
-	Lifecycle     fx.Lifecycle                   `optional:"true"`
-	Shutdowner    fx.Shutdowner                  `optional:"true"`
+	Observability ObservabilityConfig
+	Telemetry     telemetry.Config
+	AdminCfg      observability.AdminRouteConfig
+	Gatherer      prometheus.Gatherer
+	Pool          *pgxpool.Pool
+	HTTPMetrics   *HTTPMetrics
+	Logger        *slog.Logger
 }
 
 func defaultMetaConfig() config.MetaConfig {
@@ -144,6 +135,34 @@ func defaultMetaConfig() config.MetaConfig {
 		OpenDirCacheVal:           config.DefaultOpenDirCache,
 		ActorIdleTTLVal:           config.DefaultActorIdleTTL,
 	}
+}
+
+func newHTTPServer(addr string, handler http.Handler, cfg config.ServerConfig) *http.Server {
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+
+	return &http.Server{
+		Addr:              addr,
+		Handler:           http.MaxBytesHandler(handler, cfg.ReadMaxBytes()),
+		Protocols:         &protocols,
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout(),
+	}
+}
+
+func newAdminServer(
+	cfg config.ServerConfig,
+	gatherer prometheus.Gatherer,
+	adminCfg observability.AdminRouteConfig,
+	opts ...observability.AdminOption,
+) *http.Server {
+	addr := cfg.InternalServerAddress()
+	if addr == "" {
+		addr = "0.0.0.0:8090"
+	}
+	mux := http.NewServeMux()
+	observability.RegisterAdminRoutes(mux, gatherer, adminCfg, opts...)
+	return newHTTPServer(addr, mux, cfg)
 }
 
 func New(p Params) (*Server, error) {
@@ -214,7 +233,7 @@ func New(p Params) (*Server, error) {
 	)
 	mux.Handle(path, handler)
 
-	httpServer := serverx.NewHTTPServer(p.Config.Addr(), mux, p.Config)
+	httpServer := newHTTPServer(p.Config.Addr(), mux, p.Config)
 	httpServer.Handler = WrapHTTPHandler(httpServer.Handler, httpMetrics)
 	httpServer.HTTP2 = &http.HTTP2Config{
 		MaxReadFrameSize:              HTTP2MaxReadFrameSize,
@@ -230,21 +249,7 @@ func New(p Params) (*Server, error) {
 				return p.Pool.Ping(ctx)
 			}))
 		}
-		srv.adminServer = serverx.NewAdminServer(p.Config, p.Gatherer, p.AdminCfg, readyOpts...)
-	}
-
-	if p.Lifecycle != nil && p.Shutdowner != nil {
-		if srv.adminServer != nil {
-			serverx.RegisterLifecycle(
-				p.Lifecycle,
-				p.Shutdowner,
-				p.Config,
-				serverx.Listener{Name: "public", Server: httpServer},
-				serverx.Listener{Name: "admin", Server: srv.adminServer},
-			)
-		} else {
-			serverx.RegisterSingleLifecycle(p.Lifecycle, p.Shutdowner, p.Config, "server", httpServer)
-		}
+		srv.adminServer = newAdminServer(p.Config, p.Gatherer, p.AdminCfg, readyOpts...)
 	}
 
 	return srv, nil

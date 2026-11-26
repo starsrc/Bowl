@@ -18,7 +18,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/fx"
 
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
@@ -115,45 +114,17 @@ func TestSlice4_Step14_LoggerWiringAndNilDefaultResolution(t *testing.T) {
 	require.Same(t, defaultA, nilLoggerMgr.queue.logger)
 	require.Same(t, defaultA, nilLoggerQueue.logger)
 
-	fxLogger, _ := newTestLogger(slog.LevelInfo)
-	var fxMgr *ControlManager
-	app := fx.New(
-		fx.NopLogger,
-		fx.Supply(
-			&config.MetaConfig{
-				StorageDataDirVal: t.TempDir(),
-				GCIntervalVal:     0,
-			},
-			fxLogger,
-		),
-		fx.Provide(
-			func() Store { return NewMemStore() },
-			ProvideControlManager,
-		),
-		fx.Populate(&fxMgr),
-	)
-	require.NoError(t, app.Start(ctx))
-	t.Cleanup(func() { require.NoError(t, app.Stop(context.Background())) })
-	require.Same(t, fxLogger, fxMgr.logger)
-	require.Same(t, fxLogger, fxMgr.queue.logger)
-
-	var fxNoLoggerMgr *ControlManager
-	appNoLogger := fx.New(
-		fx.NopLogger,
-		fx.Supply(&config.MetaConfig{
+	plainNoLoggerMgr, err := ProvideControlManager(ControlManagerParams{
+		Store: NewMemStore(),
+		MetaCfg: &config.MetaConfig{
 			StorageDataDirVal: t.TempDir(),
 			GCIntervalVal:     0,
-		}),
-		fx.Provide(
-			func() Store { return NewMemStore() },
-			ProvideControlManager,
-		),
-		fx.Populate(&fxNoLoggerMgr),
-	)
-	require.NoError(t, appNoLogger.Start(ctx))
-	t.Cleanup(func() { require.NoError(t, appNoLogger.Stop(context.Background())) })
-	require.Same(t, defaultB, fxNoLoggerMgr.logger)
-	require.Same(t, defaultB, fxNoLoggerMgr.queue.logger)
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, plainNoLoggerMgr.Close(context.Background())) })
+	require.Same(t, defaultB, plainNoLoggerMgr.logger)
+	require.Same(t, defaultB, plainNoLoggerMgr.queue.logger)
 }
 
 func recordsByLevel(recs []map[string]any, level string) []map[string]any {

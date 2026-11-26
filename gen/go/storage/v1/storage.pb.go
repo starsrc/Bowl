@@ -7527,10 +7527,10 @@ var File_storage_v1_storage_proto protoreflect.FileDescriptor
 const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"\x18storage/v1/storage.proto\x12\n" +
-	"storage.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc6\x03\n" +
-	"\rLookupRequest\x12&\n" +
+	"storage.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd0\x03\n" +
+	"\rLookupRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\tparentIno\x12\x91\x01\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x91\x01\n" +
 	"\x04name\x18\x02 \x01(\fB}\xbaHz\xba\x01r\n" +
 	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x03\x18\xff\x01R\x04name\x12\x8a\x01\n" +
 	"\adisk_id\x18\x03 \x01(\tBq\xbaHn\xba\x01f\n" +

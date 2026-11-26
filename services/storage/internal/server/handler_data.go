@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"math"
 
 	"connectrpc.com/connect"
 
@@ -14,9 +13,6 @@ const maxReadWriteSize = 4 << 20
 
 func (s *Server) Read(ctx context.Context, req *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
 	msg := req.Msg
-	if msg.Fh > math.MaxInt64 || msg.Offset > math.MaxInt64 || msg.Size > maxReadWriteSize {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -63,12 +59,6 @@ func (s *Server) Read(ctx context.Context, req *connect.Request[storagev1.ReadRe
 
 func (s *Server) Write(ctx context.Context, req *connect.Request[storagev1.WriteRequest]) (*connect.Response[storagev1.WriteResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Fh > math.MaxInt64 || msg.Offset > math.MaxInt64 || len(msg.Data) > maxReadWriteSize {
-		return nil, toConnectError(engine.ErrInvalid)
-	}
 	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)

@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 
+	"buf.build/go/protovalidate"
 	"connectrpc.com/connect"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-
-	"github.com/starsrc/pkg/serverx"
 
 	"github.com/starsrc/bowl/services/storage/internal/engine"
 	"github.com/starsrc/bowl/services/storage/internal/projection"
@@ -53,6 +52,45 @@ var errorMappings = []errorMapping{
 	{sentinel: projection.ErrUnavailable, code: codes.Unavailable, reason: "EIO"},
 }
 
+func grpcCodeToConnectCode(c codes.Code) connect.Code {
+	switch c {
+	case codes.Canceled:
+		return connect.CodeCanceled
+	case codes.Unknown:
+		return connect.CodeUnknown
+	case codes.InvalidArgument:
+		return connect.CodeInvalidArgument
+	case codes.DeadlineExceeded:
+		return connect.CodeDeadlineExceeded
+	case codes.NotFound:
+		return connect.CodeNotFound
+	case codes.AlreadyExists:
+		return connect.CodeAlreadyExists
+	case codes.PermissionDenied:
+		return connect.CodePermissionDenied
+	case codes.ResourceExhausted:
+		return connect.CodeResourceExhausted
+	case codes.FailedPrecondition:
+		return connect.CodeFailedPrecondition
+	case codes.Aborted:
+		return connect.CodeAborted
+	case codes.OutOfRange:
+		return connect.CodeOutOfRange
+	case codes.Unimplemented:
+		return connect.CodeUnimplemented
+	case codes.Internal:
+		return connect.CodeInternal
+	case codes.Unavailable:
+		return connect.CodeUnavailable
+	case codes.DataLoss:
+		return connect.CodeDataLoss
+	case codes.Unauthenticated:
+		return connect.CodeUnauthenticated
+	default:
+		return connect.CodeUnknown
+	}
+}
+
 func ToStatus(err error) *status.Status {
 	if err == nil {
 		return nil
@@ -87,6 +125,13 @@ func ToStatus(err error) *status.Status {
 	if s, ok := status.FromError(err); ok {
 		return s
 	}
+	if storageValErr, ok := errors.AsType[*ValidationError](err); ok {
+		return buildInvalidArgumentStatus(err.Error(), storageValErr.Reason(), storageValErr.Domain())
+	}
+	if protoValErr, ok := errors.AsType[*protovalidate.ValidationError](err); ok {
+		reason, domain := translateValidation(protoValErr, ErrorDomain)
+		return buildInvalidArgumentStatus(err.Error(), reason, domain)
+	}
 	if errors.Is(err, context.Canceled) {
 		return status.New(codes.Canceled, err.Error())
 	}
@@ -96,12 +141,39 @@ func ToStatus(err error) *status.Status {
 	return status.New(codes.Unknown, err.Error())
 }
 
+func ToGRPCError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return ToStatus(err).Err()
+}
+
 func statusToConnectError(st *status.Status) error {
-	return serverx.StatusToConnectError(st)
+	return StatusToConnectError(st)
 }
 
 func StatusToConnectError(st *status.Status) error {
-	return serverx.StatusToConnectError(st)
+	if st == nil || st.Code() == codes.OK {
+		return nil
+	}
+
+	code := grpcCodeToConnectCode(st.Code())
+	connectErr := connect.NewError(code, errors.New(st.Message()))
+
+	if stProto := st.Proto(); stProto != nil {
+		for _, anyDetail := range stProto.GetDetails() {
+			if anyDetail == nil {
+				continue
+			}
+			detail, err := connect.NewErrorDetail(anyDetail)
+			if err != nil {
+				continue
+			}
+			connectErr.AddDetail(detail)
+		}
+	}
+
+	return connectErr
 }
 
 func toConnectError(err error) error {
@@ -134,6 +206,65 @@ func ToConnectError(err error) error {
 	return toConnectError(err)
 }
 
+func extractErrorInfoFromStatus(st *status.Status) *errdetails.ErrorInfo {
+	if st == nil || st.Code() == codes.OK {
+		return nil
+	}
+	for _, detail := range st.Details() {
+		if info, ok := detail.(*errdetails.ErrorInfo); ok {
+			return info
+		}
+	}
+	if stProto := st.Proto(); stProto != nil {
+		for _, anyDetail := range stProto.GetDetails() {
+			if anyDetail == nil {
+				continue
+			}
+			msg, unmarshalErr := anyDetail.UnmarshalNew()
+			if unmarshalErr != nil {
+				continue
+			}
+			if info, ok := msg.(*errdetails.ErrorInfo); ok {
+				return info
+			}
+		}
+	}
+	return nil
+}
+
 func ExtractErrorInfo(err error) *errdetails.ErrorInfo {
-	return serverx.ExtractErrorInfo(err)
+	if err == nil {
+		return nil
+	}
+
+	if connectErr, ok := errors.AsType[*connect.Error](err); ok {
+		for _, detail := range connectErr.Details() {
+			msg, valErr := detail.Value()
+			if valErr != nil {
+				continue
+			}
+			if info, infoOK := msg.(*errdetails.ErrorInfo); infoOK {
+				return info
+			}
+		}
+	}
+
+	for curr := err; curr != nil; curr = errors.Unwrap(curr) {
+		if st, ok := status.FromError(curr); ok {
+			if info := extractErrorInfoFromStatus(st); info != nil {
+				return info
+			}
+		}
+	}
+
+	if se, ok := errors.AsType[interface {
+		error
+		GRPCStatus() *status.Status
+	}](err); ok {
+		if info := extractErrorInfoFromStatus(se.GRPCStatus()); info != nil {
+			return info
+		}
+	}
+
+	return nil
 }

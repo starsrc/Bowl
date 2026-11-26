@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -79,8 +80,7 @@ func TestRunManagedServers_GivenSecondPortConflict_WhenPreBinding_ThenClosesFirs
 		recordHook("observability"),
 		recordHook("meter provider"),
 		recordHook("tracer provider"),
-		recordHook("db pool"),
-		recordHook("control manager"),
+		recordHook("node store"),
 	}
 
 	runErr := runManagedServers(
@@ -103,8 +103,7 @@ func TestRunManagedServers_GivenSecondPortConflict_WhenPreBinding_ThenClosesFirs
 	require.NoError(t, rebound.Close())
 
 	require.Equal(t, []string{
-		"control manager",
-		"db pool",
+		"node store",
 		"tracer provider",
 		"meter provider",
 		"observability",
@@ -210,8 +209,7 @@ func TestRunManagedServers_GivenContextCancel_WhenServingBothPorts_ThenGracefull
 				recordHook("observability"),
 				recordHook("meter provider"),
 				recordHook("tracer provider"),
-				recordHook("db pool"),
-				recordHook("control manager"),
+				recordHook("node store"),
 			},
 			discardLogger(),
 		)
@@ -241,18 +239,19 @@ func TestRunManagedServers_GivenContextCancel_WhenServingBothPorts_ThenGracefull
 	}
 
 	require.Equal(t, []string{
-		"control manager",
-		"db pool",
+		"node store",
 		"tracer provider",
 		"meter provider",
 		"observability",
 	}, order)
 }
 
-func TestRunWithConfig_GivenUnreachablePostgres_WhenBootstrapping_ThenFailsFast(t *testing.T) {
-	closedPGPort := reserveFreePort(t)
+func TestRunWithConfig_GivenUnwritableDataDir_WhenBootstrapping_ThenFailsFast(t *testing.T) {
 	pubPort := reserveFreePort(t)
 	adminPort := reserveFreePort(t)
+
+	blockingFile := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blockingFile, []byte("x"), 0o600))
 
 	obsCfg := observability.DefaultConfig()
 	obsCfg.AdminAddr = "off"
@@ -270,9 +269,6 @@ func TestRunWithConfig_GivenUnreachablePostgres_WhenBootstrapping_ThenFailsFast(
 			ServerReadMaxBytes:      config.DefaultServerReadMaxBytes,
 		},
 		EnvConfig: obsCfg,
-		PoolConfig: config.DBPoolConfig{
-			DSN: fmt.Sprintf("postgres://postgres:postgres@127.0.0.1:%d/bowl?sslmode=disable&connect_timeout=1", closedPGPort),
-		},
 		Meta: config.MetaConfig{
 			AtimeModeVal:              config.DefaultAtimeMode,
 			EntryTimeoutSecondsVal:    config.DefaultEntryTimeoutSeconds,
@@ -280,7 +276,7 @@ func TestRunWithConfig_GivenUnreachablePostgres_WhenBootstrapping_ThenFailsFast(
 			DirEntryTimeoutSecondsVal: config.DefaultDirEntryTimeoutSeconds,
 			ActorIdleTTLVal:           config.DefaultActorIdleTTL,
 			GCIntervalVal:             config.DefaultGCInterval,
-			StorageDataDirVal:         t.TempDir(),
+			StorageDataDirVal:         blockingFile,
 		},
 	}
 
@@ -289,5 +285,74 @@ func TestRunWithConfig_GivenUnreachablePostgres_WhenBootstrapping_ThenFailsFast(
 
 	err := runWithConfig(ctx, cfg)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "ping database")
+	require.Contains(t, err.Error(), "open node store")
+}
+
+func TestRunWithConfig_GivenValidConfig_WhenRunning_ThenServesReadyzAndStopsCleanly(t *testing.T) {
+	pubPort := reserveFreePort(t)
+	adminPort := reserveFreePort(t)
+	adminAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(adminPort))
+
+	obsCfg := observability.DefaultConfig()
+	obsCfg.AdminAddr = "off"
+	obsCfg.MetricsEnabled = true
+	obsCfg.OtelEnabled = false
+
+	cfg := &config.Config{
+		ServerConfig: config.ServerConfig{
+			ServerHost:              "127.0.0.1",
+			ServerPort:              pubPort,
+			InternalServerHost:      "127.0.0.1",
+			InternalServerPort:      adminPort,
+			ServerReadHeaderTimeout: time.Second,
+			ServerStopTimeout:       2 * time.Second,
+			ServerReadMaxBytes:      config.DefaultServerReadMaxBytes,
+		},
+		EnvConfig: obsCfg,
+		Meta: config.MetaConfig{
+			AtimeModeVal:              config.DefaultAtimeMode,
+			EntryTimeoutSecondsVal:    config.DefaultEntryTimeoutSeconds,
+			AttrTimeoutSecondsVal:     config.DefaultAttrTimeoutSeconds,
+			DirEntryTimeoutSecondsVal: config.DefaultDirEntryTimeoutSeconds,
+			ActorIdleTTLVal:           config.DefaultActorIdleTTL,
+			GCIntervalVal:             0,
+			StorageDataDirVal:         t.TempDir(),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runWithConfig(ctx, cfg)
+	}()
+
+	httpClient := &http.Client{Timeout: time.Second}
+	var readyBody string
+	require.Eventually(t, func() bool {
+		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+adminAddr+"/readyz", http.NoBody)
+		if reqErr != nil {
+			return false
+		}
+		resp, doErr := httpClient.Do(req)
+		if doErr != nil {
+			return false
+		}
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			return false
+		}
+		readyBody = string(bodyBytes)
+		return true
+	}, 3*time.Second, 15*time.Millisecond)
+	require.Contains(t, readyBody, `"storage":"ok"`)
+
+	cancel()
+
+	select {
+	case gotErr := <-errCh:
+		require.NoError(t, gotErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("runWithConfig did not stop gracefully after context cancellation")
+	}
 }

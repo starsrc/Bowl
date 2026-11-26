@@ -6,7 +6,7 @@ import (
 	"connectrpc.com/connect"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
 func (s *Server) ForkBranch(ctx context.Context, req *connect.Request[storagev1.ForkBranchRequest]) (*connect.Response[storagev1.ForkBranchResponse], error) {
@@ -14,13 +14,13 @@ func (s *Server) ForkBranch(ctx context.Context, req *connect.Request[storagev1.
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	cmt, br, err := s.manager.ForkBranch(ctx, diskID, req.Msg.SourceBranch, req.Msg.NewBranch, req.Msg.Message)
+	cmt, br, err := s.node.ForkBranch(ctx, diskID, req.Msg.SourceBranch, req.Msg.NewBranch, req.Msg.Message)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.ForkBranchResponse{
-		Commit: toProtoCommit(cmt),
-		Branch: toProtoBranch(br),
+		Commit: toProtoCommit(diskID, cmt),
+		Branch: toProtoBranch(diskID, br),
 	}), nil
 }
 
@@ -29,13 +29,13 @@ func (s *Server) ListBranches(ctx context.Context, req *connect.Request[storagev
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	branches, err := s.manager.ListBranches(ctx, diskID)
+	branches, err := s.node.ListBranches(ctx, diskID)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	out := make([]*storagev1.Branch, 0, len(branches))
 	for _, b := range branches {
-		out = append(out, toProtoBranch(b))
+		out = append(out, toProtoBranch(diskID, b))
 	}
 	return connect.NewResponse(&storagev1.ListBranchesResponse{
 		Branches: out,
@@ -47,7 +47,7 @@ func (s *Server) DeleteBranch(ctx context.Context, req *connect.Request[storagev
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if err = s.manager.DeleteBranch(ctx, diskID, req.Msg.Branch); err != nil {
+	if err = s.node.DeleteBranch(ctx, diskID, req.Msg.Branch); err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.DeleteBranchResponse{}), nil
@@ -58,12 +58,12 @@ func (s *Server) ResetBranch(ctx context.Context, req *connect.Request[storagev1
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	br, err := s.manager.ResetBranch(ctx, diskID, req.Msg.Branch, req.Msg.TargetCommitId)
+	br, err := s.node.ResetBranch(ctx, diskID, req.Msg.Branch, req.Msg.TargetCommitId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.ResetBranchResponse{
-		Branch: toProtoBranch(br),
+		Branch: toProtoBranch(diskID, br),
 	}), nil
 }
 
@@ -72,12 +72,12 @@ func (s *Server) CreateCommit(ctx context.Context, req *connect.Request[storagev
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	cmt, err := s.manager.Commit(ctx, diskID, req.Msg.Branch, req.Msg.Message)
+	cmt, err := s.node.Commit(ctx, diskID, req.Msg.Branch, req.Msg.Message)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.CreateCommitResponse{
-		Commit: toProtoCommit(cmt),
+		Commit: toProtoCommit(diskID, cmt),
 	}), nil
 }
 
@@ -86,11 +86,11 @@ func (s *Server) ListCommits(ctx context.Context, req *connect.Request[storagev1
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	kind, err := toProjectionCommitKind(req.Msg.Kind)
+	kind, err := toEngineCommitKind(req.Msg.Kind)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	page, err := s.manager.ListCommits(ctx, projection.ListCommitsQuery{
+	page, err := s.node.ListCommits(ctx, engine.ListCommitsQuery{
 		DiskID:    diskID,
 		Kind:      kind,
 		PageSize:  req.Msg.PageSize,
@@ -101,7 +101,7 @@ func (s *Server) ListCommits(ctx context.Context, req *connect.Request[storagev1
 	}
 	commits := make([]*storagev1.Commit, 0, len(page.Commits))
 	for _, c := range page.Commits {
-		commits = append(commits, toProtoCommit(c))
+		commits = append(commits, toProtoCommit(diskID, c))
 	}
 	return connect.NewResponse(&storagev1.ListCommitsResponse{
 		Commits:       commits,
@@ -114,7 +114,7 @@ func (s *Server) DeleteCommit(ctx context.Context, req *connect.Request[storagev
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if err = s.manager.DeleteCommit(ctx, diskID, req.Msg.CommitId); err != nil {
+	if err = s.node.DeleteCommit(ctx, diskID, req.Msg.CommitId); err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.DeleteCommitResponse{}), nil
@@ -125,7 +125,7 @@ func (s *Server) PruneCommits(ctx context.Context, req *connect.Request[storagev
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	reclaimed, err := s.manager.PruneCommits(ctx, diskID)
+	reclaimed, err := s.node.PruneCommits(ctx, diskID)
 	if err != nil {
 		return nil, toConnectError(err)
 	}

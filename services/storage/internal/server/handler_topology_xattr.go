@@ -16,7 +16,7 @@ func (s *Server) Link(ctx context.Context, req *connect.Request[storagev1.LinkRe
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var lErr error
 		inode, lErr = ds.Link(epochCtx, req.Msg.GetBranch(), req.Msg.GetIno(), req.Msg.GetNewParentIno(), string(req.Msg.GetNewName()))
 		return lErr
@@ -38,7 +38,7 @@ func (s *Server) Unlink(ctx context.Context, req *connect.Request[storagev1.Unli
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.Unlink(epochCtx, req.Msg.GetBranch(), req.Msg.GetParentIno(), string(req.Msg.GetName()), req.Msg.GetOpenInClient())
 	}); err != nil {
 		return nil, toConnectError(err)
@@ -53,7 +53,7 @@ func (s *Server) Rmdir(ctx context.Context, req *connect.Request[storagev1.Rmdir
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.Rmdir(epochCtx, req.Msg.GetBranch(), req.Msg.GetParentIno(), string(req.Msg.GetName()))
 	}); err != nil {
 		return nil, toConnectError(err)
@@ -68,7 +68,7 @@ func (s *Server) Rename(ctx context.Context, req *connect.Request[storagev1.Rena
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.Rename(epochCtx, req.Msg.GetBranch(), engine.RenameReq{
 			OldParentIno:       req.Msg.GetOldParentIno(),
 			OldName:            string(req.Msg.GetOldName()),
@@ -90,7 +90,7 @@ func (s *Server) SetXattr(ctx context.Context, req *connect.Request[storagev1.Se
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.SetXattr(epochCtx, req.Msg.GetBranch(), req.Msg.GetIno(), string(req.Msg.GetName()), req.Msg.GetValue(), req.Msg.GetFlags())
 	}); err != nil {
 		return nil, toConnectError(err)
@@ -105,7 +105,7 @@ func (s *Server) GetXattr(ctx context.Context, req *connect.Request[storagev1.Ge
 		return nil, toConnectError(err)
 	}
 	var val []byte
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var gErr error
 		val, gErr = ds.GetXattr(ctx, req.Msg.GetBranch(), req.Msg.GetIno(), string(req.Msg.GetName()))
 		return gErr
@@ -125,7 +125,7 @@ func (s *Server) ListXattr(ctx context.Context, req *connect.Request[storagev1.L
 		return nil, toConnectError(err)
 	}
 	var names []string
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var lErr error
 		names, lErr = ds.ListXattr(ctx, req.Msg.GetBranch(), req.Msg.GetIno())
 		return lErr
@@ -150,7 +150,7 @@ func (s *Server) RemoveXattr(ctx context.Context, req *connect.Request[storagev1
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.RemoveXattr(epochCtx, req.Msg.GetBranch(), req.Msg.GetIno(), string(req.Msg.GetName()))
 	}); err != nil {
 		return nil, toConnectError(err)
@@ -165,7 +165,7 @@ func (s *Server) ReclaimOrphan(ctx context.Context, req *connect.Request[storage
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.PurgeOrphanInode(epochCtx, req.Msg.GetBranch(), req.Msg.GetIno())
 	}); err != nil {
 		return nil, toConnectError(err)

@@ -13,34 +13,29 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 type testEnv struct {
 	server *Server
-	mgr    *projection.ControlManager
-	store  *projection.MemStore
+	node   *engine.NodeStore
 	client storagev1connect.StorageServiceClient
 }
 
 func newTestEnv(t *testing.T, metaCfg *config.MetaConfig) *testEnv {
 	t.Helper()
-	mem := projection.NewMemStore()
-	mgr, err := projection.NewControlManager(projection.ManagerOptions{
-		StorageRoot:             t.TempDir(),
-		Store:                   mem,
-		MountLeaseTTL:           30 * time.Second,
-		DisableStartupReconcile: true,
+	node, err := engine.OpenNode(engine.NodeOptions{
+		DataDir:       t.TempDir(),
+		MountLeaseTTL: 30 * time.Second,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, mgr.Close(context.Background()))
+		require.NoError(t, node.Close(context.Background()))
 	})
 
 	srv, err := New(Params{
 		Config:  config.ServerConfig{},
 		MetaCfg: metaCfg,
-		Manager: mgr,
+		Node:    node,
 	})
 	require.NoError(t, err)
 
@@ -50,8 +45,7 @@ func newTestEnv(t *testing.T, metaCfg *config.MetaConfig) *testEnv {
 	client := storagev1connect.NewStorageServiceClient(ts.Client(), ts.URL)
 	return &testEnv{
 		server: srv,
-		mgr:    mgr,
-		store:  mem,
+		node:   node,
 		client: client,
 	}
 }

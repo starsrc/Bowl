@@ -82,8 +82,6 @@ linters:
           deny:
             - pkg: "github.com/starsrc/bowl/services/storage/internal/server"
               desc: "底层存储引擎包禁止反向依赖上层 RPC server 层"
-            - pkg: "github.com/starsrc/bowl/services/storage/internal/projection"
-              desc: "底层存储引擎包禁止反向依赖控制面 projection 层"
         client_isolation:
           files:
             - "**/client/**"
@@ -99,9 +97,6 @@ linters:
           msg: "禁止使用 fmt.Print* 调试打印，服务端请使用结构化日志，CLI 请显式写入目标 io.Writer (如 fmt.Fprintln)"
         - pattern: '^(print|println)$'
           msg: "禁止使用内置 print/println 调试函数"
-        - pattern: '^pgxpool\.New(WithConfig)?$'
-          pkg: '^github\.com/jackc/pgx/v5/pgxpool$'
-          msg: "禁止直接调用 pgxpool.New/NewWithConfig，生产代码请通过 tx.OpenPool 创建连接池，测试代码请统一调用 setupMetaTestDB(t)"
     govet:
       enable:
         - nilness   # 检查潜在的 nil 指针解引用
@@ -132,10 +127,6 @@ linters:
         linters:
           - revive
         text: "context-as-argument:"
-      - path: 'testdb_helper_test\.go$'
-        linters:
-          - forbidigo
-        text: "pgxpool\\.New"
       - path: 'internal/fusefs/fs_ioctl\.go$'
         linters:
           - revive

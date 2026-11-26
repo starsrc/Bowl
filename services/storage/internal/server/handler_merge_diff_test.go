@@ -12,7 +12,6 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 func extractConflictReport(t *testing.T, err error) *storagev1.MergeConflictReport {
@@ -378,17 +377,14 @@ func TestHandlerMergeBranch_FFNoFFConflictsAndGuards(t *testing.T) {
 func TestHandlerDiffAndReadCommitNode_Step8_DirectWithDiskOnColdDisk(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := projection.NewMemStore()
 
-	seedMgr, err := projection.NewControlManager(projection.ManagerOptions{
-		StorageRoot:             root,
-		Store:                   store,
-		DisableStartupReconcile: true,
+	seedNode, err := engine.OpenNode(engine.NodeOptions{
+		DataDir: root,
 	})
 	require.NoError(t, err)
 	seedSrv, err := New(Params{
-		Config:  config.ServerConfig{},
-		Manager: seedMgr,
+		Config: config.ServerConfig{},
+		Node:   seedNode,
 	})
 	require.NoError(t, err)
 	seedTS := httptest.NewServer(seedSrv.Handler())
@@ -484,19 +480,17 @@ func TestHandlerDiffAndReadCommitNode_Step8_DirectWithDiskOnColdDisk(t *testing.
 	require.NoError(t, err)
 
 	seedTS.Close()
-	require.NoError(t, seedMgr.Close(ctx))
+	require.NoError(t, seedNode.Close(ctx))
 
-	coldMgr, err := projection.NewControlManager(projection.ManagerOptions{
-		StorageRoot:             root,
-		Store:                   store,
-		DisableStartupReconcile: true,
+	coldNode, err := engine.OpenNode(engine.NodeOptions{
+		DataDir: root,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, coldMgr.Close(context.Background())) })
+	t.Cleanup(func() { require.NoError(t, coldNode.Close(context.Background())) })
 
 	coldSrv, err := New(Params{
-		Config:  config.ServerConfig{},
-		Manager: coldMgr,
+		Config: config.ServerConfig{},
+		Node:   coldNode,
 	})
 	require.NoError(t, err)
 	coldTS := httptest.NewServer(coldSrv.Handler())

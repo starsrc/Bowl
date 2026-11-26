@@ -25,7 +25,7 @@ func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.Crea
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, msg.Epoch)
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var cErr error
 		inode, cErr = ds.Create(epochCtx, msg.Branch, msg.ParentIno, string(msg.Name), msg.Mode, msg.Uid, msg.Gid)
 		return cErr
@@ -56,7 +56,7 @@ func (s *Server) CreateTmpfile(ctx context.Context, req *connect.Request[storage
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, msg.GetEpoch())
 	var inode engine.Inode
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var cErr error
 		inode, cErr = ds.CreateTmpfile(epochCtx, msg.GetBranch(), msg.GetParentIno(), msg.GetMode(), msg.GetUid(), msg.GetGid(), msg.GetExclusive())
 		return cErr
@@ -79,7 +79,7 @@ func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.Fsync
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, msg.Epoch)
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.Fsync(epochCtx, msg.Branch, msg.Ino)
 	}); err != nil {
 		return nil, toConnectError(err)
@@ -95,7 +95,7 @@ func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.Fs
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, msg.Epoch)
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.FsyncDir(epochCtx, msg.Branch, msg.Ino)
 	}); err != nil {
 		return nil, toConnectError(err)
@@ -111,7 +111,7 @@ func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.Rea
 		return nil, toConnectError(err)
 	}
 	var res []engine.DirEntry
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var rErr error
 		res, rErr = ds.ReadDirPage(ctx, msg.Branch, msg.Ino, msg.Offset, msg.Limit)
 		return rErr
@@ -142,7 +142,7 @@ func (s *Server) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1
 		return nil, toConnectError(err)
 	}
 	var res []engine.DirEntryPlus
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var rErr error
 		res, rErr = ds.ReadDirPlus(ctx, msg.Branch, msg.Ino, msg.Offset, msg.Limit)
 		return rErr
@@ -181,7 +181,7 @@ func (s *Server) Fallocate(ctx context.Context, req *connect.Request[storagev1.F
 		return nil, toConnectError(err)
 	}
 	epochCtx := engine.WithWriterEpoch(ctx, msg.Epoch)
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	if err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		return ds.Fallocate(epochCtx, msg.Branch, msg.Ino, msg.Offset, msg.Length, msg.Mode)
 	}); err != nil {
 		return nil, toConnectError(err)

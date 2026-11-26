@@ -1,13 +1,11 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 
 	"connectrpc.com/connect"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/starsrc/pkg/observability"
@@ -16,7 +14,6 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 var _ storagev1connect.StorageServiceHandler = (*Server)(nil)
@@ -30,7 +27,7 @@ const (
 )
 
 type Server struct {
-	manager     *projection.ControlManager
+	node        *engine.NodeStore
 	metaCfg     config.MetaConfig
 	config      config.ServerConfig
 	logger      *slog.Logger
@@ -68,8 +65,8 @@ func (s *Server) AdminHTTPServer() *http.Server {
 	return s.adminServer
 }
 
-func (s *Server) Manager() *projection.ControlManager {
-	return s.manager
+func (s *Server) Node() *engine.NodeStore {
+	return s.node
 }
 
 func (s *Server) Addr() string {
@@ -101,12 +98,12 @@ func (s *Server) attrTimeoutSeconds() float64 {
 }
 
 func (s *Server) leaseTTLSeconds() uint32 {
-	if s.manager == nil {
-		return uint32(projection.DefaultMountLeaseTTL.Seconds())
+	if s.node == nil {
+		return uint32(engine.DefaultMountLeaseTTL.Seconds())
 	}
-	secs := int64(s.manager.MountLeaseTTL().Seconds())
+	secs := int64(s.node.MountLeaseTTL().Seconds())
 	if secs <= 0 {
-		return uint32(projection.DefaultMountLeaseTTL.Seconds())
+		return uint32(engine.DefaultMountLeaseTTL.Seconds())
 	}
 	return uint32(secs)
 }
@@ -115,12 +112,11 @@ type Params struct {
 	Config        config.ServerConfig
 	MetaCfg       *config.MetaConfig
 	MetaVal       config.MetaConfig
-	Manager       *projection.ControlManager
+	Node          *engine.NodeStore
 	Observability ObservabilityConfig
 	Telemetry     telemetry.Config
 	AdminCfg      observability.AdminRouteConfig
 	Gatherer      prometheus.Gatherer
-	Pool          *pgxpool.Pool
 	HTTPMetrics   *HTTPMetrics
 	Logger        *slog.Logger
 }
@@ -207,7 +203,7 @@ func New(p Params) (*Server, error) {
 	}
 
 	srv := &Server{
-		manager:     p.Manager,
+		node:        p.Node,
 		metaCfg:     metaCfg,
 		config:      p.Config,
 		logger:      logger,
@@ -244,10 +240,8 @@ func New(p Params) (*Server, error) {
 
 	if p.Config.InternalServerPort > 0 {
 		var readyOpts []observability.AdminOption
-		if p.Pool != nil {
-			readyOpts = append(readyOpts, observability.WithReadyCheck("postgres", func(ctx context.Context) error {
-				return p.Pool.Ping(ctx)
-			}))
+		if p.Node != nil {
+			readyOpts = append(readyOpts, observability.WithReadyCheck("storage", p.Node.Ready))
 		}
 		srv.adminServer = newAdminServer(p.Config, p.Gatherer, p.AdminCfg, readyOpts...)
 	}

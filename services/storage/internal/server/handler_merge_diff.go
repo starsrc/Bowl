@@ -134,7 +134,7 @@ func (s *Server) DiffBranches(ctx context.Context, req *connect.Request[storagev
 		return nil, toConnectError(err)
 	}
 	var res *engine.DiffResult
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var dErr error
 		res, dErr = ds.Diff(ctx, engine.DiffOptions{
 			SourceBranch:  req.Msg.SourceBranch,
@@ -158,7 +158,7 @@ func (s *Server) DiffCommits(ctx context.Context, req *connect.Request[storagev1
 		return nil, toConnectError(err)
 	}
 	var res *engine.DiffResult
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var dErr error
 		res, dErr = ds.DiffCommits(ctx, engine.DiffCommitsOptions{
 			BaseCommitID:   req.Msg.BaseCommitId,
@@ -182,7 +182,7 @@ func (s *Server) DiffWork(ctx context.Context, req *connect.Request[storagev1.Di
 		return nil, toConnectError(err)
 	}
 	var res *engine.DiffResult
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var dErr error
 		res, dErr = ds.DiffWork(ctx, req.Msg.Branch, engine.DiffWorkOptions{
 			PathPrefix:    req.Msg.PathPrefix,
@@ -204,7 +204,7 @@ func (s *Server) ReadCommitNode(ctx context.Context, req *connect.Request[storag
 		return nil, toConnectError(err)
 	}
 	var res engine.CommitNodeResult
-	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+	err = s.node.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
 		var rErr error
 		res, rErr = ds.ReadCommitNode(ctx, req.Msg.CommitId, req.Msg.Ino, int64(req.Msg.Offset), int(req.Msg.Size))
 		return rErr
@@ -242,7 +242,7 @@ func (s *Server) MergeBranch(ctx context.Context, req *connect.Request[storagev1
 		}
 	}
 
-	res, err := s.manager.MergeBranch(ctx, diskID, engine.MergeOptions{
+	res, err := s.node.MergeBranch(ctx, diskID, engine.MergeOptions{
 		SourceBranch:   req.Msg.SourceBranch,
 		TargetBranch:   req.Msg.TargetBranch,
 		Strategy:       strategy,
@@ -263,10 +263,10 @@ func (s *Server) MergeBranch(ctx context.Context, req *connect.Request[storagev1
 		WriterEpoch: res.WriterEpoch,
 	}
 	if res.Branch != nil {
-		resp.Branch = toProtoBranch(*res.Branch)
+		resp.Branch = toProtoBranch(diskID, *res.Branch)
 	}
 	if res.Commit != nil {
-		resp.Commit = toProtoCommit(*res.Commit)
+		resp.Commit = toProtoCommit(diskID, *res.Commit)
 	}
 	return connect.NewResponse(resp), nil
 }

@@ -11,7 +11,6 @@ import (
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/services/storage/internal/engine"
-	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 const validTestDiskUUID = "019440e0-5b9a-7a31-a8d0-1b2c3d4e5f60"
@@ -218,7 +217,7 @@ func TestValidator_Step23AndStep24RPCRequests(t *testing.T) {
 	}
 }
 
-func TestToConnectError_MapsAllEngineAndProjectionSentinels(t *testing.T) {
+func TestToConnectError_MapsAllEngineSentinels(t *testing.T) {
 	cases := []struct {
 		name       string
 		err        error
@@ -233,7 +232,6 @@ func TestToConnectError_MapsAllEngineAndProjectionSentinels(t *testing.T) {
 		{name: "ErrAmbiguousLCA", err: engine.ErrAmbiguousLCA, wantCode: connect.CodeFailedPrecondition, wantReason: "EINVAL"},
 		{name: "ErrDiskMounted", err: engine.ErrDiskMounted, wantCode: connect.CodeAborted, wantReason: "EBUSY"},
 		{name: "engine.ErrNotFound", err: engine.ErrNotFound, wantCode: connect.CodeNotFound, wantReason: "ENOENT"},
-		{name: "projection.ErrNotFound", err: projection.ErrNotFound, wantCode: connect.CodeNotFound, wantReason: "ENOENT"},
 		{name: "ErrNoData", err: engine.ErrNoData, wantCode: connect.CodeNotFound, wantReason: "ENODATA"},
 		{name: "ErrExist", err: engine.ErrExist, wantCode: connect.CodeAlreadyExists, wantReason: "EEXIST"},
 		{name: "ErrPerm", err: engine.ErrPerm, wantCode: connect.CodePermissionDenied, wantReason: "EPERM"},
@@ -249,9 +247,7 @@ func TestToConnectError_MapsAllEngineAndProjectionSentinels(t *testing.T) {
 		{name: "ErrInvalid", err: engine.ErrInvalid, wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL"},
 		{name: "ErrInvalidKey", err: engine.ErrInvalidKey, wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL"},
 		{name: "ErrInvalidValue", err: engine.ErrInvalidValue, wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL"},
-		{name: "projection.ErrInvalidArgument", err: projection.ErrInvalidArgument, wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL"},
 		{name: "ErrClosed", err: engine.ErrClosed, wantCode: connect.CodeInternal, wantReason: "EIO"},
-		{name: "projection.ErrUnavailable", err: projection.ErrUnavailable, wantCode: connect.CodeUnavailable, wantReason: "EIO"},
 		{name: "wrapped ErrStaleEpoch", err: fmt.Errorf("wrap: %w", engine.ErrStaleEpoch), wantCode: connect.CodeFailedPrecondition, wantReason: "EBUSY"},
 	}
 

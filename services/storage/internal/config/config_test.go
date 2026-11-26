@@ -17,10 +17,7 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/config"
 )
 
-const (
-	validTestDSN       = "postgres://bowl:bowl@127.0.0.1:5432/bowl?sslmode=disable"
-	configLoadDeadline = 2 * time.Second
-)
+const configLoadDeadline = 2 * time.Second
 
 var isolatedConfigEnvKeys = []string{
 	"SERVER_HOST",
@@ -30,14 +27,6 @@ var isolatedConfigEnvKeys = []string{
 	"SERVER_READ_HEADER_TIMEOUT",
 	"SERVER_STOP_TIMEOUT",
 	"SERVER_READ_MAX_BYTES",
-	"DB_DSN",
-	"DB_MAX_CONNS",
-	"DB_MIN_CONNS",
-	"DB_MAX_CONN_LIFETIME",
-	"DB_MAX_CONN_IDLE_TIME",
-	"DB_HEALTH_CHECK_PERIOD",
-	"DB_TRACING_ENABLED",
-	"DB_METRICS_ENABLED",
 	"LOG_LEVEL",
 	"LOG_FORMAT",
 	"OTEL_ENABLED",
@@ -126,10 +115,9 @@ func loadConfigWithinDeadline(t *testing.T, filenames ...string) (*config.Config
 
 func TestConfigLoad_GivenMinimalRequiredEnv_WhenLoaded_ThenAppliesDefaults(t *testing.T) {
 	isolateConfigEnv(t)
-	t.Setenv("DB_DSN", validTestDSN)
 
 	cfg, err := loadConfigWithinDeadline(t)
-	require.NoError(t, err, "仅设置 DB_DSN 加载默认配置不应失败")
+	require.NoError(t, err, "空环境加载默认配置不应失败")
 	require.Equal(t, 9000, cfg.ServerPort, "未指定 SERVER_PORT 时 want=9000, got=%d", cfg.ServerPort)
 	require.Equal(t, 9090, cfg.InternalPort(), "未指定 INTERNAL_SERVER_PORT 时 want=9090, got=%d", cfg.InternalPort())
 	require.Equal(t, int64(config.DefaultServerReadMaxBytes), cfg.ServerReadMaxBytes, "默认最大读取字节 want=%d, got=%d", config.DefaultServerReadMaxBytes, cfg.ServerReadMaxBytes)
@@ -235,8 +223,6 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 			env: map[string]string{
 				"SERVER_PORT":          "65535",
 				"INTERNAL_SERVER_PORT": "65534",
-				"DB_MAX_CONNS":         "0",
-				"DB_MIN_CONNS":         "0",
 			},
 			wantPort:           65535,
 			wantInternalPort:   65534,
@@ -256,7 +242,6 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 
 	runSubtests(t, cases, func(tc extremeCase) string { return tc.name }, func(t *testing.T, tc extremeCase) {
 		isolateConfigEnv(t)
-		t.Setenv("DB_DSN", validTestDSN)
 		applyEnvOverrides(t, tc.env)
 
 		cfg, err := loadConfigWithinDeadline(t)
@@ -278,17 +263,19 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 }
 
 func TestConfigLoad_GivenEmptyOrMalformedEnvFiles_WhenLoaded_ThenFailsWithinDeadline(t *testing.T) {
-	t.Run("empty_env_file_missing_required_dsn", func(t *testing.T) {
+	t.Run("empty_env_file_applies_defaults", func(t *testing.T) {
 		isolateConfigEnv(t)
 		emptyFile := writeEnvFile(t, "empty.env", "")
 
 		cfg, err := loadConfigWithinDeadline(t, emptyFile)
-		require.Error(t, err, "空配置且未提供 DB_DSN 必须返回错误: want error, got cfg=%+v", cfg)
+		require.NoError(t, err, "空环境文件应加载默认配置: %v", err)
+		require.Equal(t, 9000, cfg.ServerPort)
+		require.Equal(t, 9090, cfg.InternalPort())
+		require.Equal(t, config.DefaultDataDir, cfg.Meta.DataDir())
 	})
 
 	t.Run("missing_explicit_env_file", func(t *testing.T) {
 		isolateConfigEnv(t)
-		t.Setenv("DB_DSN", validTestDSN)
 		missingPath := filepath.Join(t.TempDir(), "does-not-exist.env")
 
 		cfg, err := loadConfigWithinDeadline(t, missingPath)
@@ -297,7 +284,6 @@ func TestConfigLoad_GivenEmptyOrMalformedEnvFiles_WhenLoaded_ThenFailsWithinDead
 
 	t.Run("malformed_unterminated_quote_env_file", func(t *testing.T) {
 		isolateConfigEnv(t)
-		t.Setenv("DB_DSN", validTestDSN)
 		badFile := writeEnvFile(t, "malformed.env", "DATA_DIR=\"unterminated\n")
 
 		cfg, err := loadConfigWithinDeadline(t, badFile)
@@ -307,7 +293,7 @@ func TestConfigLoad_GivenEmptyOrMalformedEnvFiles_WhenLoaded_ThenFailsWithinDead
 	t.Run("oversized_env_value_completes_within_deadline", func(t *testing.T) {
 		isolateConfigEnv(t)
 		hugeVal := strings.Repeat("x", 64*1024)
-		hugeFile := writeEnvFile(t, "huge.env", "DB_DSN="+validTestDSN+"\nDATA_DIR=/tmp/"+hugeVal+"\n")
+		hugeFile := writeEnvFile(t, "huge.env", "DATA_DIR=/tmp/"+hugeVal+"\n")
 
 		cfg, err := loadConfigWithinDeadline(t, hugeFile)
 		require.NoError(t, err, "超长合法环境值应在截止时间内完成解析: %v", err)
@@ -322,144 +308,128 @@ func TestConfigLoad_GivenInvalidEnvValues_WhenLoaded_ThenReturnsError(t *testing
 	}
 	cases := []invalidCase{
 		{
-			name: "missing_dsn",
-			env:  map[string]string{},
-		},
-		{
-			name: "empty_dsn",
-			env:  map[string]string{"DB_DSN": ""},
-		},
-		{
 			name: "server_port_zero",
-			env:  map[string]string{"DB_DSN": validTestDSN, "SERVER_PORT": "0"},
+			env:  map[string]string{"SERVER_PORT": "0"},
 		},
 		{
 			name: "server_port_over_65535",
-			env:  map[string]string{"DB_DSN": validTestDSN, "SERVER_PORT": "65536"},
+			env:  map[string]string{"SERVER_PORT": "65536"},
 		},
 		{
 			name: "server_port_non_numeric",
-			env:  map[string]string{"DB_DSN": validTestDSN, "SERVER_PORT": "not-a-port"},
+			env:  map[string]string{"SERVER_PORT": "not-a-port"},
 		},
 		{
 			name: "internal_port_zero",
-			env:  map[string]string{"DB_DSN": validTestDSN, "INTERNAL_SERVER_PORT": "0"},
+			env:  map[string]string{"INTERNAL_SERVER_PORT": "0"},
 		},
 		{
 			name: "internal_port_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "INTERNAL_SERVER_PORT": "-1"},
+			env:  map[string]string{"INTERNAL_SERVER_PORT": "-1"},
 		},
 		{
 			name: "internal_port_over_65535",
-			env:  map[string]string{"DB_DSN": validTestDSN, "INTERNAL_SERVER_PORT": "65536"},
+			env:  map[string]string{"INTERNAL_SERVER_PORT": "65536"},
 		},
 		{
 			name: "dual_ports_conflict_on_unspecified_host",
-			env:  map[string]string{"DB_DSN": validTestDSN, "SERVER_PORT": "9000", "INTERNAL_SERVER_PORT": "9000"},
+			env:  map[string]string{"SERVER_PORT": "9000", "INTERNAL_SERVER_PORT": "9000"},
 		},
 		{
 			name: "dual_ports_conflict_unspecified_vs_loopback",
-			env:  map[string]string{"DB_DSN": validTestDSN, "SERVER_HOST": "0.0.0.0", "SERVER_PORT": "9000", "INTERNAL_SERVER_HOST": "127.0.0.1", "INTERNAL_SERVER_PORT": "9000"},
-		},
-		{
-			name: "db_max_conns_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "DB_MAX_CONNS": "-1"},
-		},
-		{
-			name: "db_min_conns_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "DB_MIN_CONNS": "-1"},
+			env:  map[string]string{"SERVER_HOST": "0.0.0.0", "SERVER_PORT": "9000", "INTERNAL_SERVER_HOST": "127.0.0.1", "INTERNAL_SERVER_PORT": "9000"},
 		},
 		{
 			name: "data_dir_whitespace_only",
-			env:  map[string]string{"DB_DSN": validTestDSN, "DATA_DIR": "   "},
+			env:  map[string]string{"DATA_DIR": "   "},
 		},
 		{
 			name: "storage_data_dir_whitespace_only",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_DATA_DIR": "\t\n"},
+			env:  map[string]string{"STORAGE_DATA_DIR": "\t\n"},
 		},
 		{
 			name: "atime_mode_invalid",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ATIME_MODE": "invalid-mode"},
+			env:  map[string]string{"STORAGE_ATIME_MODE": "invalid-mode"},
 		},
 		{
 			name: "atime_mode_whitespace_only",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ATIME_MODE": "   "},
+			env:  map[string]string{"STORAGE_ATIME_MODE": "   "},
 		},
 		{
 			name: "entry_timeout_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ENTRY_TIMEOUT_SECONDS": "-0.01"},
+			env:  map[string]string{"STORAGE_ENTRY_TIMEOUT_SECONDS": "-0.01"},
 		},
 		{
 			name: "entry_timeout_nan",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ENTRY_TIMEOUT_SECONDS": "NaN"},
+			env:  map[string]string{"STORAGE_ENTRY_TIMEOUT_SECONDS": "NaN"},
 		},
 		{
 			name: "entry_timeout_pos_inf",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ENTRY_TIMEOUT_SECONDS": "+Inf"},
+			env:  map[string]string{"STORAGE_ENTRY_TIMEOUT_SECONDS": "+Inf"},
 		},
 		{
 			name: "entry_timeout_neg_inf",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ENTRY_TIMEOUT_SECONDS": "-Inf"},
+			env:  map[string]string{"STORAGE_ENTRY_TIMEOUT_SECONDS": "-Inf"},
 		},
 		{
 			name: "attr_timeout_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ATTR_TIMEOUT_SECONDS": "-1"},
+			env:  map[string]string{"STORAGE_ATTR_TIMEOUT_SECONDS": "-1"},
 		},
 		{
 			name: "attr_timeout_nan",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ATTR_TIMEOUT_SECONDS": "NaN"},
+			env:  map[string]string{"STORAGE_ATTR_TIMEOUT_SECONDS": "NaN"},
 		},
 		{
 			name: "attr_timeout_pos_inf",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ATTR_TIMEOUT_SECONDS": "+Inf"},
+			env:  map[string]string{"STORAGE_ATTR_TIMEOUT_SECONDS": "+Inf"},
 		},
 		{
 			name: "dir_entry_timeout_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_DIR_ENTRY_TIMEOUT_SECONDS": "-1"},
+			env:  map[string]string{"STORAGE_DIR_ENTRY_TIMEOUT_SECONDS": "-1"},
 		},
 		{
 			name: "dir_entry_timeout_nan",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_DIR_ENTRY_TIMEOUT_SECONDS": "NaN"},
+			env:  map[string]string{"STORAGE_DIR_ENTRY_TIMEOUT_SECONDS": "NaN"},
 		},
 		{
 			name: "dir_entry_timeout_pos_inf",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_DIR_ENTRY_TIMEOUT_SECONDS": "+Inf"},
+			env:  map[string]string{"STORAGE_DIR_ENTRY_TIMEOUT_SECONDS": "+Inf"},
 		},
 		{
 			name: "actor_idle_ttl_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ACTOR_IDLE_TTL": "-1s"},
+			env:  map[string]string{"STORAGE_ACTOR_IDLE_TTL": "-1s"},
 		},
 		{
 			name: "actor_idle_ttl_malformed",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ACTOR_IDLE_TTL": "not-a-duration"},
+			env:  map[string]string{"STORAGE_ACTOR_IDLE_TTL": "not-a-duration"},
 		},
 		{
 			name: "gc_interval_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_GC_INTERVAL": "-1s"},
+			env:  map[string]string{"STORAGE_GC_INTERVAL": "-1s"},
 		},
 		{
 			name: "gc_interval_malformed",
-			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_GC_INTERVAL": "not-a-duration"},
+			env:  map[string]string{"STORAGE_GC_INTERVAL": "not-a-duration"},
 		},
 		{
 			name: "otel_sample_ratio_negative",
-			env:  map[string]string{"DB_DSN": validTestDSN, "OTEL_TRACES_SAMPLER_ARG": "-0.1"},
+			env:  map[string]string{"OTEL_TRACES_SAMPLER_ARG": "-0.1"},
 		},
 		{
 			name: "otel_sample_ratio_above_one",
-			env:  map[string]string{"DB_DSN": validTestDSN, "OTEL_TRACES_SAMPLER_ARG": "1.1"},
+			env:  map[string]string{"OTEL_TRACES_SAMPLER_ARG": "1.1"},
 		},
 		{
 			name: "otel_sample_ratio_nan",
-			env:  map[string]string{"DB_DSN": validTestDSN, "OTEL_TRACES_SAMPLER_ARG": "NaN"},
+			env:  map[string]string{"OTEL_TRACES_SAMPLER_ARG": "NaN"},
 		},
 		{
 			name: "otel_traces_exporter_invalid",
-			env:  map[string]string{"DB_DSN": validTestDSN, "OTEL_TRACES_EXPORTER": "jaeger"},
+			env:  map[string]string{"OTEL_TRACES_EXPORTER": "jaeger"},
 		},
 		{
 			name: "obs_admin_addr_malformed",
-			env:  map[string]string{"DB_DSN": validTestDSN, "OBS_ADMIN_ADDR": "not-host-port"},
+			env:  map[string]string{"OBS_ADMIN_ADDR": "not-host-port"},
 		},
 	}
 
@@ -480,7 +450,7 @@ func TestConfigLoad_GivenBareOTLPEndpoints_WhenLoaded_ThenNormalizesSchemeForTra
 	require.Equal(t, "http://alloy:4317", config.NormalizeOTLPEndpoint("http://alloy:4317"))
 	require.Equal(t, "https://collector.example.com:4317", config.NormalizeOTLPEndpoint("https://collector.example.com:4317"))
 
-	envFile := writeEnvFile(t, "storage.env", "DB_DSN="+validTestDSN+"\nOTEL_EXPORTER_OTLP_METRICS_ENDPOINT=alloy:4317\n")
+	envFile := writeEnvFile(t, "storage.env", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=alloy:4317\n")
 	t.Setenv("OTEL_ENABLED", "true")
 	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "jaeger:4317")

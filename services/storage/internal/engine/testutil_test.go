@@ -16,7 +16,7 @@ type testDiskOptions struct {
 	BlockSize    uint32
 	MaxPackSize  uint32
 	Now          func() time.Time
-	ActorIdleTTL time.Duration
+	DiskIdleTTL  time.Duration
 	GCInterval   time.Duration
 	EnableGCWake bool
 }
@@ -48,13 +48,13 @@ func openTestDisk(opts testDiskOptions) (*testDisk, error) {
 	}
 
 	node, err := OpenNode(NodeOptions{
-		DataDir:      opts.Dir,
-		BlockSize:    blockSize,
-		MaxPackSize:  opts.MaxPackSize,
-		Now:          opts.Now,
-		ActorIdleTTL: opts.ActorIdleTTL,
-		GCMode:       gcMode,
-		GCInterval:   opts.GCInterval,
+		DataDir:     opts.Dir,
+		BlockSize:   blockSize,
+		MaxPackSize: opts.MaxPackSize,
+		Now:         opts.Now,
+		DiskIdleTTL: opts.DiskIdleTTL,
+		GCMode:      gcMode,
+		GCInterval:  opts.GCInterval,
 	})
 	if err != nil {
 		return nil, err

@@ -324,7 +324,6 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 		"bowl_storage_logical_bytes",
 		"bowl_storage_pack_physical_bytes",
 		"bowl_storage_inodes",
-		"bowl_storage_branch_actors_loaded",
 		"bowl_storage_pebble_wal_bytes_in_total",
 		"bowl_storage_pebble_wal_bytes_written_total",
 		"bowl_storage_pebble_l0_sublevels",
@@ -345,6 +344,7 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 	} {
 		require.Contains(t, metricsText, want)
 	}
+	require.NotContains(t, metricsText, "bowl_storage_branch_actors_loaded")
 	require.NotContains(t, metricsText, "bowl_storage_projection_")
 	require.NotContains(t, metricsText, diskID)
 	require.NotContains(t, metricsText, "disk_id=")

@@ -10,8 +10,8 @@ import (
 
 var securityCapabilityXattr = []byte("security.capability")
 
-func clearSecurityCapability(batch *pebble.Batch, dk diskKeys, work uint64, layers []uint64, ino uint64) error {
-	_, err := overlayGetXattr(batch, dk, layers, ino, securityCapabilityXattr)
+func clearSecurityCapability(batch *pebble.Batch, dk diskKeys, work uint64, cursor *branchLayerCursor, ino uint64) error {
+	_, err := cursor.getXattr(ino, securityCapabilityXattr)
 	if errors.Is(err, ErrNoData) {
 		return nil
 	}
@@ -19,15 +19,6 @@ func clearSecurityCapability(batch *pebble.Batch, dk diskKeys, work uint64, laye
 		return err
 	}
 	return batch.Set(dk.LayerXattrKey(work, ino, securityCapabilityXattr), EncodeTombstone(), nil)
-}
-
-type mknodReq struct {
-	parentIno uint64
-	name      string
-	mode      uint32
-	uid       uint32
-	gid       uint32
-	rdev      uint32
 }
 
 func (d *DiskStore) Mknod(ctx context.Context, branch string, parentIno uint64, name string, mode, uid, gid, rdev uint32) (Inode, error) {
@@ -46,168 +37,146 @@ func (d *DiskStore) Mknod(ctx context.Context, branch string, parentIno uint64, 
 	default:
 		return Inode{}, ErrInvalid
 	}
+	normMode := modeType | (mode & ModePermMask)
 
-	actor, release, err := d.acquireBranchActor(branch)
-	if err != nil {
-		return Inode{}, err
-	}
-	defer release()
+	var child Inode
+	err := d.execBranchWrite(ctx, branch, func(batch *pebble.Batch, _ *opQuotaTracker, bm BranchMeta, cursor *branchLayerCursor) error {
+		dk := d.keys
+		parent, err := cursor.getInode(parentIno)
+		if err != nil {
+			return err
+		}
+		if parent.Mode&ModeTypeMask != ModeDir {
+			return ErrNotDir
+		}
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+		if _, entryErr := cursor.getEntry(parentIno, []byte(name)); entryErr == nil {
+			return ErrExist
+		} else if !errors.Is(entryErr, ErrNotFound) {
+			return entryErr
+		}
 
-	resp, err := actor.submit(ctx, branchOpMknod, &mknodReq{
-		parentIno: parentIno,
-		name:      name,
-		mode:      modeType | (mode & ModePermMask),
-		uid:       uid,
-		gid:       gid,
-		rdev:      rdev,
+		inoNum, err := d.allocIno()
+		if err != nil {
+			return err
+		}
+		childGID := gid
+		if parent.Mode&ModeSetGID != 0 {
+			childGID = parent.GID
+		}
+		var childRdev uint32
+		if modeType == ModeChar || modeType == ModeBlock {
+			childRdev = rdev
+		}
+
+		nowNano := d.now().UnixNano()
+		child = Inode{
+			Ino:        inoNum,
+			ParentIno:  parentIno,
+			Mode:       normMode,
+			Nlink:      1,
+			UID:        uid,
+			GID:        childGID,
+			Rdev:       childRdev,
+			Atime:      nowNano,
+			Mtime:      nowNano,
+			Ctime:      nowNano,
+			Generation: 1,
+			WriteSeq:   1,
+		}
+		parent.Mtime = nowNano
+		parent.Ctime = nowNano
+
+		childRaw, err := EncodeInode(child)
+		if err != nil {
+			return err
+		}
+		parentRaw, err := EncodeInode(parent)
+		if err != nil {
+			return err
+		}
+
+		work := bm.WorkLayerID
+		if setErr := batch.Set(dk.LayerInodeKey(work, child.Ino), EncodeLiveEnvelope(childRaw), nil); setErr != nil {
+			return setErr
+		}
+		if setErr := batch.Set(dk.LayerInodeKey(work, parent.Ino), EncodeLiveEnvelope(parentRaw), nil); setErr != nil {
+			return setErr
+		}
+		ent := Entry{Ino: child.Ino, Mode: child.Mode}
+		return batch.Set(dk.LayerEntryKey(work, parentIno, []byte(name)), EncodeLiveEnvelope(EncodeEntry(ent)), nil)
 	})
 	if err != nil {
 		return Inode{}, err
 	}
-	ino, ok := resp.(Inode)
-	if !ok {
-		return Inode{}, ErrInvalidValue
-	}
-	return ino, nil
-}
-
-func (a *BranchActor) execMknod(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) (Inode, error) {
-	req, ok := raw.(*mknodReq)
-	if !ok {
-		return Inode{}, ErrInvalid
-	}
-	dk := a.disk.keys
-	parent, err := overlayGetInode(batch, dk, layers, req.parentIno)
-	if err != nil {
-		return Inode{}, err
-	}
-	if parent.Mode&ModeTypeMask != ModeDir {
-		return Inode{}, ErrNotDir
-	}
-	if parent.Nlink == 0 {
-		return Inode{}, ErrNotFound
-	}
-	if _, entryErr := overlayGetEntry(batch, dk, layers, req.parentIno, []byte(req.name)); entryErr == nil {
-		return Inode{}, ErrExist
-	} else if !errors.Is(entryErr, ErrNotFound) {
-		return Inode{}, entryErr
-	}
-
-	inoNum, err := a.disk.allocIno()
-	if err != nil {
-		return Inode{}, err
-	}
-	gid := req.gid
-	if parent.Mode&ModeSetGID != 0 {
-		gid = parent.GID
-	}
-	var rdev uint32
-	ft := req.mode & ModeTypeMask
-	if ft == ModeChar || ft == ModeBlock {
-		rdev = req.rdev
-	}
-
-	nowNano := a.disk.now().UnixNano()
-	child := Inode{
-		Ino:        inoNum,
-		ParentIno:  req.parentIno,
-		Mode:       req.mode,
-		Nlink:      1,
-		UID:        req.uid,
-		GID:        gid,
-		Rdev:       rdev,
-		Atime:      nowNano,
-		Mtime:      nowNano,
-		Ctime:      nowNano,
-		Generation: 1,
-		WriteSeq:   1,
-	}
-	parent.Mtime = nowNano
-	parent.Ctime = nowNano
-
-	childRaw, err := EncodeInode(child)
-	if err != nil {
-		return Inode{}, err
-	}
-	parentRaw, err := EncodeInode(parent)
-	if err != nil {
-		return Inode{}, err
-	}
-
-	work := branch.WorkLayerID
-	if setErr := batch.Set(dk.LayerInodeKey(work, child.Ino), EncodeLiveEnvelope(childRaw), nil); setErr != nil {
-		return Inode{}, setErr
-	}
-	if setErr := batch.Set(dk.LayerInodeKey(work, parent.Ino), EncodeLiveEnvelope(parentRaw), nil); setErr != nil {
-		return Inode{}, setErr
-	}
-	ent := Entry{Ino: child.Ino, Mode: child.Mode}
-	if setErr := batch.Set(dk.LayerEntryKey(work, req.parentIno, []byte(req.name)), EncodeLiveEnvelope(EncodeEntry(ent)), nil); setErr != nil {
-		return Inode{}, setErr
-	}
 	return child, nil
 }
 
-type fsyncReq struct {
-	ino uint64
-}
+func (d *DiskStore) validateFsyncTarget(ctx context.Context, branch string, ino uint64, wantDir bool) error {
+	snap, snapGen := d.newReadSnapshot()
+	defer func() { _ = snap.Close() }()
 
-func (d *DiskStore) Fsync(ctx context.Context, branch string, ino uint64) error {
-	if ino == 0 || ino > math.MaxInt64 {
-		return ErrInvalid
-	}
-	actor, release, err := d.acquireBranchActor(branch)
+	bm, err := readBranchMeta(snap, d.keys, branch)
 	if err != nil {
 		return err
 	}
-	defer release()
-
-	_, err = actor.submit(ctx, branchOpFsync, &fsyncReq{ino: ino})
-	return err
-}
-
-func (d *DiskStore) FsyncDir(ctx context.Context, branch string, ino uint64) error {
-	if ino == 0 || ino > math.MaxInt64 {
-		return ErrInvalid
+	if epoch := writerEpochFromContext(ctx); epoch != 0 && epoch != bm.WriterEpoch {
+		return ErrStaleEpoch
 	}
-	actor, release, err := d.acquireBranchActor(branch)
+	var cursor branchLayerCursor
+	d.initBranchCursor(&cursor, snap, bm, snapGen)
+	inode, err := cursor.getInode(ino)
 	if err != nil {
 		return err
 	}
-	defer release()
-
-	_, err = actor.submit(ctx, branchOpFsyncDir, &fsyncReq{ino: ino})
-	return err
-}
-
-func (a *BranchActor) execFsync(batch *pebble.Batch, layers []uint64, raw any) error {
-	req, ok := raw.(*fsyncReq)
-	if !ok {
-		return ErrInvalid
+	isDir := inode.Mode&ModeTypeMask == ModeDir
+	if wantDir && !isDir {
+		return ErrNotDir
 	}
-	inode, err := overlayGetInode(batch, a.disk.keys, layers, req.ino)
-	if err != nil {
-		return err
-	}
-	if inode.Mode&ModeTypeMask == ModeDir {
+	if !wantDir && isDir {
 		return ErrIsDir
 	}
 	return nil
 }
 
-func (a *BranchActor) execFsyncDir(batch *pebble.Batch, layers []uint64, raw any) error {
-	req, ok := raw.(*fsyncReq)
-	if !ok {
+func (d *DiskStore) Fsync(ctx context.Context, branch string, ino uint64) error {
+	if d.closing.Load() {
+		return ErrClosed
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if ino == 0 || ino > math.MaxInt64 {
 		return ErrInvalid
 	}
-	inode, err := overlayGetInode(batch, a.disk.keys, layers, req.ino)
-	if err != nil {
+	if err := d.validateFsyncTarget(ctx, branch, ino, false); err != nil {
 		return err
 	}
-	if inode.Mode&ModeTypeMask != ModeDir {
-		return ErrNotDir
+	targetGen := d.node.walWriteGen.Load()
+	return d.node.SyncWAL(ctx, targetGen, d.walCommitHook)
+}
+
+func (d *DiskStore) FsyncDir(ctx context.Context, branch string, ino uint64) error {
+	if d.closing.Load() {
+		return ErrClosed
 	}
-	return nil
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if ino == 0 || ino > math.MaxInt64 {
+		return ErrInvalid
+	}
+	if err := d.validateFsyncTarget(ctx, branch, ino, true); err != nil {
+		return err
+	}
+	targetGen := d.node.walWriteGen.Load()
+	return d.node.SyncWAL(ctx, targetGen, d.walCommitHook)
 }
 
 type fallocateBlockUpdate struct {
@@ -216,16 +185,15 @@ type fallocateBlockUpdate struct {
 	ref       BlobRef
 }
 
-type fallocateReq struct {
-	ino            uint64
-	offset         uint64
-	length         uint64
-	mode           uint32
-	zeroRange      bool
-	partialUpdates []fallocateBlockUpdate
-}
-
 func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, length uint64, mode uint32) error {
+	if d.closing.Load() {
+		return ErrClosed
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	if ino == 0 || ino > math.MaxInt64 {
 		return ErrInvalid
 	}
@@ -241,35 +209,27 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 		return ErrNotSupported
 	}
 
-	actor, release, err := d.acquireBranchActor(branch)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	mu := &actor.inodeLocks[ino&0xff]
+	mu := d.inodeLock(branch, ino)
 	mu.Lock()
 	defer mu.Unlock()
 
 	zeroRange := mode&FallocPunchHole != 0 || mode&FallocZeroRange != 0
-	var (
-		partialUpdates []fallocateBlockUpdate
-		stagedRefs     []BlobRef
-	)
+	var partialUpdates []fallocateBlockUpdate
 
 	if zeroRange {
-		dk := d.keys
-		snap := d.db.NewSnapshot()
-		branchMeta, layers, layerErr := resolveBranchLayers(snap, dk, branch)
-		if layerErr != nil {
+		snap, snapGen := d.newReadSnapshot()
+		branchMeta, bmErr := readBranchMeta(snap, d.keys, branch)
+		if bmErr != nil {
 			_ = snap.Close()
-			return layerErr
+			return bmErr
 		}
 		if epoch := writerEpochFromContext(ctx); epoch != 0 && epoch != branchMeta.WriterEpoch {
 			_ = snap.Close()
 			return ErrStaleEpoch
 		}
-		curInode, inoErr := overlayGetInode(snap, dk, layers, ino)
+		var snapCursor branchLayerCursor
+		d.initBranchCursor(&snapCursor, snap, branchMeta, snapGen)
+		curInode, inoErr := snapCursor.getInode(ino)
 		if inoErr != nil {
 			_ = snap.Close()
 			return inoErr
@@ -311,7 +271,7 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 				continue
 			}
 
-			oldRef, exists, refErr := overlayGetDataRef(snap, dk, layers, ino, blkIdx)
+			oldRef, exists, refErr := snapCursor.getDataRef(ino, blkIdx)
 			if refErr != nil {
 				_ = snap.Close()
 				return refErr
@@ -346,8 +306,7 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 			if appErr != nil {
 				return appErr
 			}
-			stagedRefs = refs
-			defer d.packs.ReleaseInFlight(stagedRefs)
+			defer d.packs.ReleaseInFlight(refs)
 			for i, ref := range refs {
 				partialUpdates = append(partialUpdates, fallocateBlockUpdate{
 					blockIdx: toAppendIndices[i],
@@ -357,139 +316,129 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 		}
 	}
 
-	_, err = actor.submit(ctx, branchOpFallocate, &fallocateReq{
-		ino:            ino,
-		offset:         offset,
-		length:         length,
-		mode:           mode,
-		zeroRange:      zeroRange,
-		partialUpdates: partialUpdates,
-	})
-	return err
-}
+	return d.execBranchWrite(ctx, branch, func(batch *pebble.Batch, quota *opQuotaTracker, bm BranchMeta, cursor *branchLayerCursor) error {
+		dk := d.keys
+		inode, err := cursor.getInode(ino)
+		if err != nil {
+			return err
+		}
+		switch inode.Mode & ModeTypeMask {
+		case ModeDir:
+			return ErrIsDir
+		case ModeRegular:
+		default:
+			return ErrNotSupported
+		}
+		if inode.Flags&(FlagImmutable|FlagAppend) != 0 {
+			return ErrPerm
+		}
 
-func (a *BranchActor) execFallocate(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, layers []uint64, raw any) error {
-	req, ok := raw.(*fallocateReq)
-	if !ok {
-		return ErrInvalid
-	}
-	dk := a.disk.keys
-	inode, err := overlayGetInode(batch, dk, layers, req.ino)
-	if err != nil {
-		return err
-	}
-	switch inode.Mode & ModeTypeMask {
-	case ModeDir:
-		return ErrIsDir
-	case ModeRegular:
-	default:
-		return ErrNotSupported
-	}
-	if inode.Flags&(FlagImmutable|FlagAppend) != 0 {
-		return ErrPerm
-	}
+		work := bm.WorkLayerID
+		blkSize := uint64(d.blockSize)
+		end := offset + length
+		oldSize := inode.Size
+		newSize := oldSize
+		if mode&FallocKeepSize == 0 && end > newSize {
+			newSize = end
+		}
 
-	work := branch.WorkLayerID
-	blkSize := uint64(a.disk.blockSize)
-	end := req.offset + req.length
-	oldSize := inode.Size
-	newSize := oldSize
-	if req.mode&FallocKeepSize == 0 && end > newSize {
-		newSize = end
-	}
-
-	var (
-		fullDropBlks   []uint64
-		workOwnedDelta int64
-		logicalDelta   int64
-	)
-	if req.zeroRange {
-		fullStart := (req.offset + blkSize - 1) / blkSize
-		if end >= blkSize {
-			fullEnd := (end / blkSize) - 1
-			if fullStart <= fullEnd {
-				liveBlks, dropWork, dropEff, listErr := overlayCollectLiveBlocksRange(batch, dk, layers, inode.Ino, fullStart, fullEnd)
-				if listErr != nil {
-					return listErr
+		var (
+			fullDropBlks   []uint64
+			workOwnedDelta int64
+			logicalDelta   int64
+		)
+		if zeroRange {
+			fullStart := (offset + blkSize - 1) / blkSize
+			if end >= blkSize {
+				fullEnd := (end / blkSize) - 1
+				if fullStart <= fullEnd {
+					layers, lErr := cursor.allLayers()
+					if lErr != nil {
+						return lErr
+					}
+					liveBlks, dropWork, dropEff, listErr := overlayCollectLiveBlocksRange(batch, dk, layers, inode.Ino, fullStart, fullEnd)
+					if listErr != nil {
+						return listErr
+					}
+					fullDropBlks = liveBlks
+					workOwnedDelta -= int64(dropWork)
+					logicalDelta -= int64(dropEff)
 				}
-				fullDropBlks = liveBlks
-				workOwnedDelta -= int64(dropWork)
-				logicalDelta -= int64(dropEff)
+			}
+			for _, upd := range partialUpdates {
+				oldWorkLen, workErr := readLayerDataRefLen(batch, dk, work, inode.Ino, upd.blockIdx)
+				if workErr != nil {
+					return workErr
+				}
+				oldEffLen, effErr := cursor.getDataRefLen(inode.Ino, upd.blockIdx)
+				if effErr != nil {
+					return effErr
+				}
+				if upd.tombstone {
+					workOwnedDelta -= int64(oldWorkLen)
+					logicalDelta -= int64(oldEffLen)
+				} else {
+					newLen := uint64(upd.ref.Length)
+					workOwnedDelta += int64(newLen) - int64(oldWorkLen)
+					logicalDelta += int64(newLen) - int64(oldEffLen)
+				}
 			}
 		}
-		for _, upd := range req.partialUpdates {
-			oldWorkLen, workErr := readLayerDataRefLen(batch, dk, work, inode.Ino, upd.blockIdx)
-			if workErr != nil {
-				return workErr
-			}
-			oldEffLen, effErr := overlayGetDataRefLen(batch, dk, layers, inode.Ino, upd.blockIdx)
-			if effErr != nil {
-				return effErr
-			}
-			if upd.tombstone {
-				workOwnedDelta -= int64(oldWorkLen)
-				logicalDelta -= int64(oldEffLen)
-			} else {
-				newLen := uint64(upd.ref.Length)
-				workOwnedDelta += int64(newLen) - int64(oldWorkLen)
-				logicalDelta += int64(newLen) - int64(oldEffLen)
-			}
-		}
-	}
 
-	if workOwnedDelta > 0 {
-		if resErr := quota.reserve(uint64(workOwnedDelta)); resErr != nil {
-			return resErr
+		if workOwnedDelta > 0 {
+			if resErr := quota.reserve(uint64(workOwnedDelta)); resErr != nil {
+				return resErr
+			}
 		}
-	}
 
-	if req.zeroRange {
-		for _, blkIdx := range fullDropBlks {
-			if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
+		if zeroRange {
+			for _, blkIdx := range fullDropBlks {
+				if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
+					return setErr
+				}
+			}
+			for _, upd := range partialUpdates {
+				if upd.tombstone {
+					if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, upd.blockIdx), EncodeTombstone(), nil); setErr != nil {
+						return setErr
+					}
+				} else {
+					if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, upd.blockIdx), EncodeLiveEnvelope(EncodeBlobRef(upd.ref)), nil); setErr != nil {
+						return setErr
+					}
+				}
+			}
+			inode.Mode &^= ModeSetUID | ModeSetGID
+		}
+
+		if capErr := clearSecurityCapability(batch, dk, work, cursor, inode.Ino); capErr != nil {
+			return capErr
+		}
+
+		nowNano := d.now().UnixNano()
+		inode.Size = newSize
+		if zeroRange || newSize > oldSize {
+			inode.Mtime = nowNano
+		}
+		inode.Ctime = nowNano
+		inode.WriteSeq++
+
+		encoded, err := EncodeInode(inode)
+		if err != nil {
+			return err
+		}
+		if setErr := batch.Set(dk.LayerInodeKey(work, inode.Ino), EncodeLiveEnvelope(encoded), nil); setErr != nil {
+			return setErr
+		}
+		if workOwnedDelta != 0 || logicalDelta != 0 {
+			applyBranchByteDeltas(&bm, workOwnedDelta, logicalDelta)
+			if setErr := batch.Set(dk.MetaBranchKey(bm.Name), EncodeBranchMeta(bm), nil); setErr != nil {
 				return setErr
 			}
 		}
-		for _, upd := range req.partialUpdates {
-			if upd.tombstone {
-				if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, upd.blockIdx), EncodeTombstone(), nil); setErr != nil {
-					return setErr
-				}
-			} else {
-				if setErr := batch.Set(dk.LayerDataKey(work, inode.Ino, upd.blockIdx), EncodeLiveEnvelope(EncodeBlobRef(upd.ref)), nil); setErr != nil {
-					return setErr
-				}
-			}
+		if workOwnedDelta < 0 {
+			quota.release(uint64(-workOwnedDelta))
 		}
-		inode.Mode &^= ModeSetUID | ModeSetGID
-	}
-
-	if capErr := clearSecurityCapability(batch, dk, work, layers, inode.Ino); capErr != nil {
-		return capErr
-	}
-
-	nowNano := a.disk.now().UnixNano()
-	inode.Size = newSize
-	if req.zeroRange || newSize > oldSize {
-		inode.Mtime = nowNano
-	}
-	inode.Ctime = nowNano
-	inode.WriteSeq++
-
-	encoded, err := EncodeInode(inode)
-	if err != nil {
-		return err
-	}
-	if setErr := batch.Set(dk.LayerInodeKey(work, inode.Ino), EncodeLiveEnvelope(encoded), nil); setErr != nil {
-		return setErr
-	}
-	if workOwnedDelta != 0 || logicalDelta != 0 {
-		applyBranchByteDeltas(&branch, workOwnedDelta, logicalDelta)
-		if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
-			return setErr
-		}
-	}
-	if workOwnedDelta < 0 {
-		quota.release(uint64(-workOwnedDelta))
-	}
-	return nil
+		return nil
+	})
 }

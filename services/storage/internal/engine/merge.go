@@ -9,11 +9,6 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 )
 
-type mergeCmdReq struct {
-	opts           MergeOptions
-	normStrategies map[string]MergeStrategy
-}
-
 func (d *DiskStore) Merge(ctx context.Context, opts MergeOptions) (*MergeResult, error) {
 	if d.closing.Load() {
 		return nil, ErrClosed
@@ -47,29 +42,21 @@ func (d *DiskStore) Merge(ctx context.Context, opts MergeOptions) (*MergeResult,
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
 
-	actor, release, err := d.acquireBranchActor(opts.TargetBranch)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
-	resp, err := actor.submit(ctx, branchOpMerge, &mergeCmdReq{
-		opts:           opts,
-		normStrategies: normStrategies,
+	var res *MergeResult
+	err = d.execBranchOp(ctx, opts.TargetBranch, true, true, func(batch *pebble.Batch, _ *opQuotaTracker, bm BranchMeta, _ *branchLayerCursor) error {
+		var mErr error
+		res, mErr = d.execMerge(batch, bm, opts, normStrategies)
+		return mErr
 	})
 	if err != nil {
 		return nil, err
-	}
-	res, ok := resp.(*MergeResult)
-	if !ok {
-		return nil, ErrInvalidValue
 	}
 	return res, nil
 }
 
 func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStrategies map[string]MergeStrategy) (*MergeResult, error) {
 	dk := d.keys
-	snap := d.db.NewSnapshot()
+	snap, snapGen := d.newReadSnapshot()
 	defer func() { _ = snap.Close() }()
 
 	tgtBranch, err := readBranchMeta(snap, dk, opts.TargetBranch)
@@ -126,19 +113,19 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 		}, nil
 	}
 
-	_, baseLayers, err := resolveCommitLayers(snap, dk, lca)
+	_, baseLayers, err := d.resolveCommitLayersWithGen(snap, lca, snapGen)
 	if err != nil {
 		return nil, err
 	}
 	targetIsBase := tgtBranch.HeadCommitID == lca
 	targetLayers := baseLayers
 	if !targetIsBase {
-		_, targetLayers, err = resolveCommitLayers(snap, dk, tgtBranch.HeadCommitID)
+		_, targetLayers, err = d.resolveCommitLayersWithGen(snap, tgtBranch.HeadCommitID, snapGen)
 		if err != nil {
 			return nil, err
 		}
 	}
-	_, sourceLayers, err := resolveCommitLayers(snap, dk, srcBranch.HeadCommitID)
+	_, sourceLayers, err := d.resolveCommitLayersWithGen(snap, srcBranch.HeadCommitID, snapGen)
 	if err != nil {
 		return nil, err
 	}
@@ -166,14 +153,9 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 	}, nil
 }
 
-func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any) (*MergeResult, error) {
-	req, ok := raw.(*mergeCmdReq)
-	if !ok {
-		return nil, ErrInvalid
-	}
-
-	dk := a.disk.keys
-	gateNow := a.disk.now().UnixNano()
+func (d *DiskStore) execMerge(batch *pebble.Batch, branch BranchMeta, opts MergeOptions, normStrategies map[string]MergeStrategy) (*MergeResult, error) {
+	dk := d.keys
+	gateNow := d.now().UnixNano()
 	tgtMounted, err := hasActiveMountOnReader(batch, dk, branch.Name, gateNow, false)
 	if err != nil {
 		return nil, err
@@ -181,8 +163,8 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 	if tgtMounted {
 		return nil, ErrDiskMounted
 	}
-	if req.opts.SourceBranch != branch.Name {
-		srcMounted, srcMountErr := hasActiveMountOnReader(batch, dk, req.opts.SourceBranch, gateNow, true)
+	if opts.SourceBranch != branch.Name {
+		srcMounted, srcMountErr := hasActiveMountOnReader(batch, dk, opts.SourceBranch, gateNow, true)
 		if srcMountErr != nil {
 			return nil, srcMountErr
 		}
@@ -191,13 +173,13 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		}
 	}
 
-	if a.disk.beforeMergeExecHook != nil {
-		if hookErr := a.disk.beforeMergeExecHook(req.opts.SourceBranch, branch.Name); hookErr != nil {
+	if d.beforeMergeExecHook != nil {
+		if hookErr := d.beforeMergeExecHook(opts.SourceBranch, branch.Name); hookErr != nil {
 			return nil, hookErr
 		}
 	}
 
-	snap := a.disk.db.NewSnapshot()
+	snap, snapGen := d.newReadSnapshot()
 	defer func() { _ = snap.Close() }()
 
 	tgtDirty, err := layerHasAnyKey(batch, dk, branch.WorkLayerID)
@@ -210,10 +192,10 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 
 	srcBranch := branch
 	srcReader := pebbleReader(snap)
-	if req.opts.SourceBranch == branch.Name {
+	if opts.SourceBranch == branch.Name {
 		srcReader = batch
 	} else {
-		srcBranch, err = readBranchMeta(snap, dk, req.opts.SourceBranch)
+		srcBranch, err = readBranchMeta(snap, dk, opts.SourceBranch)
 		if err != nil {
 			return nil, err
 		}
@@ -243,8 +225,8 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		}, nil
 	}
 
-	nowNano := a.disk.now().UnixNano()
-	if lca == oldTargetHead && !req.opts.NoFastForward {
+	nowNano := d.now().UnixNano()
+	if lca == oldTargetHead && !opts.NoFastForward {
 		srcHeadCmt, cmtErr := readCommitMeta(srcReader, dk, srcBranch.HeadCommitID)
 		if cmtErr != nil {
 			return nil, cmtErr
@@ -267,7 +249,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		}, nil
 	}
 
-	targetHeadCmt, targetLayers, err := resolveCommitLayers(batch, dk, oldTargetHead)
+	targetHeadCmt, targetLayers, err := d.resolveCommitLayersWithGen(batch, oldTargetHead, snapGen)
 	if err != nil {
 		return nil, err
 	}
@@ -277,41 +259,41 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 	if targetIsBase {
 		baseView = targetView
 	} else {
-		_, baseLayers, bErr := resolveCommitLayers(snap, dk, lca)
+		_, baseLayers, bErr := d.resolveCommitLayersWithGen(snap, lca, snapGen)
 		if bErr != nil {
 			return nil, bErr
 		}
 		baseView = layerView{r: snap, keys: dk, layers: baseLayers}
 	}
-	_, sourceLayers, err := resolveCommitLayers(srcReader, dk, srcBranch.HeadCommitID)
+	_, sourceLayers, err := d.resolveCommitLayersWithGen(srcReader, srcBranch.HeadCommitID, snapGen)
 	if err != nil {
 		return nil, err
 	}
 	sourceView := layerView{r: srcReader, keys: dk, layers: sourceLayers}
 
-	plan, err := a.disk.planDeltaMerge(
+	plan, err := d.planDeltaMerge(
 		context.Background(),
 		lca,
 		baseView,
 		targetView,
 		sourceView,
 		targetIsBase,
-		req.opts,
-		req.normStrategies,
+		opts,
+		normStrategies,
 		false,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	commitID, err := a.disk.allocCommitID()
+	commitID, err := d.allocCommitID()
 	if err != nil {
 		return nil, err
 	}
 
 	var mergeLayerID uint64
 	if len(plan.deltaKV) > 0 {
-		mergeLayerID, err = a.disk.allocLayerID()
+		mergeLayerID, err = d.allocLayerID()
 		if err != nil {
 			return nil, err
 		}
@@ -329,9 +311,9 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		}
 	}
 
-	msg := req.opts.Message
+	msg := opts.Message
 	if msg == "" {
-		msg = "merge " + req.opts.SourceBranch + " into " + branch.Name
+		msg = "merge " + opts.SourceBranch + " into " + branch.Name
 	}
 	mergeLogical := applySignedDelta(targetHeadCmt.LogicalBytes, plan.logicalDelta)
 	cmt := CommitMeta{
@@ -489,29 +471,11 @@ func (d *DiskStore) planDeltaMerge(
 	}
 
 	var records []*mergeWalkRecord
-	tAddedHLPaths := make(map[uint64][][]byte)
-	sTouchedBaseInos := make(map[uint64]struct{})
+	hlTracker := newTargetHardlinkTracker()
 
 	walkErr := tc.walkAnalyzedTree(nil, false, func(an *analyzedNode) error {
-		if !targetIsBase && an.oNode == nil && an.tNode != nil && an.sNode == nil && (an.tNode.Mode&ModeTypeMask) != ModeDir {
-			if _, ok, rErr := tc.base.getInode(an.tNode.Ino); rErr != nil {
-				return rErr
-			} else if ok {
-				tAddedHLPaths[an.tNode.Ino] = append(tAddedHLPaths[an.tNode.Ino], an.path)
-			}
-		}
-		if !targetIsBase && an.oNode != nil && (an.oNode.Mode&ModeTypeMask) != ModeDir {
-			if an.sNode == nil {
-				sTouchedBaseInos[an.oNode.Ino] = struct{}{}
-			} else if !tc.isNodeUnchangedInView(an.oNode, an.sNode) {
-				eq, eqErr := tc.nodesEqual(tc.base, an.oNode, tc.source, an.sNode)
-				if eqErr != nil {
-					return eqErr
-				}
-				if !eq {
-					sTouchedBaseInos[an.oNode.Ino] = struct{}{}
-				}
-			}
+		if obsErr := hlTracker.observe(tc, an); obsErr != nil {
+			return obsErr
 		}
 
 		parentStr, name := splitParentAndName(an.path)
@@ -526,7 +490,7 @@ func (d *DiskStore) planDeltaMerge(
 		return nil, walkErr
 	}
 
-	if !targetIsBase && len(tAddedHLPaths) > 0 {
+	if !targetIsBase && hlTracker.hasCandidates() {
 		for _, rec := range records {
 			an := rec.an
 			var checkIno uint64
@@ -535,13 +499,7 @@ func (d *DiskStore) planDeltaMerge(
 			} else if an.tNode != nil && an.sNode == nil {
 				checkIno = an.tNode.Ino
 			}
-			if checkIno == 0 {
-				continue
-			}
-			if _, hasTLink := tAddedHLPaths[checkIno]; !hasTLink {
-				continue
-			}
-			if _, hasSTouch := sTouchedBaseInos[checkIno]; !hasSTouch {
+			if !hlTracker.isConflicting(checkIno) {
 				continue
 			}
 			if an.conflict == ConflictNone {
@@ -733,32 +691,16 @@ func copyInodeMeta(dst, src *Inode) {
 }
 
 func (b *deltaMergeBuilder) analyzeRoot(global MergeStrategy, byPath map[string]MergeStrategy) error {
-	if _, dirty := b.tc.dirty.dirtyInos[RootIno]; !dirty {
+	rootAN, err := b.tc.analyzeRootInode(true)
+	if err != nil {
+		return err
+	}
+	if rootAN == nil || !rootAN.emitDiff {
 		return nil
 	}
-	bRoot, hasB, err := b.tc.base.getInode(RootIno)
-	if err != nil {
-		return err
-	}
-	tRoot, hasT, err := b.tc.target.getInode(RootIno)
-	if err != nil {
-		return err
-	}
-	sRoot, hasS, err := b.tc.source.getInode(RootIno)
-	if err != nil {
-		return err
-	}
-	if !hasB || !hasT || !hasS {
-		return ErrNotFound
-	}
-
-	rootAN, err := b.tc.analyzeAllThreePresent(&analyzedNode{path: []byte("/")}, &bRoot, &tRoot, &sRoot)
-	if err != nil {
-		return err
-	}
-	if !rootAN.emitDiff {
-		return nil
-	}
+	bRoot := *rootAN.oNode
+	tRoot := *rootAN.tNode
+	sRoot := *rootAN.sNode
 	b.summary.Modified++
 	if rootAN.conflict != ConflictNone {
 		b.summary.Conflicts++

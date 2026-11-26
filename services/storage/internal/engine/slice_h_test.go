@@ -449,7 +449,7 @@ func TestStep22_SyncBarrier_StrictDataBeforeWALOrdering_AllOps(t *testing.T) {
 	}
 }
 
-func TestStep22_PackSyncFailure_AbortsTickWithoutCommittingWAL(t *testing.T) {
+func TestStep22_PackSyncFailure_AbortsSyncBarrierWithoutCommittingWAL(t *testing.T) {
 	ctx := context.Background()
 	disk, err := openTestDisk(testDiskOptions{
 		Dir:       t.TempDir(),
@@ -485,58 +485,26 @@ func TestStep22_PackSyncFailure_AbortsTickWithoutCommittingWAL(t *testing.T) {
 		}
 	}
 
-	var gateArmed atomic.Bool
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	disk.beforeTickHook = func() {
-		if gateArmed.CompareAndSwap(true, false) {
-			close(entered)
-			<-release
-		}
-	}
-
-	gateArmed.Store(true)
-	var wg sync.WaitGroup
-	var gateErr, createErr, fsyncErr error
-
-	wg.Go(func() {
-		_, gateErr = disk.Create(ctx, DefaultBranchName, RootIno, "gate.txt", 0o644, 0, 0)
-	})
-	<-entered
-
-	wg.Go(func() {
-		_, createErr = disk.Create(ctx, DefaultBranchName, RootIno, "aborted.txt", 0o644, 0, 0)
-	})
-	wg.Go(func() {
-		fsyncErr = disk.Fsync(ctx, DefaultBranchName, f.Ino)
-	})
-
-	actor, releaseRef, err := disk.acquireBranchActor(DefaultBranchName)
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		actor.mb.mu.Lock()
-		n := len(actor.mb.active)
-		actor.mb.mu.Unlock()
-		return n >= 2
-	}, 2*time.Second, time.Millisecond)
-	releaseRef()
-
-	close(release)
-	wg.Wait()
-
-	require.NoError(t, gateErr)
-	require.ErrorIs(t, createErr, injectedErr)
-	require.ErrorIs(t, fsyncErr, injectedErr)
+	syncedBefore := disk.node.walSyncedGen.Load()
+	require.ErrorIs(t, disk.Fsync(ctx, DefaultBranchName, f.Ino), injectedErr)
+	require.Equal(t, syncedBefore, disk.node.walSyncedGen.Load())
 	require.Equal(t, int32(0), walSyncCalls.Load())
 	require.True(t, disk.packs.hasDirty())
 
-	_, _, err = disk.Lookup(ctx, DefaultBranchName, RootIno, "aborted.txt")
-	require.ErrorIs(t, err, ErrNotFound)
+	_, commitErr := disk.Commit(ctx, DefaultBranchName, "aborted-commit")
+	require.ErrorIs(t, commitErr, injectedErr)
+	require.Equal(t, int32(0), walSyncCalls.Load())
+	require.True(t, disk.packs.hasDirty())
+
+	commits, err := disk.ListCommits()
+	require.NoError(t, err)
+	require.Len(t, commits, 1)
 
 	failPackSync.Store(false)
 	require.NoError(t, disk.Fsync(ctx, DefaultBranchName, f.Ino))
 	require.Equal(t, int32(1), walSyncCalls.Load())
 	require.False(t, disk.packs.hasDirty())
+	require.GreaterOrEqual(t, disk.node.walSyncedGen.Load(), disk.node.walWriteGen.Load())
 }
 
 func TestSliceH_Mknod_Readlink_ISGIDInheritance(t *testing.T) {

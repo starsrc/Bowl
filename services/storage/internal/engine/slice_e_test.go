@@ -50,7 +50,7 @@ func TestStep9_TwoParentMergeCommit_PersistsAcrossReopenLinearReadAndSecondMerge
 	require.NoError(t, err)
 
 	snapBefore := disk.db.NewSnapshot()
-	_, c4Layers, err := resolveCommitLayers(snapBefore, disk.keys, c4.ID)
+	_, c4Layers, err := disk.resolveCommitLayers(snapBefore, c4.ID)
 	require.NoError(t, err)
 	c4Ref0, ok, err := overlayGetDataRef(snapBefore, disk.keys, c4Layers, featFile.Ino, 0)
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestStep9_TwoParentMergeCommit_PersistsAcrossReopenLinearReadAndSecondMerge
 	require.Positive(t, c5.LayerID)
 
 	snapAfter := disk.db.NewSnapshot()
-	_, mainLayers, err := resolveBranchLayers(snapAfter, disk.keys, DefaultBranchName)
+	_, mainLayers, err := disk.resolveBranchLayers(snapAfter, DefaultBranchName)
 	require.NoError(t, err)
 	require.NotContains(t, mainLayers, c4.LayerID)
 	require.Contains(t, mainLayers, c5.LayerID)

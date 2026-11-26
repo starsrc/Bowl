@@ -364,50 +364,21 @@ func TestStep30_ConcurrentBranchActorsCASQuotaAndCommitFailureRollback(t *testin
 
 	fFail, err := disk.Create(ctx, DefaultBranchName, RootIno, "rollback.bin", 0o644, 0, 0)
 	require.NoError(t, err)
+	_, err = disk.Write(ctx, DefaultBranchName, fFail.Ino, 0, bytes.Repeat([]byte{0x77}, 4096))
+	require.NoError(t, err)
 
 	injectedSyncErr := errors.New("injected pack sync failure")
 	disk.packs.syncFileHook = func(uint64) error {
 		return injectedSyncErr
 	}
 
-	tickEntered := make(chan struct{})
-	tickGate := make(chan struct{})
-	var gateOnce sync.Once
-	disk.beforeTickHook = func() {
-		gateOnce.Do(func() {
-			close(tickEntered)
-			<-tickGate
-		})
-	}
-
 	usedBefore := disk.UsedBytes()
-	var (
-		holderErr error
-		writeErr  error
-		fsyncErr  error
-		rbWG      sync.WaitGroup
-	)
-	rbWG.Go(func() {
-		_, holderErr = disk.Create(ctx, DefaultBranchName, RootIno, "tick-holder.bin", 0o644, 0, 0)
-	})
-	<-tickEntered
-
-	rbWG.Go(func() {
-		_, writeErr = disk.Write(ctx, DefaultBranchName, fFail.Ino, 0, bytes.Repeat([]byte{0x77}, 4096))
-	})
-	rbWG.Go(func() {
-		fsyncErr = disk.Fsync(ctx, DefaultBranchName, fFail.Ino)
-	})
-	time.Sleep(30 * time.Millisecond)
-	close(tickGate)
-	rbWG.Wait()
+	_, resetErr := disk.Reset(ctx, DefaultBranchName, 1)
+	require.ErrorIs(t, resetErr, injectedSyncErr)
+	require.Equal(t, usedBefore, disk.UsedBytes())
 
 	disk.packs.syncFileHook = nil
-	disk.beforeTickHook = nil
-
-	require.NoError(t, holderErr)
-	require.ErrorIs(t, writeErr, injectedSyncErr)
-	require.ErrorIs(t, fsyncErr, injectedSyncErr)
+	require.NoError(t, disk.Fsync(ctx, DefaultBranchName, fFail.Ino))
 	require.Equal(t, usedBefore, disk.UsedBytes())
 }
 

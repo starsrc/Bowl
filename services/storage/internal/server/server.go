@@ -129,7 +129,7 @@ func defaultMetaConfig() config.MetaConfig {
 		DirEntryTimeoutSecondsVal: config.DefaultDirEntryTimeoutSeconds,
 		OpenKeepCacheVal:          config.DefaultOpenKeepCache,
 		OpenDirCacheVal:           config.DefaultOpenDirCache,
-		ActorIdleTTLVal:           config.DefaultActorIdleTTL,
+		DiskIdleTTLVal:            config.DefaultDiskIdleTTL,
 	}
 }
 

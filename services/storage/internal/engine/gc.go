@@ -18,15 +18,6 @@ type relocateItem struct {
 	newRef BlobRef
 }
 
-type relocateReq struct {
-	items []relocateItem
-}
-
-type relocateResp struct {
-	relocated int
-	skipped   int
-}
-
 type activeLayerInfo struct {
 	layerID    uint64
 	branchName string
@@ -553,56 +544,84 @@ func (d *DiskStore) relocatePack(ctx context.Context, packID uint64, refMap map[
 		}
 
 		target := layerMeta[lid]
-		var (
-			actor   *BranchActor
-			release func()
-			acqErr  error
-		)
-		if target.IsCommit {
-			actor, release, acqErr = d.acquireCommitActor(target.LayerID)
-		} else {
-			actor, release, acqErr = d.acquireBranchActor(target.BranchName)
-			if errors.Is(acqErr, ErrNotFound) {
-				actor, release, acqErr = d.acquireCommitActor(target.LayerID)
-			}
+		rel, skp, relErr := d.relocateLayer(ctx, target, items)
+		if relErr != nil {
+			return relocated, skipped, relErr
 		}
-		if acqErr != nil {
-			return relocated, skipped, acqErr
-		}
-
-		resp, subErr := actor.submit(ctx, branchOpRelocate, &relocateReq{items: items})
-		release()
-		if subErr != nil {
-			return relocated, skipped, subErr
-		}
-		rr, ok := resp.(relocateResp)
-		if !ok {
-			return relocated, skipped, ErrInvalidValue
-		}
-		relocated += rr.relocated
-		skipped += rr.skipped
+		relocated += rel
+		skipped += skp
 	}
 
 	return relocated, skipped, nil
 }
 
-func (a *BranchActor) execRelocate(batch *pebble.Batch, raw any) (any, error) {
-	req, ok := raw.(*relocateReq)
-	if !ok {
-		return nil, ErrInvalid
+func (d *DiskStore) relocateLayer(ctx context.Context, target BlockRefLocation, items []relocateItem) (relocated, skipped int, err error) {
+	d.branchRegMu.RLock()
+	defer d.branchRegMu.RUnlock()
+
+	if !target.IsCommit {
+		bm, bmErr := readBranchMeta(d.db, d.keys, target.BranchName)
+		if errors.Is(bmErr, ErrNotFound) {
+			return 0, len(items), nil
+		}
+		if bmErr != nil {
+			return 0, 0, bmErr
+		}
+		if bm.WorkLayerID != target.LayerID {
+			return 0, len(items), nil
+		}
+		mu, lockErr := d.acquireBranchLock(target.BranchName)
+		if errors.Is(lockErr, ErrNotFound) {
+			return 0, len(items), nil
+		}
+		if lockErr != nil {
+			return 0, 0, lockErr
+		}
+		defer mu.Unlock()
+
+		batch := d.db.NewIndexedBatch()
+		defer func() { _ = batch.Close() }()
+
+		curBM, reErr := readBranchMeta(batch, d.keys, target.BranchName)
+		if errors.Is(reErr, ErrNotFound) {
+			return 0, len(items), nil
+		}
+		if reErr != nil {
+			return 0, 0, reErr
+		}
+		if curBM.WorkLayerID != target.LayerID {
+			return 0, len(items), nil
+		}
+		return d.relocateLayerBatch(ctx, batch, items)
 	}
 
-	dk := a.disk.keys
-	var resp relocateResp
-	for _, item := range req.items {
+	cmt, cmtErr := readCommitMeta(d.db, d.keys, target.CommitID)
+	if errors.Is(cmtErr, ErrNotFound) {
+		return 0, len(items), nil
+	}
+	if cmtErr != nil {
+		return 0, 0, cmtErr
+	}
+	if cmt.LayerID != target.LayerID {
+		return 0, len(items), nil
+	}
+
+	batch := d.db.NewIndexedBatch()
+	defer func() { _ = batch.Close() }()
+	return d.relocateLayerBatch(ctx, batch, items)
+}
+
+func (d *DiskStore) relocateLayerBatch(ctx context.Context, batch *pebble.Batch, items []relocateItem) (relocated, skipped int, err error) {
+	dk := d.keys
+	for _, item := range items {
 		key := dk.LayerDataKey(item.loc.LayerID, item.loc.Ino, item.loc.BlockIdx)
-		val, closer, err := batch.Get(key)
-		if errors.Is(err, pebble.ErrNotFound) {
-			resp.skipped++
+		val, closer, getErr := batch.Get(key)
+		if errors.Is(getErr, pebble.ErrNotFound) {
+			skipped++
 			continue
 		}
-		if err != nil {
-			return nil, err
+		if getErr != nil {
+			return 0, 0, getErr
 		}
 		tag, payload, decErr := DecodeEnvelope(val)
 		var curRef BlobRef
@@ -611,16 +630,21 @@ func (a *BranchActor) execRelocate(batch *pebble.Batch, raw any) (any, error) {
 		}
 		closeErr := closer.Close()
 		if decErr != nil || closeErr != nil {
-			return nil, errors.Join(decErr, closeErr)
+			return 0, 0, errors.Join(decErr, closeErr)
 		}
 		if tag != TagLive || curRef != item.oldRef {
-			resp.skipped++
+			skipped++
 			continue
 		}
 		if setErr := batch.Set(key, EncodeLiveEnvelope(EncodeBlobRef(item.newRef)), nil); setErr != nil {
-			return nil, setErr
+			return 0, 0, setErr
 		}
-		resp.relocated++
+		relocated++
 	}
-	return resp, nil
+	if batch.Count() > 0 {
+		if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
+			return 0, 0, commitErr
+		}
+	}
+	return relocated, skipped, nil
 }

@@ -15,10 +15,6 @@ func validateBranchName(name string) error {
 	return nil
 }
 
-type commitReq struct {
-	message string
-}
-
 func (d *DiskStore) Commit(ctx context.Context, branch, message string) (CommitMeta, error) {
 	if d.closing.Load() {
 		return CommitMeta{}, ErrClosed
@@ -38,80 +34,52 @@ func (d *DiskStore) Commit(ctx context.Context, branch, message string) (CommitM
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
 
-	actor, release, err := d.acquireBranchActor(branch)
-	if err != nil {
-		return CommitMeta{}, err
-	}
-	defer release()
-
-	resp, err := actor.submit(ctx, branchOpCommit, &commitReq{message: message})
-	if err != nil {
-		return CommitMeta{}, err
-	}
-	cmt, ok := resp.(CommitMeta)
-	if !ok {
-		return CommitMeta{}, ErrInvalidValue
-	}
-	return cmt, nil
-}
-
-func (a *BranchActor) execCommit(batch *pebble.Batch, branch BranchMeta, raw any) (CommitMeta, error) {
-	req, ok := raw.(*commitReq)
-	if !ok {
-		return CommitMeta{}, ErrInvalid
-	}
-	if a.disk.beforeCommitExecHook != nil {
-		if hookErr := a.disk.beforeCommitExecHook(branch.Name); hookErr != nil {
-			return CommitMeta{}, hookErr
+	var cmt CommitMeta
+	err := d.execBranchOp(ctx, branch, true, true, func(batch *pebble.Batch, _ *opQuotaTracker, bm BranchMeta, _ *branchLayerCursor) error {
+		if d.beforeCommitExecHook != nil {
+			if hookErr := d.beforeCommitExecHook(bm.Name); hookErr != nil {
+				return hookErr
+			}
 		}
-	}
-	commitID, err := a.disk.allocCommitID()
+		commitID, err := d.allocCommitID()
+		if err != nil {
+			return err
+		}
+		newWorkLayerID, err := d.allocLayerID()
+		if err != nil {
+			return err
+		}
+		dk := d.keys
+		migratedOwned, orphanEff, migErr := d.migrateOrphansAcrossLayerSwap(batch, bm.WorkLayerID, newWorkLayerID, bm.HeadCommitID)
+		if migErr != nil {
+			return migErr
+		}
+
+		nowNano := d.now().UnixNano()
+		cmt = CommitMeta{
+			ID:           commitID,
+			ParentID:     bm.HeadCommitID,
+			LayerID:      bm.WorkLayerID,
+			Kind:         CommitKindManual,
+			OwnedBytes:   saturatingSub(bm.WorkOwnedBytes, migratedOwned),
+			LogicalBytes: saturatingSub(bm.LogicalBytes, orphanEff),
+			Message:      message,
+			CreatedAt:    nowNano,
+		}
+		bm.HeadCommitID = commitID
+		bm.WorkLayerID = newWorkLayerID
+		bm.WorkOwnedBytes = migratedOwned
+		bm.UpdatedAt = nowNano
+
+		if setErr := batch.Set(dk.MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
+			return setErr
+		}
+		return batch.Set(dk.MetaBranchKey(bm.Name), EncodeBranchMeta(bm), nil)
+	})
 	if err != nil {
 		return CommitMeta{}, err
-	}
-	newWorkLayerID, err := a.disk.allocLayerID()
-	if err != nil {
-		return CommitMeta{}, err
-	}
-	dk := a.disk.keys
-	migratedOwned, orphanEff, migErr := migrateOrphansAcrossLayerSwap(batch, dk, branch.WorkLayerID, newWorkLayerID, branch.HeadCommitID)
-	if migErr != nil {
-		return CommitMeta{}, migErr
-	}
-
-	nowNano := a.disk.now().UnixNano()
-	cmt := CommitMeta{
-		ID:           commitID,
-		ParentID:     branch.HeadCommitID,
-		LayerID:      branch.WorkLayerID,
-		Kind:         CommitKindManual,
-		OwnedBytes:   saturatingSub(branch.WorkOwnedBytes, migratedOwned),
-		LogicalBytes: saturatingSub(branch.LogicalBytes, orphanEff),
-		Message:      req.message,
-		CreatedAt:    nowNano,
-	}
-	branch.HeadCommitID = commitID
-	branch.WorkLayerID = newWorkLayerID
-	branch.WorkOwnedBytes = migratedOwned
-	branch.UpdatedAt = nowNano
-
-	if setErr := batch.Set(dk.MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
-		return CommitMeta{}, setErr
-	}
-	if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
-		return CommitMeta{}, setErr
 	}
 	return cmt, nil
-}
-
-type forkReq struct {
-	newBranch string
-	message   string
-}
-
-type forkResp struct {
-	commit CommitMeta
-	branch BranchMeta
 }
 
 func (d *DiskStore) Fork(ctx context.Context, srcBranch, newBranch, message string) (CommitMeta, BranchMeta, error) {
@@ -145,115 +113,93 @@ func (d *DiskStore) Fork(ctx context.Context, srcBranch, newBranch, message stri
 		return CommitMeta{}, BranchMeta{}, err
 	}
 
-	actor, release, err := d.acquireBranchActor(srcBranch)
-	if err != nil {
-		return CommitMeta{}, BranchMeta{}, err
-	}
-	defer release()
+	var (
+		cmt       CommitMeta
+		dstBranch BranchMeta
+	)
+	err := d.execBranchOp(ctx, srcBranch, true, true, func(batch *pebble.Batch, _ *opQuotaTracker, bm BranchMeta, _ *branchLayerCursor) error {
+		dk := d.keys
+		if _, err := readBranchMeta(batch, dk, newBranch); err == nil {
+			return ErrExist
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if d.beforeForkExecHook != nil {
+			if hookErr := d.beforeForkExecHook(bm.Name, newBranch); hookErr != nil {
+				return hookErr
+			}
+		}
 
-	resp, err := actor.submit(ctx, branchOpFork, &forkReq{
-		newBranch: newBranch,
-		message:   message,
+		commitID, err := d.allocCommitID()
+		if err != nil {
+			return err
+		}
+		srcNewWorkID, err := d.allocLayerID()
+		if err != nil {
+			return err
+		}
+		dstWorkID, err := d.allocLayerID()
+		if err != nil {
+			return err
+		}
+		migratedOwned, orphanEff, migErr := d.migrateOrphansAcrossLayerSwap(batch, bm.WorkLayerID, srcNewWorkID, bm.HeadCommitID)
+		if migErr != nil {
+			return migErr
+		}
+
+		dirty, err := layerHasAnyKey(batch, dk, bm.WorkLayerID)
+		if err != nil {
+			return err
+		}
+
+		var commitLayerID uint64
+		var commitOwned uint64
+		if dirty {
+			commitLayerID = bm.WorkLayerID
+			commitOwned = saturatingSub(bm.WorkOwnedBytes, migratedOwned)
+		}
+		commitLogical := saturatingSub(bm.LogicalBytes, orphanEff)
+
+		nowNano := d.now().UnixNano()
+		cmt = CommitMeta{
+			ID:           commitID,
+			ParentID:     bm.HeadCommitID,
+			LayerID:      commitLayerID,
+			Kind:         CommitKindFork,
+			OwnedBytes:   commitOwned,
+			LogicalBytes: commitLogical,
+			Message:      message,
+			CreatedAt:    nowNano,
+		}
+
+		bm.HeadCommitID = commitID
+		bm.WorkLayerID = srcNewWorkID
+		bm.WorkOwnedBytes = migratedOwned
+		bm.UpdatedAt = nowNano
+
+		dstBranch = BranchMeta{
+			Name:           newBranch,
+			HeadCommitID:   commitID,
+			WorkLayerID:    dstWorkID,
+			WriterEpoch:    1,
+			WorkOwnedBytes: 0,
+			LogicalBytes:   commitLogical,
+			CreatedAt:      nowNano,
+			UpdatedAt:      nowNano,
+		}
+
+		if setErr := batch.Set(dk.MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
+			return setErr
+		}
+		if setErr := batch.Set(dk.MetaBranchKey(bm.Name), EncodeBranchMeta(bm), nil); setErr != nil {
+			return setErr
+		}
+		return batch.Set(dk.MetaBranchKey(dstBranch.Name), EncodeBranchMeta(dstBranch), nil)
 	})
 	if err != nil {
 		return CommitMeta{}, BranchMeta{}, err
 	}
-	fr, ok := resp.(forkResp)
-	if !ok {
-		return CommitMeta{}, BranchMeta{}, ErrInvalidValue
-	}
-	return fr.commit, fr.branch, nil
-}
-
-func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) (any, error) {
-	req, ok := raw.(*forkReq)
-	if !ok {
-		return nil, ErrInvalid
-	}
-	dk := a.disk.keys
-	if _, err := readBranchMeta(batch, dk, req.newBranch); err == nil {
-		return nil, ErrExist
-	} else if !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	if a.disk.beforeForkExecHook != nil {
-		if hookErr := a.disk.beforeForkExecHook(branch.Name, req.newBranch); hookErr != nil {
-			return nil, hookErr
-		}
-	}
-
-	commitID, err := a.disk.allocCommitID()
-	if err != nil {
-		return nil, err
-	}
-	srcNewWorkID, err := a.disk.allocLayerID()
-	if err != nil {
-		return nil, err
-	}
-	dstWorkID, err := a.disk.allocLayerID()
-	if err != nil {
-		return nil, err
-	}
-	migratedOwned, orphanEff, migErr := migrateOrphansAcrossLayerSwap(batch, dk, branch.WorkLayerID, srcNewWorkID, branch.HeadCommitID)
-	if migErr != nil {
-		return nil, migErr
-	}
-
-	dirty, err := layerHasAnyKey(batch, dk, branch.WorkLayerID)
-	if err != nil {
-		return nil, err
-	}
-
-	var commitLayerID uint64
-	var commitOwned uint64
-	if dirty {
-		commitLayerID = branch.WorkLayerID
-		commitOwned = saturatingSub(branch.WorkOwnedBytes, migratedOwned)
-	}
-	commitLogical := saturatingSub(branch.LogicalBytes, orphanEff)
-
-	nowNano := a.disk.now().UnixNano()
-	cmt := CommitMeta{
-		ID:           commitID,
-		ParentID:     branch.HeadCommitID,
-		LayerID:      commitLayerID,
-		Kind:         CommitKindFork,
-		OwnedBytes:   commitOwned,
-		LogicalBytes: commitLogical,
-		Message:      req.message,
-		CreatedAt:    nowNano,
-	}
-
-	branch.HeadCommitID = commitID
-	branch.WorkLayerID = srcNewWorkID
-	branch.WorkOwnedBytes = migratedOwned
-	branch.UpdatedAt = nowNano
-
-	dstBranch := BranchMeta{
-		Name:           req.newBranch,
-		HeadCommitID:   commitID,
-		WorkLayerID:    dstWorkID,
-		WriterEpoch:    1,
-		WorkOwnedBytes: 0,
-		LogicalBytes:   commitLogical,
-		CreatedAt:      nowNano,
-		UpdatedAt:      nowNano,
-	}
-
-	if setErr := batch.Set(dk.MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
-		return nil, setErr
-	}
-	if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
-		return nil, setErr
-	}
-	if setErr := batch.Set(dk.MetaBranchKey(dstBranch.Name), EncodeBranchMeta(dstBranch), nil); setErr != nil {
-		return nil, setErr
-	}
-	return forkResp{commit: cmt, branch: dstBranch}, nil
-}
-
-type resetReq struct {
-	targetCommitID uint64
+	return cmt, dstBranch, nil
 }
 
 func (d *DiskStore) Reset(ctx context.Context, branch string, targetCommitID uint64) (BranchMeta, error) {
@@ -267,66 +213,52 @@ func (d *DiskStore) Reset(ctx context.Context, branch string, targetCommitID uin
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
 
-	actor, release, err := d.acquireBranchActor(branch)
-	if err != nil {
-		return BranchMeta{}, err
-	}
-	defer release()
+	var out BranchMeta
+	err := d.execBranchOp(ctx, branch, true, true, func(batch *pebble.Batch, quota *opQuotaTracker, bm BranchMeta, _ *branchLayerCursor) error {
+		dk := d.keys
+		mounted, err := hasActiveMountOnReader(batch, dk, bm.Name, d.now().UnixNano(), false)
+		if err != nil {
+			return err
+		}
+		if mounted {
+			return ErrDiskMounted
+		}
+		targetCmt, cmtErr := readCommitMeta(batch, dk, targetCommitID)
+		if cmtErr != nil {
+			return cmtErr
+		}
+		newWorkID, err := d.allocLayerID()
+		if err != nil {
+			return err
+		}
 
-	resp, err := actor.submit(ctx, branchOpReset, &resetReq{targetCommitID: targetCommitID})
+		if bm.WorkLayerID != 0 {
+			start, end := dk.LayerRangeBounds(bm.WorkLayerID)
+			if delErr := batch.DeleteRange(start, end, nil); delErr != nil {
+				return delErr
+			}
+		}
+
+		freedWork := bm.WorkOwnedBytes
+		bm.HeadCommitID = targetCommitID
+		bm.WorkLayerID = newWorkID
+		bm.WriterEpoch++
+		bm.WorkOwnedBytes = 0
+		bm.LogicalBytes = targetCmt.LogicalBytes
+		bm.UpdatedAt = d.now().UnixNano()
+
+		if setErr := batch.Set(dk.MetaBranchKey(bm.Name), EncodeBranchMeta(bm), nil); setErr != nil {
+			return setErr
+		}
+		quota.release(freedWork)
+		out = bm
+		return nil
+	})
 	if err != nil {
 		return BranchMeta{}, err
-	}
-	bm, ok := resp.(BranchMeta)
-	if !ok {
-		return BranchMeta{}, ErrInvalidValue
 	}
 	d.TriggerGC()
-	return bm, nil
-}
-
-func (a *BranchActor) execReset(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, raw any) (BranchMeta, error) {
-	req, ok := raw.(*resetReq)
-	if !ok {
-		return BranchMeta{}, ErrInvalid
-	}
-	dk := a.disk.keys
-	mounted, err := hasActiveMountOnReader(batch, dk, branch.Name, a.disk.now().UnixNano(), false)
-	if err != nil {
-		return BranchMeta{}, err
-	}
-	if mounted {
-		return BranchMeta{}, ErrDiskMounted
-	}
-	targetCmt, cmtErr := readCommitMeta(batch, dk, req.targetCommitID)
-	if cmtErr != nil {
-		return BranchMeta{}, cmtErr
-	}
-	newWorkID, err := a.disk.allocLayerID()
-	if err != nil {
-		return BranchMeta{}, err
-	}
-
-	if branch.WorkLayerID != 0 {
-		start, end := dk.LayerRangeBounds(branch.WorkLayerID)
-		if delErr := batch.DeleteRange(start, end, nil); delErr != nil {
-			return BranchMeta{}, delErr
-		}
-	}
-
-	freedWork := branch.WorkOwnedBytes
-	branch.HeadCommitID = req.targetCommitID
-	branch.WorkLayerID = newWorkID
-	branch.WriterEpoch++
-	branch.WorkOwnedBytes = 0
-	branch.LogicalBytes = targetCmt.LogicalBytes
-	branch.UpdatedAt = a.disk.now().UnixNano()
-
-	if setErr := batch.Set(dk.MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
-		return BranchMeta{}, setErr
-	}
-	quota.release(freedWork)
-	return branch, nil
+	return out, nil
 }
 
 func (d *DiskStore) DeleteBranch(ctx context.Context, branch string) error {
@@ -359,7 +291,7 @@ func (d *DiskStore) DeleteBranch(ctx context.Context, branch string) error {
 	if err != nil {
 		return err
 	}
-	d.removeBranchActor(branch)
+	d.removeBranchLock(branch)
 
 	bm, err = d.GetBranch(branch)
 	if err != nil {
@@ -475,10 +407,6 @@ func (d *DiskStore) DeleteCommit(ctx context.Context, commitID uint64) error {
 		return ErrCommitInUse
 	}
 
-	if cmt.LayerID != 0 {
-		d.removeCommitActor(cmt.LayerID)
-	}
-
 	batch := d.db.NewBatch()
 	defer func() { _ = batch.Close() }()
 
@@ -494,6 +422,7 @@ func (d *DiskStore) DeleteCommit(ctx context.Context, commitID uint64) error {
 	if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
 		return commitErr
 	}
+	d.invalidateCommitCache(commitID)
 	d.releaseQuota(cmt.OwnedBytes)
 	d.TriggerGC()
 	return nil
@@ -549,10 +478,9 @@ func (d *DiskStore) PruneCommits(ctx context.Context) (int, error) {
 	defer func() { _ = batch.Close() }()
 
 	var freedBytes uint64
+	prunedIDs := make([]uint64, 0, len(unreachable))
 	for _, cmt := range unreachable {
-		if cmt.LayerID != 0 {
-			d.removeCommitActor(cmt.LayerID)
-		}
+		prunedIDs = append(prunedIDs, cmt.ID)
 		if delErr := batch.Delete(dk.MetaCommitKey(cmt.ID), nil); delErr != nil {
 			return 0, delErr
 		}
@@ -567,6 +495,7 @@ func (d *DiskStore) PruneCommits(ctx context.Context) (int, error) {
 	if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
 		return 0, commitErr
 	}
+	d.invalidateCommitCache(prunedIDs...)
 	d.releaseQuota(freedBytes)
 	d.TriggerGC()
 	return len(unreachable), nil

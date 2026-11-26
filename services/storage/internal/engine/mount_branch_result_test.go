@@ -13,7 +13,7 @@ import (
 
 func deleteRootInodeFromBranch(t *testing.T, disk *testDisk, branch string) {
 	t.Helper()
-	_, layers, err := resolveBranchLayers(disk.db, disk.keys, branch)
+	_, layers, err := disk.resolveBranchLayers(disk.db, branch)
 	require.NoError(t, err)
 	for _, layerID := range layers {
 		require.NoError(t, disk.db.Delete(disk.keys.LayerInodeKey(layerID, RootIno), pebble.Sync))

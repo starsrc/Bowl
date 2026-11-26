@@ -20,7 +20,7 @@ const (
 
 	DefaultOpenDirCache = false
 
-	DefaultActorIdleTTL = 5 * time.Minute
+	DefaultDiskIdleTTL = 5 * time.Minute
 
 	DefaultGCInterval = 30 * time.Second
 
@@ -34,7 +34,7 @@ type MetaConfig struct {
 	DirEntryTimeoutSecondsVal float64       `env:"STORAGE_DIR_ENTRY_TIMEOUT_SECONDS" envDefault:"1.0"`
 	OpenKeepCacheVal          bool          `env:"STORAGE_OPEN_KEEP_CACHE" envDefault:"false"`
 	OpenDirCacheVal           bool          `env:"STORAGE_OPEN_DIR_CACHE" envDefault:"false"`
-	ActorIdleTTLVal           time.Duration `env:"STORAGE_ACTOR_IDLE_TTL" envDefault:"5m"`
+	DiskIdleTTLVal            time.Duration `env:"STORAGE_DISK_IDLE_TTL" envDefault:"5m"`
 	GCIntervalVal             time.Duration `env:"STORAGE_GC_INTERVAL" envDefault:"30s"`
 	DataDirVal                string        `env:"DATA_DIR"`
 	StorageDataDirVal         string        `env:"STORAGE_DATA_DIR"`
@@ -67,8 +67,8 @@ func (c *MetaConfig) OpenDirCache() bool {
 	return c.OpenDirCacheVal
 }
 
-func (c *MetaConfig) ActorIdleTTL() time.Duration {
-	return c.ActorIdleTTLVal
+func (c *MetaConfig) DiskIdleTTL() time.Duration {
+	return c.DiskIdleTTLVal
 }
 
 func (c *MetaConfig) GCInterval() time.Duration {
@@ -112,8 +112,8 @@ func (c *MetaConfig) Validate() error {
 	if err := validateNonNegativeTimeout("dir entry timeout", c.DirEntryTimeoutSecondsVal); err != nil {
 		return err
 	}
-	if c.ActorIdleTTLVal < 0 {
-		return fmt.Errorf("invalid actor idle ttl %s: must be non-negative", c.ActorIdleTTLVal)
+	if c.DiskIdleTTLVal < 0 {
+		return fmt.Errorf("invalid disk idle ttl %s: must be non-negative", c.DiskIdleTTLVal)
 	}
 	if c.GCIntervalVal < 0 {
 		return fmt.Errorf("invalid gc interval %s: must be non-negative", c.GCIntervalVal)

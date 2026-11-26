@@ -44,44 +44,35 @@ func (v layerView) readAllXattrs(ino uint64) (map[string][]byte, error) {
 	if v.r == nil || len(v.layers) == 0 {
 		return out, nil
 	}
-	seen := make(map[string]struct{})
-	for _, layerID := range v.layers {
-		prefix := v.keys.LayerXattrPrefix(layerID, ino)
-		iter, err := v.r.NewIter(&pebble.IterOptions{
-			LowerBound: prefix,
-			UpperBound: PrefixUpperBound(prefix),
-		})
-		if err != nil {
-			return nil, err
-		}
-		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, nameBytes, decKeyErr := v.keys.DecodeLayerXattrKey(iter.Key())
+	err := overlayScanFirstWins(
+		v.r,
+		v.layers,
+		func(layerID uint64) []byte { return v.keys.LayerXattrPrefix(layerID, ino) },
+		func(rawKey []byte) (string, bool, error) {
+			_, _, nameBytes, decKeyErr := v.keys.DecodeLayerXattrKey(rawKey)
 			if decKeyErr != nil {
-				_ = iter.Close()
-				return nil, decKeyErr
+				return "", false, decKeyErr
 			}
-			name := string(nameBytes)
-			if _, exists := seen[name]; exists {
-				continue
-			}
-			seen[name] = struct{}{}
-			tag, payload, decErr := DecodeEnvelope(iter.Value())
+			return string(nameBytes), true, nil
+		},
+		func(_ int, name string, rawVal []byte) error {
+			tag, payload, decErr := DecodeEnvelope(rawVal)
 			if decErr != nil {
-				_ = iter.Close()
-				return nil, decErr
+				return decErr
 			}
 			if tag == TagTombstone {
-				continue
+				return nil
 			}
 			if payload == nil {
 				out[name] = []byte{}
 			} else {
 				out[name] = append([]byte(nil), payload...)
 			}
-		}
-		if closeErr := iter.Close(); closeErr != nil {
-			return nil, closeErr
-		}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -91,44 +82,32 @@ func (v layerView) readAllDataRefs(ino uint64) (map[uint64]BlobRef, error) {
 	if v.r == nil || len(v.layers) == 0 {
 		return out, nil
 	}
-	seen := make(map[uint64]struct{})
-	for _, layerID := range v.layers {
-		prefix := v.keys.LayerDataPrefix(layerID, ino)
-		iter, err := v.r.NewIter(&pebble.IterOptions{
-			LowerBound: prefix,
-			UpperBound: PrefixUpperBound(prefix),
-		})
-		if err != nil {
-			return nil, err
-		}
-		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, blkIdx, decKeyErr := v.keys.DecodeLayerDataKey(iter.Key())
-			if decKeyErr != nil {
-				_ = iter.Close()
-				return nil, decKeyErr
-			}
-			if _, exists := seen[blkIdx]; exists {
-				continue
-			}
-			seen[blkIdx] = struct{}{}
-			tag, payload, decErr := DecodeEnvelope(iter.Value())
+	err := overlayScanFirstWins(
+		v.r,
+		v.layers,
+		func(layerID uint64) []byte { return v.keys.LayerDataPrefix(layerID, ino) },
+		func(rawKey []byte) (uint64, bool, error) {
+			_, _, blkIdx, decKeyErr := v.keys.DecodeLayerDataKey(rawKey)
+			return blkIdx, true, decKeyErr
+		},
+		func(_ int, blkIdx uint64, rawVal []byte) error {
+			tag, payload, decErr := DecodeEnvelope(rawVal)
 			if decErr != nil {
-				_ = iter.Close()
-				return nil, decErr
+				return decErr
 			}
 			if tag == TagTombstone {
-				continue
+				return nil
 			}
 			ref, refErr := DecodeBlobRef(payload)
 			if refErr != nil {
-				_ = iter.Close()
-				return nil, refErr
+				return refErr
 			}
 			out[blkIdx] = ref
-		}
-		if closeErr := iter.Close(); closeErr != nil {
-			return nil, closeErr
-		}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -137,32 +116,22 @@ func (v layerView) scanParentDirs(ino uint64) ([]uint64, error) {
 	if v.r == nil || len(v.layers) == 0 {
 		return nil, nil
 	}
-	seen := make(map[uint64]struct{})
 	var parents []uint64
-	for _, layerID := range v.layers {
-		prefix := v.keys.LayerParentPrefix(layerID, ino)
-		iter, err := v.r.NewIter(&pebble.IterOptions{
-			LowerBound: prefix,
-			UpperBound: PrefixUpperBound(prefix),
-		})
-		if err != nil {
-			return nil, err
-		}
-		for iter.First(); iter.Valid(); iter.Next() {
-			_, _, parentDirIno, decKeyErr := v.keys.DecodeLayerParentKey(iter.Key())
-			if decKeyErr != nil {
-				_ = iter.Close()
-				return nil, decKeyErr
-			}
-			if _, exists := seen[parentDirIno]; exists {
-				continue
-			}
-			seen[parentDirIno] = struct{}{}
+	err := overlayScanFirstWins(
+		v.r,
+		v.layers,
+		func(layerID uint64) []byte { return v.keys.LayerParentPrefix(layerID, ino) },
+		func(rawKey []byte) (uint64, bool, error) {
+			_, _, parentDirIno, decKeyErr := v.keys.DecodeLayerParentKey(rawKey)
+			return parentDirIno, true, decKeyErr
+		},
+		func(_ int, parentDirIno uint64, _ []byte) error {
 			parents = append(parents, parentDirIno)
-		}
-		if closeErr := iter.Close(); closeErr != nil {
-			return nil, closeErr
-		}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
 	return parents, nil
 }
@@ -1730,6 +1699,99 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 	return nil
 }
 
+type targetAddedHardlink struct {
+	path  []byte
+	tNode *Inode
+}
+
+type targetHardlinkTracker struct {
+	addedByIno    map[uint64][]targetAddedHardlink
+	sourceTouched map[uint64]struct{}
+}
+
+func newTargetHardlinkTracker() *targetHardlinkTracker {
+	return &targetHardlinkTracker{
+		addedByIno:    make(map[uint64][]targetAddedHardlink),
+		sourceTouched: make(map[uint64]struct{}),
+	}
+}
+
+func (tr *targetHardlinkTracker) observe(tc *treeCompareCtx, an *analyzedNode) error {
+	if tc.targetIsBase {
+		return nil
+	}
+	if an.oNode == nil && an.tNode != nil && an.sNode == nil && (an.tNode.Mode&ModeTypeMask) != ModeDir {
+		if _, ok, rErr := tc.base.getInode(an.tNode.Ino); rErr != nil {
+			return rErr
+		} else if ok {
+			tr.addedByIno[an.tNode.Ino] = append(tr.addedByIno[an.tNode.Ino], targetAddedHardlink{
+				path:  an.path,
+				tNode: an.tNode,
+			})
+		}
+	}
+	if an.oNode != nil && (an.oNode.Mode&ModeTypeMask) != ModeDir {
+		if an.sNode == nil {
+			tr.sourceTouched[an.oNode.Ino] = struct{}{}
+		} else if !tc.isNodeUnchangedInView(an.oNode, an.sNode) {
+			eq, eqErr := tc.nodesEqual(tc.base, an.oNode, tc.source, an.sNode)
+			if eqErr != nil {
+				return eqErr
+			}
+			if !eq {
+				tr.sourceTouched[an.oNode.Ino] = struct{}{}
+			}
+		}
+	}
+	return nil
+}
+
+func (tr *targetHardlinkTracker) hasCandidates() bool {
+	return len(tr.addedByIno) > 0
+}
+
+func (tr *targetHardlinkTracker) isConflicting(ino uint64) bool {
+	if ino == 0 {
+		return false
+	}
+	if _, hasTLink := tr.addedByIno[ino]; !hasTLink {
+		return false
+	}
+	_, hasSTouch := tr.sourceTouched[ino]
+	return hasSTouch
+}
+
+func (tc *treeCompareCtx) analyzeRootInode(requirePresent bool) (*analyzedNode, error) {
+	if _, rootInoDirty := tc.dirty.dirtyInos[RootIno]; !rootInoDirty {
+		return nil, nil
+	}
+	bRoot, bOK, err := tc.base.getInode(RootIno)
+	if err != nil {
+		return nil, err
+	}
+	tRoot, tOK, err := tc.target.getInode(RootIno)
+	if err != nil {
+		return nil, err
+	}
+	sRoot, sOK, err := tc.source.getInode(RootIno)
+	if err != nil {
+		return nil, err
+	}
+	if !bOK || !tOK || !sOK {
+		if requirePresent {
+			return nil, ErrNotFound
+		}
+		return nil, nil
+	}
+	rootAN := &analyzedNode{
+		path:  []byte("/"),
+		oNode: &bRoot,
+		tNode: &tRoot,
+		sNode: &sRoot,
+	}
+	return tc.analyzeAllThreePresent(rootAN, &bRoot, &tRoot, &sRoot)
+}
+
 type diffRunParams struct {
 	baseCommitID         uint64
 	targetCommitID       uint64
@@ -1787,80 +1849,33 @@ func (d *DiskStore) diffViews(ctx context.Context, p diffRunParams) (*DiffResult
 
 	tc := newTreeCompareCtx(ctx, d, p.baseView, p.targetView, p.sourceView, p.targetIsBase, dirty)
 
-	type tAddedHLCandidate struct {
-		path      []byte
-		targetSum *DiffNodeSummary
-	}
-
 	var allMatched []*DiffEntry
-	tAddedHLs := make(map[uint64][]tAddedHLCandidate)
-	sTouchedBaseInos := make(map[uint64]struct{})
+	hlTracker := newTargetHardlinkTracker()
 
 	if len(normPrefix) == 0 {
-		if _, rootInoDirty := dirty.dirtyInos[RootIno]; rootInoDirty {
-			bRoot, bOK, rErr := tc.base.getInode(RootIno)
-			if rErr != nil {
-				return nil, rErr
+		rootAN, rootErr := tc.analyzeRootInode(false)
+		if rootErr != nil {
+			return nil, rootErr
+		}
+		if rootAN != nil && rootAN.emitDiff {
+			var tSum *DiffNodeSummary
+			if p.includeTargetSummary {
+				tSum = makeNodeSummary(rootAN.tNode)
 			}
-			tRoot, tOK, rErr := tc.target.getInode(RootIno)
-			if rErr != nil {
-				return nil, rErr
-			}
-			sRoot, sOK, rErr := tc.source.getInode(RootIno)
-			if rErr != nil {
-				return nil, rErr
-			}
-			if bOK && tOK && sOK {
-				rootAN, aErr := tc.analyzeAllThreePresent(&analyzedNode{path: []byte("/")}, &bRoot, &tRoot, &sRoot)
-				if aErr != nil {
-					return nil, aErr
-				}
-				if rootAN.emitDiff {
-					var tSum *DiffNodeSummary
-					if p.includeTargetSummary {
-						tSum = makeNodeSummary(rootAN.tNode)
-					}
-					allMatched = append(allMatched, &DiffEntry{
-						Path:     rootAN.path,
-						Kind:     rootAN.kind,
-						Conflict: rootAN.conflict,
-						Base:     makeNodeSummary(rootAN.oNode),
-						Target:   tSum,
-						Source:   makeNodeSummary(rootAN.sNode),
-					})
-				}
-			}
+			allMatched = append(allMatched, &DiffEntry{
+				Path:     rootAN.path,
+				Kind:     rootAN.kind,
+				Conflict: rootAN.conflict,
+				Base:     makeNodeSummary(rootAN.oNode),
+				Target:   tSum,
+				Source:   makeNodeSummary(rootAN.sNode),
+			})
 		}
 	}
 
 	walkErr := tc.walkAnalyzedTree(normPrefix, p.targetIsBase, func(an *analyzedNode) error {
-		if !p.targetIsBase && an.oNode == nil && an.tNode != nil && an.sNode == nil && (an.tNode.Mode&ModeTypeMask) != ModeDir {
-			if _, ok, rErr := tc.base.getInode(an.tNode.Ino); rErr != nil {
-				return rErr
-			} else if ok {
-				var tSum *DiffNodeSummary
-				if p.includeTargetSummary {
-					tSum = makeNodeSummary(an.tNode)
-				}
-				tAddedHLs[an.tNode.Ino] = append(tAddedHLs[an.tNode.Ino], tAddedHLCandidate{
-					path:      an.path,
-					targetSum: tSum,
-				})
-			}
-		}
-
-		if !p.targetIsBase && an.oNode != nil && (an.oNode.Mode&ModeTypeMask) != ModeDir {
-			if an.sNode == nil {
-				sTouchedBaseInos[an.oNode.Ino] = struct{}{}
-			} else if !tc.isNodeUnchangedInView(an.oNode, an.sNode) {
-				eq, eqErr := tc.nodesEqual(tc.base, an.oNode, tc.source, an.sNode)
-				if eqErr != nil {
-					return eqErr
-				}
-				if !eq {
-					sTouchedBaseInos[an.oNode.Ino] = struct{}{}
-				}
-			}
+		if obsErr := hlTracker.observe(tc, an); obsErr != nil {
+			return obsErr
 		}
 
 		if !an.emitDiff {
@@ -1888,9 +1903,9 @@ func (d *DiskStore) diffViews(ctx context.Context, p diffRunParams) (*DiffResult
 		return nil, walkErr
 	}
 
-	if !p.targetIsBase && len(tAddedHLs) > 0 {
-		for baseIno, items := range tAddedHLs {
-			if _, touched := sTouchedBaseInos[baseIno]; !touched {
+	if !p.targetIsBase && hlTracker.hasCandidates() {
+		for baseIno, items := range hlTracker.addedByIno {
+			if !hlTracker.isConflicting(baseIno) {
 				continue
 			}
 			for _, e := range allMatched {
@@ -1902,11 +1917,15 @@ func (d *DiskStore) diffViews(ctx context.Context, p diffRunParams) (*DiffResult
 				if len(normPrefix) > 0 && !matchPathPrefix(item.path, normPrefix) {
 					continue
 				}
+				var tSum *DiffNodeSummary
+				if p.includeTargetSummary {
+					tSum = makeNodeSummary(item.tNode)
+				}
 				allMatched = append(allMatched, &DiffEntry{
 					Path:     item.path,
 					Kind:     DiffKindAdded,
 					Conflict: ConflictHardlink,
-					Target:   item.targetSum,
+					Target:   tSum,
 				})
 			}
 		}
@@ -1959,7 +1978,7 @@ func (d *DiskStore) Diff(ctx context.Context, opts DiffOptions) (*DiffResult, er
 	}
 
 	dk := d.keys
-	snap := d.db.NewSnapshot()
+	snap, snapGen := d.newReadSnapshot()
 	defer func() { _ = snap.Close() }()
 
 	srcBranch, err := readBranchMeta(snap, dk, opts.SourceBranch)
@@ -1976,19 +1995,19 @@ func (d *DiskStore) Diff(ctx context.Context, opts DiffOptions) (*DiffResult, er
 		return nil, err
 	}
 
-	_, baseLayers, err := resolveCommitLayers(snap, dk, lca)
+	_, baseLayers, err := d.resolveCommitLayersWithGen(snap, lca, snapGen)
 	if err != nil {
 		return nil, err
 	}
 	targetIsBase := tgtBranch.HeadCommitID == lca
 	targetLayers := baseLayers
 	if !targetIsBase {
-		_, targetLayers, err = resolveCommitLayers(snap, dk, tgtBranch.HeadCommitID)
+		_, targetLayers, err = d.resolveCommitLayersWithGen(snap, tgtBranch.HeadCommitID, snapGen)
 		if err != nil {
 			return nil, err
 		}
 	}
-	_, sourceLayers, err := resolveCommitLayers(snap, dk, srcBranch.HeadCommitID)
+	_, sourceLayers, err := d.resolveCommitLayersWithGen(snap, srcBranch.HeadCommitID, snapGen)
 	if err != nil {
 		return nil, err
 	}
@@ -2018,14 +2037,14 @@ func (d *DiskStore) DiffCommits(ctx context.Context, opts DiffCommitsOptions) (*
 	}
 
 	dk := d.keys
-	snap := d.db.NewSnapshot()
+	snap, snapGen := d.newReadSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, baseLayers, err := resolveCommitLayers(snap, dk, opts.BaseCommitID)
+	_, baseLayers, err := d.resolveCommitLayersWithGen(snap, opts.BaseCommitID, snapGen)
 	if err != nil {
 		return nil, err
 	}
-	_, sourceLayers, err := resolveCommitLayers(snap, dk, opts.SourceCommitID)
+	_, sourceLayers, err := d.resolveCommitLayersWithGen(snap, opts.SourceCommitID, snapGen)
 	if err != nil {
 		return nil, err
 	}
@@ -2056,14 +2075,14 @@ func (d *DiskStore) DiffWork(ctx context.Context, branch string, opts DiffWorkOp
 	}
 
 	dk := d.keys
-	snap := d.db.NewSnapshot()
+	snap, snapGen := d.newReadSnapshot()
 	defer func() { _ = snap.Close() }()
 
 	bm, err := readBranchMeta(snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	_, headLayers, err := resolveCommitLayers(snap, dk, bm.HeadCommitID)
+	_, headLayers, err := d.resolveCommitLayersWithGen(snap, bm.HeadCommitID, snapGen)
 	if err != nil {
 		return nil, err
 	}

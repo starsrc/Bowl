@@ -178,7 +178,7 @@ task down
 | `proto/` · `gen/` | Protobuf / Buf 接口定义（`storage/v1/storage.proto`）与生成代码 |
 | `pkg/` | 跨模块共享的 `rpccodec` 错误映射与 `validator` 校验器 |
 | `services/storage/` | 存储服务端（`control` 控制面、`store` 存储引擎、`db` Goose 迁移与 sqlc 查询） |
-| `client/` | `bowl` CLI、Linux FUSE 客户端及容器化黑盒 E2E 测试 |
+| `client/` | `bowl` CLI、Linux FUSE 客户端及容器化黑盒 E2E 测试；`bowl-sandbox` MicroVM 沙箱（不依赖存储服务，见 [`client/cmd/bowl-sandbox`](client/cmd/bowl-sandbox/README.md)） |
 | `deploy/` | `dev` / `prod` Docker Compose（`prod` 额外集成 Prometheus / Loki / Alloy / Grafana） |
 | `e2e/` · `benchmark/` | 跨服务 E2E 测试与 `pjdfstest` / `drive9` / `fork` / `juicefs` 基准套件 |
 

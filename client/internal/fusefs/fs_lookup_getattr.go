@@ -3,7 +3,6 @@ package fusefs
 import (
 	"context"
 	"syscall"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -11,36 +10,14 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-func (fs *RawFS) lookupInodeWithContext(parentCtx context.Context, cancel <-chan struct{}, parent uint64, name string) (cachedInode, fuse.Status) {
-	parentIno, status := fs.ToServerIno(parent)
-	if status != fuse.OK {
-		return cachedInode{}, status
+func (fs *RawFS) lookupInodeWithContext(parentCtx context.Context, cancel <-chan struct{}, parent uint64, name string) (inode *storagev1.Inode, entryTTL, attrTTL float64, status fuse.Status) {
+	parentIno, st := fs.ToServerIno(parent)
+	if st != fuse.OK {
+		return nil, 0, 0, st
 	}
 	if len(name) > MaxFilenameBytes {
-		return cachedInode{}, fuse.Status(syscall.ENAMETOOLONG)
+		return nil, 0, 0, fuse.Status(syscall.ENAMETOOLONG)
 	}
-	if fs.IsFenced() {
-		return fs.lookupInodeAfterCache(parentCtx, cancel, parent, parentIno, name, cachedInode{}, false, false)
-	}
-	cached, _, negative, ok := fs.cache.lookupReadOnly(parent, name)
-	return fs.lookupInodeAfterCache(parentCtx, cancel, parent, parentIno, name, cached, negative, ok)
-}
-
-func (fs *RawFS) lookupInodeAfterCache(
-	parentCtx context.Context,
-	cancel <-chan struct{},
-	parent, parentIno uint64,
-	name string,
-	cached cachedInode,
-	negative, ok bool,
-) (cachedInode, fuse.Status) {
-	if ok {
-		if negative {
-			return cachedInode{}, fuse.ENOENT
-		}
-		return cached, fuse.OK
-	}
-	epoch, generation := fs.cache.snapshot()
 	ctx, cancelFunc := fs.RPCContextFrom(parentCtx, cancel)
 	defer cancelFunc()
 	resp, err := fs.client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
@@ -49,55 +26,29 @@ func (fs *RawFS) lookupInodeAfterCache(
 		DiskId:    fs.cfg.DiskID,
 		Branch:    fs.cfg.Branch,
 	}))
-	fenced := fs.IsFenced()
-	if !fenced && fs.cache.version() != epoch {
-		return cachedInode{}, fuse.Status(syscall.ESTALE)
-	}
 	if err != nil {
-		status := fs.ToStatus(err)
-		if !fenced && !fs.IsFenced() && status == fuse.ENOENT {
-			fs.metrics.incNSCacheMiss(nsCacheNegativeEntry)
-			fs.cache.putEntryAtIf(generation, epoch, parent, name, 0, fs.cfg.EntryTimeoutSeconds)
-		}
-		return cachedInode{}, status
+		return nil, 0, 0, fs.ToStatus(err)
 	}
-	inode := resp.Msg.GetInode()
+	inode = resp.Msg.GetInode()
 	if inode == nil || inode.GetAttr() == nil {
-		return cachedInode{}, fuse.EIO
+		return nil, 0, 0, fuse.EIO
 	}
-	if fenced {
-		return cachedInode{inode: inode}, fuse.OK
+	if fs.IsFenced() {
+		return inode, 0, 0, fuse.OK
 	}
-	ino := fs.ToKernelIno(inode.GetIno())
+	fs.stage.ObserveServerInode(inode.GetIno(), inode, false)
 	fs.stage.OverlayInode(inode.GetIno(), inode)
-	fs.recordInodeSpecial(ino, inode)
-	if fs.cfg.IsReadOnly() {
-		fs.readAhead.ObserveInode(inode.GetIno(), inode)
-	}
-	cached = cachedInode{inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds()}
-	fs.cache.putEntryAtIf(generation, epoch, parent, name, ino, cached.entryTimeout)
-	fs.cache.putInodeAtIf(generation, epoch, ino, inode, cached.entryTimeout, cached.attrTimeout)
-	return cached, fuse.OK
+	return inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
-func (fs *RawFS) getInodeWithContext(parentCtx context.Context, cancel <-chan struct{}, ino uint64) (cachedInode, fuse.Status) {
-	if inode, ok := fs.tmpMgr.LocalInode(ino); ok {
-		return cachedInode{inode: inode}, fuse.OK
+func (fs *RawFS) getAttrInodeWithContext(parentCtx context.Context, cancel <-chan struct{}, ino uint64) (inode *storagev1.Inode, attrTTL float64, status fuse.Status) {
+	if localInode, ok := fs.tmpMgr.LocalInode(ino); ok {
+		return localInode, 0, fuse.OK
 	}
-	serverIno, status := fs.ToServerIno(ino)
-	if status != fuse.OK {
-		return cachedInode{}, status
+	serverIno, st := fs.ToServerIno(ino)
+	if st != fuse.OK {
+		return nil, 0, st
 	}
-	if !fs.IsFenced() {
-		if cached, ok := fs.cache.inodeReadOnly(ino); ok {
-			return cached, fuse.OK
-		}
-	}
-	return fs.getInodeMissWithContext(parentCtx, cancel, ino, serverIno)
-}
-
-func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-chan struct{}, ino, serverIno uint64) (cachedInode, fuse.Status) {
-	epoch, generation := fs.cache.snapshot()
 	ctx, cancelFunc := fs.RPCContextFrom(parentCtx, cancel)
 	defer cancelFunc()
 	resp, err := fs.client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
@@ -105,64 +56,24 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 		DiskId: fs.cfg.DiskID,
 		Branch: fs.cfg.Branch,
 	}))
-	fenced := fs.IsFenced()
-	if !fenced && fs.cache.version() != epoch {
-		return cachedInode{}, fuse.Status(syscall.ESTALE)
-	}
 	if err != nil {
-		return cachedInode{}, fs.ToStatus(err)
+		return nil, 0, fs.ToStatus(err)
 	}
-	inode := resp.Msg.GetInode()
+	inode = resp.Msg.GetInode()
 	if inode == nil || inode.GetAttr() == nil {
-		return cachedInode{}, fuse.EIO
+		return nil, 0, fuse.EIO
 	}
-	if fenced {
-		return cachedInode{inode: inode}, fuse.OK
+	if fs.IsFenced() {
+		return inode, 0, fuse.OK
 	}
+	fs.stage.ObserveServerInode(serverIno, inode, false)
 	fs.stage.OverlayInode(serverIno, inode)
-	fs.recordInodeSpecial(ino, inode)
-	if fs.cfg.IsReadOnly() {
-		fs.readAhead.ObserveInode(serverIno, inode)
-	}
-	cached := cachedInode{inode: inode, attrTimeout: resp.Msg.GetAttrTimeoutSeconds()}
-	fs.cache.refreshInodeAtIf(generation, epoch, ino, inode, cached.attrTimeout)
-	return cached, fuse.OK
+	fs.recordKnownInode(ino, inode)
+	return inode, resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
 func (fs *RawFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpLookup)
-	if fs.fencedStatus.Load() == 0 && !fs.isVirtualStatsName(header.NodeId, name) && len(name) <= MaxFilenameBytes && fs.cfg.AttrTimeoutSeconds > 0 {
-		if _, st := fs.ToServerIno(header.NodeId); st == fuse.OK {
-			fs.lifecycleMu.RLock()
-			cached, _, negative, ok := fs.cache.lookupReadOnly(header.NodeId, name)
-			if ok && !negative {
-				fs.FillEntryOut(out, cached.inode, cached.entryTimeout, cached.attrTimeout)
-				fs.stage.OverlayAttr(cached.inode.GetIno(), &out.Attr)
-				out.NodeId = fs.tmpMgr.ObserveKernelLookup(cached.inode.GetIno())
-				out.Ino = out.NodeId
-				fs.lifecycleMu.RUnlock()
-				fs.metrics.endOp(OpLookup, start, fuse.OK, 0)
-				return fuse.OK
-			}
-			parentIno, _ := fs.ToServerIno(header.NodeId)
-			opCtx, endSpan := fs.startFuseOp(OpLookup)
-			cached, status = fs.lookupInodeAfterCache(opCtx, cancel, header.NodeId, parentIno, name, cached, negative, ok)
-			if status == fuse.OK {
-				fs.FillEntryOut(out, cached.inode, cached.entryTimeout, cached.attrTimeout)
-				fs.stage.OverlayAttr(cached.inode.GetIno(), &out.Attr)
-				out.NodeId = fs.tmpMgr.ObserveKernelLookup(cached.inode.GetIno())
-				out.Ino = out.NodeId
-			}
-			fs.lifecycleMu.RUnlock()
-			endSpan(status)
-			fs.metrics.endOp(OpLookup, start, status, 0)
-			return status
-		}
-	}
-	return fs.lookupSlow(cancel, header, name, out, start)
-}
-
-func (fs *RawFS) lookupSlow(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut, start time.Time) (status fuse.Status) {
 	opCtx, endSpan := fs.startFuseOp(OpLookup)
 	defer func() {
 		endSpan(status)
@@ -178,61 +89,22 @@ func (fs *RawFS) lookupSlow(cancel <-chan struct{}, header *fuse.InHeader, name 
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	cached, status := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
+	inode, entryTTL, attrTTL, status := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
 	if status == fuse.OK {
-		fs.FillEntryOut(out, cached.inode, cached.entryTimeout, cached.attrTimeout)
-		fs.stage.OverlayAttr(cached.inode.GetIno(), &out.Attr)
-		out.NodeId = fs.tmpMgr.ObserveKernelLookup(cached.inode.GetIno())
+		fs.FillEntryOut(out, inode, entryTTL, attrTTL)
+		fs.stage.OverlayAttr(inode.GetIno(), &out.Attr)
+		out.NodeId = fs.tmpMgr.ObserveKernelLookup(inode.GetIno())
 		out.Ino = out.NodeId
+		if !fs.IsFenced() {
+			fs.recordKnownInode(out.NodeId, inode)
+			fs.dentries.put(header.NodeId, name, out.NodeId)
+		}
 	}
 	return status
 }
 
 func (fs *RawFS) GetAttr(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fuse.AttrOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpGetAttr)
-	if fs.fencedStatus.Load() == 0 && !fs.isVirtualStatsIno(in.NodeId) && fs.cfg.AttrTimeoutSeconds > 0 {
-		if serverIno, st := fs.ToServerIno(in.NodeId); st == fuse.OK {
-			fs.lifecycleMu.RLock()
-			if inode, removed := fs.handles.RemovedDir(in.NodeId); removed {
-				fs.FillAttrOut(out, inode, 0)
-				fs.lifecycleMu.RUnlock()
-				fs.metrics.endOp(OpGetAttr, start, fuse.OK, 0)
-				return fuse.OK
-			}
-			if handled, tmpSt := fs.tmpMgr.GetAttr(in.NodeId, &out.Attr); handled {
-				out.SetTimeout(0)
-				fs.lifecycleMu.RUnlock()
-				if tmpSt != fuse.OK {
-					_, endSpan := fs.startFuseOp(OpGetAttr)
-					endSpan(tmpSt)
-				}
-				fs.metrics.endOp(OpGetAttr, start, tmpSt, 0)
-				return tmpSt
-			}
-			if cached, ok := fs.cache.inodeReadOnly(in.NodeId); ok {
-				fs.FillAttrOut(out, cached.inode, cached.attrTimeout)
-				fs.stage.OverlayAttr(serverIno, &out.Attr)
-				fs.lifecycleMu.RUnlock()
-				fs.metrics.endOp(OpGetAttr, start, fuse.OK, 0)
-				return fuse.OK
-			}
-			opCtx, endSpan := fs.startFuseOp(OpGetAttr)
-			var cached cachedInode
-			cached, status = fs.getInodeMissWithContext(opCtx, cancel, in.NodeId, serverIno)
-			if status == fuse.OK {
-				fs.FillAttrOut(out, cached.inode, cached.attrTimeout)
-				fs.stage.OverlayAttr(serverIno, &out.Attr)
-			}
-			fs.lifecycleMu.RUnlock()
-			endSpan(status)
-			fs.metrics.endOp(OpGetAttr, start, status, 0)
-			return status
-		}
-	}
-	return fs.getAttrSlow(cancel, in, out, start)
-}
-
-func (fs *RawFS) getAttrSlow(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fuse.AttrOut, start time.Time) (status fuse.Status) {
 	opCtx, endSpan := fs.startFuseOp(OpGetAttr)
 	defer func() {
 		endSpan(status)
@@ -254,13 +126,13 @@ func (fs *RawFS) getAttrSlow(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fu
 		fs.FillAttrOut(out, inode, 0)
 		return fuse.OK
 	}
-	if handled, st := fs.tmpMgr.GetAttr(in.NodeId, &out.Attr); handled {
+	if handled, tmpSt := fs.tmpMgr.GetAttr(in.NodeId, &out.Attr); handled {
 		out.SetTimeout(0)
-		return st
+		return tmpSt
 	}
-	cached, status := fs.getInodeWithContext(opCtx, cancel, in.NodeId)
+	inode, attrTTL, status := fs.getAttrInodeWithContext(opCtx, cancel, in.NodeId)
 	if status == fuse.OK {
-		fs.FillAttrOut(out, cached.inode, cached.attrTimeout)
+		fs.FillAttrOut(out, inode, attrTTL)
 		fs.stage.OverlayAttr(serverIno, &out.Attr)
 	}
 	return status

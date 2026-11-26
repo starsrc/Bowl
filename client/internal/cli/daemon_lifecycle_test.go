@@ -291,7 +291,7 @@ func TestAdminServerShutdown_GivenRepeatedCallsAndNilReceiver_IsIdempotentAndRel
 	defer func() { _ = obs.Shutdown(context.Background()) }()
 
 	rawFS := fusefs.NewRawFS(nil, fusefs.Config{DiskID: testDiskID1, Mode: fusefs.MountModeRO})
-	admin, err := startAdminServer(fixedAddr, obs, rawFS, nil)
+	admin, err := startAdminServer(fixedAddr, obs, rawFS)
 	require.NoError(t, err)
 	require.NotNil(t, admin)
 

@@ -91,7 +91,6 @@ func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr s
 		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 	}))
-	fs.cache.invalidateInode(input.NodeId)
 	if err != nil {
 		return fs.ToStatus(err)
 	}
@@ -250,7 +249,6 @@ func (fs *RawFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr
 		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 	}))
-	fs.cache.invalidateInode(header.NodeId)
 	if err != nil {
 		return fs.ToStatus(err)
 	}

@@ -36,7 +36,6 @@ func (fs *RawFS) Mkdir(_ <-chan struct{}, input *fuse.MkdirIn, name string, out 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 
-	epoch := fs.cache.version()
 	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
@@ -55,16 +54,13 @@ func (fs *RawFS) Mkdir(_ <-chan struct{}, input *fuse.MkdirIn, name string, out 
 	}
 	fs.markMetaDirty()
 
-	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, resp.Msg.GetInode(), 1, resp.Msg.GetAttrTimeoutSeconds())
 	inode := resp.Msg.GetInode()
 	if inode != nil {
 		child := fs.ToKernelIno(inode.GetIno())
-		fs.cache.putEntryAt(epoch, input.NodeId, name, child)
-		fs.cache.putInodeAt(epoch, child, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
-
-		fs.cache.markNewDirWithParentAt(epoch, child, input.NodeId)
+		fs.dentries.put(input.NodeId, name, child)
+		fs.recordKnownInode(child, inode)
 	}
-	fs.FillEntryOut(out, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
 }
 
@@ -94,7 +90,6 @@ func (fs *RawFS) Mknod(_ <-chan struct{}, input *fuse.MknodIn, name string, out 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 
-	epoch := fs.cache.version()
 	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
@@ -114,15 +109,14 @@ func (fs *RawFS) Mknod(_ <-chan struct{}, input *fuse.MknodIn, name string, out 
 	}
 	fs.markMetaDirty()
 
-	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, resp.Msg.GetInode(), 0, resp.Msg.GetAttrTimeoutSeconds())
 	inode := resp.Msg.GetInode()
 	if inode != nil {
 		child := fs.ToKernelIno(inode.GetIno())
-		fs.cache.putEntryAt(epoch, input.NodeId, name, child)
-		fs.cache.putInodeAt(epoch, child, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+		fs.dentries.put(input.NodeId, name, child)
+		fs.recordKnownInode(child, inode)
 		fs.caps.markAbsent(child)
 	}
-	fs.FillEntryOut(out, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
 }
 
@@ -149,44 +143,33 @@ func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name strin
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 
-	child, _ := fs.cache.entry(header.NodeId, name)
+	child, known := fs.dentries.get(header.NodeId, name)
 	var inode *storagev1.Inode
-	if child != 0 {
-		if cached, ok := fs.cache.peekInode(child); ok {
-			inode = cached.inode
-		}
-	}
-	if fs.handles.AnyOpen() {
-		cached, st := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
+	if !known && fs.handles.AnyOpenDirs() {
+		looked, _, _, st := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
 		if st != fuse.OK {
 			return st
 		}
-		inode = cached.inode
+		inode = looked
 		child = fs.ToKernelIno(inode.GetIno())
 	}
 	if child != 0 {
 		unlock := fs.inodeLocks.lock(child)
 		defer unlock()
 		if fs.handles.IsOpen(child) && (inode == nil || inode.GetAttr() == nil) {
-			if cached, ok := fs.cache.peekInode(child); ok {
-				inode = cached.inode
-			}
-			if inode == nil || inode.GetAttr() == nil {
-				refreshed, st := fs.getInodeWithContext(opCtx, cancel, child)
-				switch st {
-				case fuse.OK:
-					inode = refreshed.inode
-				case fuse.ENOENT:
-					inode = nil
-				default:
-					return st
-				}
+			refreshed, _, st := fs.getAttrInodeWithContext(opCtx, cancel, child)
+			switch st {
+			case fuse.OK:
+				inode = refreshed
+			case fuse.ENOENT:
+				inode = nil
+			default:
+				return st
 			}
 		}
 	}
 	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
-	epoch := fs.cache.version()
 	_, err := fs.client.Rmdir(ctx, connect.NewRequest(&storagev1.RmdirRequest{
 		ParentIno: parentIno,
 		Name:      []byte(name),
@@ -199,13 +182,11 @@ func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name strin
 	}
 	fs.markMetaDirty()
 
-	fs.cache.invalidateDirListingTouchParentNowAt(epoch, header.NodeId, -1)
-
-	fs.cache.putEntryAt(epoch, header.NodeId, name, 0)
+	fs.dentries.deleteName(header.NodeId, name)
 	if child != 0 {
+		fs.dentries.forgetChild(child)
+		fs.forgetKnownInode(child)
 		fs.handles.MarkRemovedDir(child, inode)
-		fs.cache.invalidateInode(child)
-		fs.cache.invalidateDir(child)
 	}
 	return fuse.OK
 }
@@ -237,20 +218,14 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	defer fs.lifecycleMu.RUnlock()
 
 	seq0 := fs.topologySeq.Load()
-	child, _ := fs.cache.entry(header.NodeId, name)
+	child, known := fs.dentries.get(header.NodeId, name)
 	var inode *storagev1.Inode
-	if child != 0 {
-		if cached, ok := fs.cache.peekInode(child); ok {
-			inode = cached.inode
-		}
-	}
-	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending()
-	if needLookup {
-		cached, st := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
+	if !known && (fs.handles.AnyOpenFiles() || fs.stage.HasAnyPending()) {
+		looked, _, _, st := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
 		if st != fuse.OK {
 			return st
 		}
-		inode = cached.inode
+		inode = looked
 		child = fs.ToKernelIno(inode.GetIno())
 	}
 
@@ -263,7 +238,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 			childServerIno = sIno
 			hasChildServerIno = true
 		}
-		if hasChildServerIno && inode.GetAttr().GetFlags()&ProtoFlagImmutable != 0 {
+		if hasChildServerIno && inode != nil && inode.GetAttr().GetFlags()&ProtoFlagImmutable != 0 {
 			if err := fs.stage.BarrierInode(barrierCtx, childServerIno); err != nil {
 				return fs.stageErrToStatus(err)
 			}
@@ -271,13 +246,14 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 
 		unlock := fs.inodeLocks.lock(child)
 		defer unlock()
-		needRevalidate := fs.topologySeq.Load() != seq0 && (fs.handles.AnyOpen() || fs.stage.HasAnyPending())
-		needOpenChildAttr := fs.handles.IsOpen(child) && (inode == nil || inode.GetAttr() == nil)
-		if needRevalidate || needOpenChildAttr {
-			refreshed, st := fs.getInodeWithContext(barrierCtx, nil, child)
+		childOpen := fs.handles.IsOpen(child)
+		childStaged := hasChildServerIno && fs.stage.HasPending(childServerIno)
+		needRevalidate := fs.topologySeq.Load() != seq0 && (childOpen || childStaged)
+		if (childOpen || childStaged) && (inode == nil || inode.GetAttr() == nil || needRevalidate) {
+			refreshed, _, st := fs.getAttrInodeWithContext(barrierCtx, nil, child)
 			switch st {
 			case fuse.OK:
-				inode = refreshed.inode
+				inode = refreshed
 				if hasChildServerIno && inode.GetAttr().GetFlags()&ProtoFlagImmutable != 0 {
 					if err := fs.stage.BarrierInode(barrierCtx, childServerIno); err != nil {
 						return fs.stageErrToStatus(err)
@@ -293,7 +269,6 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	open := child != 0 && fs.handles.IsOpen(child)
 	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
-	epoch := fs.cache.version()
 	_, err := fs.client.Unlink(ctx, connect.NewRequest(&storagev1.UnlinkRequest{
 		ParentIno:    parentIno,
 		Name:         []byte(name),
@@ -307,25 +282,20 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	}
 	fs.markMetaDirty()
 
-	fs.cache.invalidateDirListingTouchParentNowAt(epoch, header.NodeId, 0)
-
-	fs.cache.putEntryAt(epoch, header.NodeId, name, 0)
+	fs.dentries.deleteName(header.NodeId, name)
 	if child != 0 {
-		fs.cache.invalidateInode(child)
+		fs.forgetKnownInode(child)
 	}
 	fs.topologySeq.Add(1)
 	if inode != nil && inode.GetAttr() != nil && inode.GetAttr().GetNlink() == 1 {
 		if open {
 			fs.markOrphanWithContext(opCtx, child)
-		} else {
-			if hasChildServerIno {
-				fs.stage.DiscardInode(childServerIno)
-				fs.readAhead.InvalidateInode(childServerIno)
-			}
-			if child != 0 {
-				fs.forgetInodeSpecial(child)
-			}
+		} else if hasChildServerIno {
+			fs.stage.DiscardInode(childServerIno)
+			fs.readAhead.InvalidateInode(childServerIno)
 		}
+	} else if !open && hasChildServerIno {
+		fs.readAhead.InvalidateInode(childServerIno)
 	}
 	return fuse.OK
 }

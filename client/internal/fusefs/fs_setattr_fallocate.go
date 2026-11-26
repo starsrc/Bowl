@@ -36,7 +36,6 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	epoch := fs.cache.version()
 	valid := input.Valid
 	hasUpdate := valid&setAttrUpdateMask != 0
 	if hasUpdate {
@@ -55,7 +54,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	}, &out.Attr); local {
 		out.SetTimeout(0)
 		if localSt == fuse.OK {
-			fs.recordInodeSpecial(input.NodeId, updatedInode)
+			fs.recordKnownInode(input.NodeId, updatedInode)
 			if valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
 				fs.caps.markAbsent(input.NodeId)
 			}
@@ -124,9 +123,9 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	}
 
 	if !hasUpdate {
-		cached, st := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
+		inode, attrTTL, st := fs.getAttrInodeWithContext(opCtx, cancel, input.NodeId)
 		if st == fuse.OK {
-			fs.FillAttrOut(out, cached.inode, cached.attrTimeout)
+			fs.FillAttrOut(out, inode, attrTTL)
 			fs.stage.OverlayAttr(ino, &out.Attr)
 		}
 		return st
@@ -146,14 +145,12 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 
 	resp, err := fs.client.SetAttr(ctx, connect.NewRequest(req))
 	if err != nil {
-		fs.cache.invalidateInode(input.NodeId)
 		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 
-	fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
+	fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
 	fs.stage.ObserveServerInode(ino, resp.Msg.GetInode(), valid&fuse.FATTR_SIZE != 0 && input.Size == 0)
-	fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), resp.Msg.GetAttrTimeoutSeconds())
 	if valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
 		fs.caps.markAbsent(input.NodeId)
 	}
@@ -201,7 +198,7 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 
 	if updatedInode, local, localSt := fs.tmpMgr.Allocate(input.NodeId, input.Offset, input.Length, input.Mode); local {
 		if localSt == fuse.OK {
-			fs.recordInodeSpecial(input.NodeId, updatedInode)
+			fs.recordKnownInode(input.NodeId, updatedInode)
 			fs.caps.markAbsent(input.NodeId)
 		}
 		return localSt
@@ -234,7 +231,6 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 	defer fs.readAhead.InvalidateInode(ino)
 
 	_, err := fs.client.Fallocate(ctx, connect.NewRequest(req))
-	fs.cache.invalidateInode(input.NodeId)
 	if err != nil {
 		return fs.ToStatus(err)
 	}

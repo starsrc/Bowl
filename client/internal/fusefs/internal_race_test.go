@@ -11,10 +11,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
-	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 func runHandleOrphanRaceRound(t *testing.T, round int) {
@@ -126,74 +124,6 @@ func waitUntilInodeLockRefsAtLeast(t *testing.T, l *inodeLocks, ino uint64, want
 	}
 }
 
-func runMonotonicSizeRace(t *testing.T) {
-	t.Helper()
-	cache := NewNamespaceCache(64)
-	cache.configure(1, 1.0, 1.0)
-	const ino uint64 = 500
-	epoch := cache.version()
-
-	makeInode := func(sz uint64) *storagev1.Inode {
-		now := timestamppb.Now()
-		return &storagev1.Inode{
-			Ino:        ino,
-			Generation: 1,
-			Attr: &storagev1.InodeAttribute{
-				Mode:   uint32(syscall.S_IFREG | 0o644),
-				Size:   sz,
-				Nlink:  1,
-				Blocks: (sz + 511) / 512,
-				Atime:  now,
-				Mtime:  now,
-				Ctime:  now,
-			},
-		}
-	}
-
-	cache.putEntryAt(epoch, 1, "race.bin", ino)
-	cache.putInodeAt(epoch, ino, makeInode(0), 1.0, 1.0)
-	snapEpoch, snapGen := cache.snapshot()
-	cache.stageWriteInodeAt(epoch, ino, 8192, timestamppb.Now())
-	cache.refreshInodeFromWriteAt(epoch, ino, makeInode(4096), 8192, 1.0)
-	cache.putInodeAtIf(snapGen, snapEpoch, ino, makeInode(0), 1.0, 1.0)
-
-	got, ok := cache.inodeReadOnly(ino)
-	require.True(t, ok)
-	require.Equal(t, uint64(8192), got.inode.GetAttr().GetSize(), "过期快照回填不得使缓存尺寸回退")
-
-	var stop atomic.Bool
-	var wg sync.WaitGroup
-	var errMsg atomic.Value
-
-	wg.Go(func() {
-		for sz := uint64(8192); sz <= 8192+512*1024; sz += 1024 {
-			cache.stageWriteInodeAt(epoch, ino, sz, timestamppb.Now())
-			cache.refreshInodeFromWriteAt(epoch, ino, makeInode(sz), sz, 1.0)
-		}
-		stop.Store(true)
-	})
-
-	for range 4 {
-		wg.Go(func() {
-			var last uint64
-			for !stop.Load() {
-				cached, _, negative, hit := cache.lookupReadOnly(1, "race.bin")
-				if hit && !negative && cached.inode != nil && cached.inode.GetAttr() != nil {
-					cur := cached.inode.GetAttr().GetSize()
-					if cur < last {
-						errMsg.Store(fmt.Sprintf("观测到尺寸非单调回退: prev=%d cur=%d", last, cur))
-						return
-					}
-					last = cur
-				}
-				runtime.Gosched()
-			}
-		})
-	}
-	wg.Wait()
-	require.Nil(t, errMsg.Load())
-}
-
 func runHandleOrphanRaceSuite(t *testing.T, rounds int) {
 	t.Helper()
 	for round := range rounds {
@@ -221,11 +151,8 @@ func waitUntilReadAheadSlotWaitersAtLeast(t *testing.T, coord *ReadAheadCoordina
 		waiters := 0
 		if hra != nil {
 			hra.mu.Lock()
-			for _, s := range hra.slots {
-				if s.offset == alignedOffset {
-					waiters = s.waiters
-					break
-				}
+			if hra.pf != nil && hra.pf.offset == alignedOffset {
+				waiters = hra.pf.waiters
 			}
 			hra.mu.Unlock()
 		}
@@ -405,11 +332,7 @@ func TestReadAhead_全局并发预算与单飞合并及随机零放大与失效�
 	})
 }
 
-func TestNamespaceCache与InodeLocks_并发写查单调尺寸不变式与互斥竞争指标(t *testing.T) {
-	t.Run("并发写入推进与快照回填保持尺寸单调不倒退", func(t *testing.T) {
-		runMonotonicSizeRace(t)
-	})
-
+func TestInodeLocks_互斥竞争指标与清理(t *testing.T) {
 	t.Run("inodeLocks竞争阻塞释放后准确记录ContendedAcquisitions并清理表项", func(t *testing.T) {
 
 		var locks inodeLocks

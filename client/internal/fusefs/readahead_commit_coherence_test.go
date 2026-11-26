@@ -182,7 +182,7 @@ func TestStep69_StageOnCommit_InvalidatesReadAheadWindowAndPrefetchSlots(t *test
 		wrFh, st := fs.openHandle(ino, syscall.O_RDWR, false)
 		require.Equal(t, fuse.OK, st)
 
-		_, handled, err := fs.stage.WriteForHandle(context.Background(), nil, wrFh, ino, ino, 0, newData, fs.cache.version())
+		_, handled, err := fs.stage.WriteForHandle(context.Background(), nil, wrFh, ino, ino, 0, newData, 0)
 		require.NoError(t, err)
 		require.True(t, handled)
 		fs.stage.SealInode(ino)
@@ -325,7 +325,7 @@ func TestStep69_StageOnCommit_InvalidatesReadAheadWindowAndPrefetchSlots(t *test
 			context.Background(),
 			ino,
 			ino,
-			fs.cache.version(),
+			0,
 			tmpFile,
 			StagePromotedMeta{Size: fileLen, Mode: syscall.S_IFREG | 0o644},
 			[]stageExtent{{offset: 0, length: fileLen}},

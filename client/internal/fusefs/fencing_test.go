@@ -517,8 +517,8 @@ func TestRawFS_FenceAbortsStagedWritesAndPreventsStaleReadsAndUploads(t *testing
 	require.Equal(t, uint64(len("server-v2-from-new-writer")), attr.Size)
 }
 
-func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
-	t.Run("preempted mount clears and bypasses NamespaceCache and ReadAheadCoordinator on all read ops", func(t *testing.T) {
+func TestRawFS_FenceClearsAndBypassesReadAheadAndKnownInodes(t *testing.T) {
+	t.Run("preempted mount clears and bypasses knownInodes and ReadAheadCoordinator on all read ops", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(60.0, 60.0))
 		initialData := buildRepeatingBytes(512*1024, 'A')
@@ -528,11 +528,10 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 
 		_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "data.bin")
 		_ = mustGetAttr(t, fs, fileIno)
-		_ = collectDirEntryNames(t, fs, fuse.FUSE_ROOT_ID)
+		_, _ = readAllDirEntries(t, fs, fuse.FUSE_ROOT_ID, true, 64*1024)
 		targetBefore, rlSt := fs.Readlink(nil, &fuse.InHeader{NodeId: linkIno})
 		requireStatus(t, "Readlink warm", fuse.OK, rlSt)
 		require.Equal(t, "old-target", string(targetBefore))
-		require.Positive(t, fs.Snapshot().NamespaceCache.Entries, "NamespaceCache must be populated before fence")
 
 		var roOpen fuse.OpenOut
 		requireStatus(t, "Open RO warm", fuse.OK, fs.Open(nil, &fuse.OpenIn{
@@ -557,8 +556,6 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 
 		fs.Fence(fuse.EBUSY, "writer epoch superseded")
 
-		require.Zero(t, fs.Snapshot().NamespaceCache.Entries, "NamespaceCache must be empty immediately after Fence")
-
 		lookupsBefore := srv.lookupCalls.Load()
 		e1 := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "created-by-new-writer.txt")
 		e2 := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "created-by-new-writer.txt")
@@ -568,7 +565,6 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		require.Zero(t, e1.EntryValidNsec)
 		require.Zero(t, e1.AttrValid)
 		require.Zero(t, e1.AttrValidNsec)
-		require.Zero(t, fs.Snapshot().NamespaceCache.Entries, "fenced Lookup must not write back to NamespaceCache")
 
 		getAttrsBefore := srv.getAttrCalls.Load()
 		a1 := mustGetAttr(t, fs, fileIno)
@@ -578,7 +574,6 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		require.Equal(t, uint64(len(updatedData)), a2.Size)
 		require.Zero(t, a1.AttrValid)
 		require.Zero(t, a1.AttrValidNsec)
-		require.Zero(t, fs.Snapshot().NamespaceCache.Entries, "fenced GetAttr must not write back to NamespaceCache")
 
 		var roOpen2 fuse.OpenOut
 		getAttrsBefore = srv.getAttrCalls.Load()
@@ -597,10 +592,9 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		require.Equal(t, readsBefore+2, srv.readCalls.Load(), "fenced Read must pass through directly to server on every call")
 
 		readDirsBefore := srv.readDirPlusCalls.Load()
-		_ = collectDirEntryNames(t, fs, fuse.FUSE_ROOT_ID)
-		_ = collectDirEntryNames(t, fs, fuse.FUSE_ROOT_ID)
-		require.Equal(t, readDirsBefore+2, srv.readDirPlusCalls.Load(), "fenced ReadDirPlus must bypass cache on every call")
-		require.Zero(t, fs.Snapshot().NamespaceCache.Entries, "fenced ReadDirPlus must not write back to NamespaceCache")
+		_, _ = readAllDirEntries(t, fs, fuse.FUSE_ROOT_ID, true, 64*1024)
+		_, _ = readAllDirEntries(t, fs, fuse.FUSE_ROOT_ID, true, 64*1024)
+		require.GreaterOrEqual(t, srv.readDirPlusCalls.Load(), readDirsBefore+2, "fenced ReadDirPlus must bypass cache on every call")
 
 		readlinksBefore := srv.readlinkCalls.Load()
 		rl1, st1 := fs.Readlink(nil, &fuse.InHeader{NodeId: linkIno})
@@ -739,7 +733,6 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 
 		snap := fs.Snapshot()
 		require.Zero(t, snap.Handles.OpenFiles)
-		require.Zero(t, snap.NamespaceCache.Entries)
 		require.Zero(t, snap.TmpFile.ActiveFiles)
 		require.Zero(t, snap.Queues.OrphanInodes)
 		require.Zero(t, snap.Queues.ReleaseQueueDepth)
@@ -822,4 +815,66 @@ func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightPromo
 	close(releaseWrites)
 
 	fs.OnUnmount()
+}
+
+func TestStep20_RawFS_MountLeaseReadinessAndRefresh(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		now = time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	)
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	advance := func(d time.Duration) {
+		mu.Lock()
+		now = now.Add(d)
+		mu.Unlock()
+	}
+
+	fs := fusefs.NewRawFS(nil, fusefs.Config{
+		DiskID:          "disk-step20-lease",
+		RootIno:         1,
+		MountID:         "01950000-0000-7000-9000-000000000020",
+		LeaseTTLSeconds: 30,
+		NowFn:           clock,
+	})
+	t.Cleanup(fs.OnUnmount)
+
+	require.NoError(t, fs.CheckReady())
+
+	advance(29 * time.Second)
+	require.NoError(t, fs.CheckReady())
+
+	advance(time.Second)
+	err := fs.CheckReady()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "mount lease expired")
+
+	fs.RefreshMountLease(30)
+	require.NoError(t, fs.CheckReady())
+
+	fs.Fence(fuse.EBUSY, "writer epoch superseded")
+	err = fs.CheckReady()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "writer epoch superseded")
+
+	fs.RefreshMountLease(60)
+	err = fs.CheckReady()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "writer epoch superseded")
+
+	leaseFree := fusefs.NewRawFS(nil, fusefs.Config{
+		DiskID:  "disk-step20-lease-free",
+		RootIno: 1,
+		NowFn:   clock,
+	})
+	t.Cleanup(leaseFree.OnUnmount)
+	advance(time.Hour)
+	require.NoError(t, leaseFree.CheckReady())
+
+	var nilFS *fusefs.RawFS
+	require.NoError(t, nilFS.CheckReady())
+	nilFS.RefreshMountLease(30)
 }

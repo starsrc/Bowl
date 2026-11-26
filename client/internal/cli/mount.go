@@ -102,58 +102,6 @@ type mountLeaseInfo struct {
 	leaseTTLSeconds uint32
 }
 
-type mountLeaseTracker struct {
-	mu             sync.Mutex
-	active         bool
-	leaseExpiresAt time.Time
-	now            func() time.Time
-}
-
-func newMountLeaseTracker(lease mountLeaseInfo, nowFn func() time.Time) *mountLeaseTracker {
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-	t := &mountLeaseTracker{
-		active: lease.mountID != "",
-		now:    nowFn,
-	}
-	if t.active {
-		t.leaseExpiresAt = nowFn().Add(time.Duration(lease.leaseTTLSeconds) * time.Second)
-	}
-	return t
-}
-
-func (t *mountLeaseTracker) refresh(ttlSeconds uint32) {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	if t.active {
-		t.leaseExpiresAt = t.now().Add(time.Duration(ttlSeconds) * time.Second)
-	}
-	t.mu.Unlock()
-}
-
-func checkMountLeaseReady(rawFS *fusefs.RawFS, tracker *mountLeaseTracker) error {
-	if rawFS != nil && rawFS.IsFenced() {
-		if reason := rawFS.FenceReason(); reason != "" {
-			return fmt.Errorf("mount fenced: %s", reason)
-		}
-		return errors.New("mount fenced")
-	}
-	if tracker != nil {
-		tracker.mu.Lock()
-		active := tracker.active
-		expiresAt := tracker.leaseExpiresAt
-		now := tracker.now()
-		tracker.mu.Unlock()
-		if active && !now.Before(expiresAt) {
-			return fmt.Errorf("mount lease expired at %s", expiresAt.UTC().Format(time.RFC3339))
-		}
-	}
-	return nil
-}
-
 func defaultMountRenewInterval(leaseTTLSeconds uint32) time.Duration {
 	d := time.Duration(leaseTTLSeconds) * time.Second / 3
 	if d < time.Second {
@@ -250,7 +198,6 @@ func (rt *cliRuntime) startMountLeaseRenewer(
 	cfg *fusefs.Config,
 	lease mountLeaseInfo,
 	rawFS *fusefs.RawFS,
-	tracker *mountLeaseTracker,
 	logger *slog.Logger,
 ) func() {
 	if lease.mountID == "" {
@@ -331,7 +278,7 @@ func (rt *cliRuntime) startMountLeaseRenewer(
 			if nextTTL := resp.Msg.GetLeaseTtlSeconds(); nextTTL > 0 {
 				currentTTL = nextTTL
 			}
-			tracker.refresh(currentTTL)
+			rawFS.RefreshMountLease(currentTTL)
 			normalInterval = rt.mountRenewIntervalFn(currentTTL)
 			timer.Reset(normalInterval)
 		}
@@ -602,7 +549,9 @@ func (rt *cliRuntime) runMount(ctx context.Context, opts *mountOptions, baseCfg 
 		unmountMountLease(client, cfg.DiskID, lease.mountID, mountUnmountRPCTimeout, logger)
 		return cancelErr
 	}
-	leaseTracker := newMountLeaseTracker(lease, rt.mountNowFn)
+	cfg.MountID = lease.mountID
+	cfg.LeaseTTLSeconds = lease.leaseTTLSeconds
+	cfg.NowFn = rt.mountNowFn
 	cfg.Logger = logger
 	cfg.Metrics = fusefs.NewMetrics()
 	cfg.TracerProvider = obs.TracerProvider()
@@ -622,7 +571,7 @@ func (rt *cliRuntime) runMount(ctx context.Context, opts *mountOptions, baseCfg 
 
 	ln := adminLn
 	adminLn = nil
-	admin := serveAdminListener(ln, obs, rawFS, leaseTracker)
+	admin := serveAdminListener(ln, obs, rawFS)
 	shutdownAdmin := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -673,7 +622,7 @@ func (rt *cliRuntime) runMount(ctx context.Context, opts *mountOptions, baseCfg 
 		return cancelErr
 	}
 
-	stopRenew := rt.startMountLeaseRenewer(client, cfg, lease, rawFS, leaseTracker, logger)
+	stopRenew := rt.startMountLeaseRenewer(client, cfg, lease, rawFS, logger)
 	serveErr := rt.serveFUSE(ctx, rawFS, cfg, mountpoint, ready)
 	stopRenew()
 	if rawFS.IsFenced() {

@@ -170,6 +170,9 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			if err != nil {
 				return fs.ToStatus(err)
 			}
+			if !fs.IsFenced() {
+				fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
+			}
 			protoFlags = resp.Msg.GetInode().GetAttr().GetFlags()
 		}
 		if input.Cmd == FS_IOC_FSGETXATTR {
@@ -204,7 +207,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			if localSt != fuse.OK {
 				return localSt
 			}
-			fs.setInodeSpecialFlag(input.NodeId, isSpecialAttr(updatedInode))
+			fs.recordKnownInode(input.NodeId, updatedInode)
 			if output != nil {
 				output.Result = 0
 			}
@@ -224,7 +227,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 		ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 		defer cancelFunc()
 
-		_, err := fs.client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
+		resp, err := fs.client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
 			Ino:    ino,
 			Flags:  &protoFlags,
 			DiskId: fs.cfg.DiskID,
@@ -235,12 +238,14 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			return fs.ToStatus(err)
 		}
 		fs.markMetaDirty()
-		if protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
-			fs.setInodeSpecialFlag(input.NodeId, true)
-		} else {
-			fs.forgetInodeSpecial(input.NodeId)
+		switch {
+		case resp.Msg.GetInode() != nil:
+			fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
+		case protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0:
+			fs.setKnownInodeSpecial(input.NodeId, true)
+		default:
+			fs.forgetKnownInode(input.NodeId)
 		}
-		fs.cache.invalidateInode(input.NodeId)
 
 		if output != nil {
 			output.Result = 0

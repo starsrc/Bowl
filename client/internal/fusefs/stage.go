@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
@@ -1100,10 +1101,10 @@ func (c *StageCoordinator) OverlayInode(ino uint64, inode *storagev1.Inode) {
 	}
 	if st.lastWriteTS != nil {
 		if compareProtoTimestamp(st.lastWriteTS, a.Mtime) > 0 {
-			a.Mtime = cloneTimestamp(st.lastWriteTS)
+			a.Mtime = proto.CloneOf(st.lastWriteTS)
 		}
 		if compareProtoTimestamp(st.lastWriteTS, a.Ctime) > 0 {
-			a.Ctime = cloneTimestamp(st.lastWriteTS)
+			a.Ctime = proto.CloneOf(st.lastWriteTS)
 		}
 	}
 	if st.promoted != nil && !st.promoted.finished {
@@ -1482,8 +1483,8 @@ func (c *StageCoordinator) PromoteTmpfile(
 	p := &promotedTmpState{
 		file:   file,
 		size:   meta.Size,
-		atime:  cloneTimestamp(meta.Atime),
-		mtime:  cloneTimestamp(meta.Mtime),
+		atime:  proto.CloneOf(meta.Atime),
+		mtime:  proto.CloneOf(meta.Mtime),
 		mode:   meta.Mode,
 		gid:    meta.Gid,
 		flags:  meta.Flags,
@@ -1525,7 +1526,7 @@ func (c *StageCoordinator) PromoteTmpfile(
 		st.logicalSize = meta.Size
 	}
 	if meta.Mtime != nil {
-		st.lastWriteTS = cloneTimestamp(meta.Mtime)
+		st.lastWriteTS = proto.CloneOf(meta.Mtime)
 	}
 
 	for _, ext := range extents {
@@ -2684,8 +2685,8 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 			if c.committer != nil && item.promoted != nil {
 				meta := StagePromotedMeta{
 					Size:   item.promoted.size,
-					Atime:  cloneTimestamp(item.promoted.atime),
-					Mtime:  cloneTimestamp(item.promoted.mtime),
+					Atime:  proto.CloneOf(item.promoted.atime),
+					Mtime:  proto.CloneOf(item.promoted.mtime),
 					Mode:   item.promoted.mode,
 					Gid:    item.promoted.gid,
 					Flags:  item.promoted.flags,
@@ -2931,7 +2932,7 @@ func (c *StageCoordinator) finishUploadItem(
 					if item.gen == st.streamGen {
 						onCommitMinSize = st.logicalSize
 						if isNotOlderCommittedInode(st.lastCommitted, respInode) {
-							st.lastCommitted = cloneInode(respInode)
+							st.lastCommitted = proto.CloneOf(respInode)
 							onCommitRefresh = true
 						}
 					}

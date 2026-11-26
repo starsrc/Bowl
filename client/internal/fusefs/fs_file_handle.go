@@ -2,13 +2,11 @@ package fusefs
 
 import (
 	"context"
-	"errors"
 	"syscall"
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
@@ -66,7 +64,6 @@ func (fs *RawFS) Create(_ <-chan struct{}, input *fuse.CreateIn, name string, ou
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	epoch := fs.cache.version()
 	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 	resp, err := fs.client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
@@ -94,11 +91,9 @@ func (fs *RawFS) Create(_ <-chan struct{}, input *fuse.CreateIn, name string, ou
 		return status
 	}
 	ino = fs.tmpMgr.ObserveKernelLookup(inode.GetIno())
-	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, inode, 0, resp.Msg.GetAttrTimeoutSeconds())
-	fs.cache.putEntryAt(epoch, input.NodeId, name, ino)
-	fs.cache.putInodeAt(epoch, ino, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	fs.dentries.put(input.NodeId, name, ino)
 	fs.caps.markAbsent(ino)
-	fs.recordInodeSpecial(ino, inode)
+	fs.recordKnownInode(ino, inode)
 	if inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFREG {
 		fs.stage.SeedCreatedInode(inode.GetIno())
 	}
@@ -112,7 +107,6 @@ func (fs *RawFS) Create(_ <-chan struct{}, input *fuse.CreateIn, name string, ou
 	case input.Flags&uint32(syscall.O_TRUNC) != 0:
 		out.OpenFlags &^= fuse.FOPEN_KEEP_CACHE
 	default:
-
 		out.OpenFlags |= fuse.FOPEN_KEEP_CACHE
 	}
 	return fuse.OK
@@ -154,22 +148,13 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 			defer unlock()
 		}
 	}
-	epoch := fs.cache.version()
-	cached, status := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
-	if status != fuse.OK {
-		return status
-	}
-	fenced := fs.IsFenced()
-	if !fenced && fs.cache.version() != epoch {
-		return fuse.Status(syscall.ESTALE)
-	}
-	if cached.inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR {
-		return fuse.Status(syscall.EISDIR)
-	}
-	if !fenced {
-		fs.recordInodeSpecial(input.NodeId, cached.inode)
-	}
+
 	if input.Flags&syscall.O_TRUNC != 0 {
+		if !fs.IsFenced() {
+			if info, ok := fs.lookupKnownInode(input.NodeId); ok && info.isDir {
+				return fuse.Status(syscall.EISDIR)
+			}
+		}
 		set := &fuse.SetAttrIn{}
 		set.NodeId = input.NodeId
 		set.Valid = fuse.FATTR_SIZE
@@ -177,7 +162,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 			if truncStatus != fuse.OK {
 				return truncStatus
 			}
-			fs.recordInodeSpecial(input.NodeId, updatedInode)
+			fs.recordKnownInode(input.NodeId, updatedInode)
 			fs.caps.markAbsent(input.NodeId)
 		} else {
 			ino, st := fs.ToServerIno(input.NodeId)
@@ -202,34 +187,43 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 			done()
 			fs.readAhead.InvalidateInode(ino)
 			if err != nil {
-				fs.cache.invalidateInode(input.NodeId)
 				return fs.ToStatus(err)
 			}
 			fs.markMetaDirty()
 			fs.stage.ResetTruncatedInode(ino)
-			fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
-			fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), resp.Msg.GetAttrTimeoutSeconds())
+			fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
 			fs.caps.markAbsent(input.NodeId)
 		}
-	} else if !fenced && !fs.tmpMgr.IsUnpromoted(input.NodeId) {
-		if ino, st := fs.ToServerIno(input.NodeId); st == fuse.OK {
-			fs.stage.ObserveServerInode(ino, cached.inode, false)
+	} else {
+		fenced := fs.IsFenced()
+		openedFromKnown := false
+		if !fenced {
+			if info, ok := fs.lookupKnownInode(input.NodeId); ok {
+				if info.isDir {
+					return fuse.Status(syscall.EISDIR)
+				}
+				openedFromKnown = true
+			}
+		}
+		if !openedFromKnown {
+			inode, _, st := fs.getAttrInodeWithContext(opCtx, cancel, input.NodeId)
+			if st != fuse.OK {
+				return st
+			}
+			if inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR {
+				return fuse.Status(syscall.EISDIR)
+			}
 		}
 	}
+
 	fh, status := fs.openHandle(input.NodeId, input.Flags, false)
 	if status != fuse.OK {
 		return status
 	}
-	if fs.cfg.IsReadOnly() && !fenced {
-		if serverIno, st := fs.ToServerIno(input.NodeId); st == fuse.OK {
-			fs.readAhead.TrackOpenInode(serverIno, cached.inode)
-		}
-	}
 	out.Fh = fh
 	if fs.cfg.DirectIO {
 		out.OpenFlags |= fuse.FOPEN_DIRECT_IO
-	} else if input.Flags&uint32(syscall.O_TRUNC) == 0 && !fenced {
-
+	} else if input.Flags&uint32(syscall.O_TRUNC) == 0 && !fs.IsFenced() {
 		out.OpenFlags |= fuse.FOPEN_KEEP_CACHE
 	}
 	return fuse.OK
@@ -271,7 +265,6 @@ func (fs *RawFS) Flush(_ <-chan struct{}, input *fuse.FlushIn) (status fuse.Stat
 		return fuse.OK
 	}
 	if err := fs.stage.FlushHandle(input.Fh, ino); err != nil {
-		fs.cache.invalidateInode(input.NodeId)
 		return fs.stageErrToStatus(err)
 	}
 	return fuse.OK
@@ -309,9 +302,6 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
 	defer barrierCancel()
 	if err := fs.stage.FlushInodeForHandle(barrierCtx, input.Fh, ino); err != nil {
-		if !errors.Is(err, rpc.ErrKernelInterrupted) && !errors.Is(err, syscall.EINTR) {
-			fs.cache.invalidateInode(input.NodeId)
-		}
 		return fs.stageErrToStatus(err)
 	}
 	if st := fs.FenceStatus(); st != fuse.OK {
@@ -372,16 +362,12 @@ func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 	orphan := fs.handles.IsOrphan(input.NodeId)
 	lastHandle := fs.handles.OpenCount(input.NodeId) == 1
 	isRealServerIno := serverStatus == fuse.OK && !fs.tmpMgr.IsUnpromoted(input.NodeId)
-	if isRealServerIno && fs.cfg.IsReadOnly() {
-		fs.readAhead.UntrackOpenInode(serverIno)
-	}
 	if orphan && lastHandle {
 		if isRealServerIno {
 			fs.stage.DiscardInode(serverIno)
 			fs.readAhead.InvalidateInode(serverIno)
 		}
-		fs.cache.invalidateInode(input.NodeId)
-		fs.forgetInodeSpecial(input.NodeId)
+		fs.forgetKnownInode(input.NodeId)
 		fs.caps.forget(input.NodeId)
 		fs.handles.ReleaseContext(opCtx, input.Fh)
 	} else {
@@ -391,7 +377,6 @@ func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 		fs.handles.Release(input.Fh)
 	}
 	if fs.tmpMgr.OnHandleReleased(input.NodeId, orphan, fs.handles.IsOpen) {
-		fs.cache.invalidateInode(input.NodeId)
-		fs.forgetInodeSpecial(input.NodeId)
+		fs.forgetKnownInode(input.NodeId)
 	}
 }

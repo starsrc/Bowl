@@ -35,7 +35,6 @@ func (fs *RawFS) Symlink(_ <-chan struct{}, header *fuse.InHeader, pointedTo, li
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	epoch := fs.cache.version()
 	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
@@ -55,19 +54,13 @@ func (fs *RawFS) Symlink(_ <-chan struct{}, header *fuse.InHeader, pointedTo, li
 	fs.markMetaDirty()
 
 	attrTTL := resp.Msg.GetAttrTimeoutSeconds()
-	fs.cache.invalidateDirListingTouchParentAt(epoch, header.NodeId, resp.Msg.GetInode(), 0, attrTTL)
 	inode := resp.Msg.GetInode()
 	if inode != nil {
 		child := fs.ToKernelIno(inode.GetIno())
-		fs.cache.putEntryAt(epoch, header.NodeId, linkName, child)
-		fs.cache.putInodeAt(epoch, child, inode, resp.Msg.GetEntryTimeoutSeconds(), attrTTL)
-		linkTTL := attrTTL
-		if linkTTL <= 0 {
-			linkTTL = fs.cfg.AttrTimeoutSeconds
-		}
-		fs.cache.putReadlinkAt(epoch, child, []byte(pointedTo), linkTTL)
+		fs.dentries.put(header.NodeId, linkName, child)
+		fs.recordKnownInode(child, inode)
 	}
-	fs.FillEntryOut(out, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), attrTTL)
+	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), attrTTL)
 	return fuse.OK
 }
 
@@ -89,13 +82,6 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 		return nil, status
 	}
 
-	if !fs.IsFenced() {
-		if cachedTarget, ok := fs.cache.readlink(header.NodeId); ok {
-			return cachedTarget, fuse.OK
-		}
-	}
-
-	epoch, generation := fs.cache.snapshot()
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()
 
@@ -104,20 +90,11 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 		DiskId: fs.cfg.DiskID,
 		Branch: fs.cfg.Branch,
 	}))
-	fenced := fs.IsFenced()
-	if !fenced && fs.cache.version() != epoch {
-		return nil, fuse.Status(syscall.ESTALE)
-	}
 	if err != nil {
 		return nil, fs.ToStatus(err)
 	}
 
-	target = resp.Msg.GetTarget()
-	if !fenced {
-		ttl := fs.cache.inodeAttrTimeout(header.NodeId, fs.cfg.AttrTimeoutSeconds)
-		fs.cache.putReadlinkAtIf(generation, epoch, header.NodeId, target, ttl)
-	}
-	return target, fuse.OK
+	return resp.Msg.GetTarget(), fuse.OK
 }
 
 func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename string, out *fuse.EntryOut) (status fuse.Status) {
@@ -159,7 +136,6 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	unlock := fs.inodeLocks.lock(input.Oldnodeid)
 	defer unlock()
 
-	epoch := fs.cache.version()
 	detachedCtx := context.WithoutCancel(opCtx)
 	ctx, cancelFunc := fs.RPCContextFrom(detachedCtx, nil)
 	defer cancelFunc()
@@ -181,15 +157,9 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	}
 
 	inode := resp.Msg.GetInode()
-	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, inode, 0, resp.Msg.GetAttrTimeoutSeconds())
-	fs.cache.putEntryAt(epoch, input.NodeId, filename, input.Oldnodeid)
-	if inode != nil && inode.GetAttr() != nil {
-		fs.cache.putInodeAt(epoch, input.Oldnodeid, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
-	} else {
-		fs.cache.invalidateInode(input.Oldnodeid)
-	}
+	fs.dentries.put(input.NodeId, filename, input.Oldnodeid)
 	fs.topologySeq.Add(1)
-	fs.recordInodeSpecial(input.Oldnodeid, inode)
+	fs.recordKnownInode(input.Oldnodeid, inode)
 	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
 }

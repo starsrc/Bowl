@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -197,7 +198,7 @@ func (m *TmpFileManager) Create(parent uint64, uid, gid, mode, flags uint32) (ui
 	m.mu.Lock()
 	m.files[ino] = file
 	m.mu.Unlock()
-	return ino, cloneInode(inode), fuse.OK
+	return ino, proto.CloneOf(inode), fuse.OK
 }
 
 func (m *TmpFileManager) ToServerIno(kernelIno uint64) (uint64, fuse.Status) {
@@ -262,7 +263,7 @@ func (m *TmpFileManager) LocalInode(ino uint64) (*storagev1.Inode, bool) {
 	if tmp.serverIno != 0 {
 		return nil, false
 	}
-	return cloneInode(tmp.inode), true
+	return proto.CloneOf(tmp.inode), true
 }
 
 func (m *TmpFileManager) GetAttr(ino uint64, out *fuse.Attr) (bool, fuse.Status) {
@@ -336,7 +337,7 @@ func (m *TmpFileManager) Write(ino, offset uint64, data []byte, appendMode bool)
 	now := timestamppb.Now()
 	tmp.inode.Attr.Mtime = now
 	tmp.inode.Attr.Ctime = now
-	return uint32(len(data)), cloneInode(tmp.inode), true, fuse.OK
+	return uint32(len(data)), proto.CloneOf(tmp.inode), true, fuse.OK
 }
 
 func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle func(fh uint64, needWrite bool) fuse.Status, out *fuse.Attr) (*storagev1.Inode, bool, fuse.Status) {
@@ -407,7 +408,7 @@ func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle 
 	if input.Valid&(fuse.FATTR_SIZE|fuse.FATTR_MODE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_ATIME|fuse.FATTR_ATIME_NOW|fuse.FATTR_MTIME|fuse.FATTR_MTIME_NOW|fuse.FATTR_CTIME) != 0 {
 		a.Ctime = timestamppb.Now()
 	}
-	cloned := cloneInode(tmp.inode)
+	cloned := proto.CloneOf(tmp.inode)
 	m.fillAttr(out, cloned)
 	return cloned, true, fuse.OK
 }
@@ -457,7 +458,7 @@ func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (*sto
 		a.Mtime = now
 	}
 	a.Ctime = now
-	return cloneInode(tmp.inode), true, fuse.OK
+	return proto.CloneOf(tmp.inode), true, fuse.OK
 }
 
 func (m *TmpFileManager) Fsync(ino uint64) (bool, fuse.Status) {
@@ -624,7 +625,7 @@ func (m *TmpFileManager) SetFlags(ino uint64, flags uint32) (*storagev1.Inode, b
 	}
 	tmp.inode.Attr.Flags = flags
 	tmp.inode.Attr.Ctime = timestamppb.Now()
-	return cloneInode(tmp.inode), true, fuse.OK
+	return proto.CloneOf(tmp.inode), true, fuse.OK
 }
 
 func (m *TmpFileManager) installAliasLocked(localIno uint64, tmp *managedTmpFile, serverIno uint64) {
@@ -700,7 +701,7 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 	}
 
 	serverIno := inode.GetIno()
-	mergedInode := cloneInode(inode)
+	mergedInode := proto.CloneOf(inode)
 	mergedInode.Attr.Size = attr.Size
 	mergedInode.Attr.Blocks = max(mergedInode.Attr.Blocks, (attr.Size+511)/512)
 	mergedInode.Attr.Mode = attr.Mode
@@ -708,21 +709,21 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 	mergedInode.Attr.Gid = attr.Gid
 	mergedInode.Attr.Flags = attr.Flags
 	if attr.Atime != nil {
-		mergedInode.Attr.Atime = cloneTimestamp(attr.Atime)
+		mergedInode.Attr.Atime = proto.CloneOf(attr.Atime)
 	}
 	if attr.Mtime != nil {
-		mergedInode.Attr.Mtime = cloneTimestamp(attr.Mtime)
+		mergedInode.Attr.Mtime = proto.CloneOf(attr.Mtime)
 	}
 	if attr.Ctime != nil {
-		mergedInode.Attr.Ctime = cloneTimestamp(attr.Ctime)
+		mergedInode.Attr.Ctime = proto.CloneOf(attr.Ctime)
 	}
 	mergedInode.Attr.Nlink = 1
 
 	hostFile := tmp.file
 	meta := StagePromotedMeta{
 		Size:   attr.Size,
-		Atime:  cloneTimestamp(attr.Atime),
-		Mtime:  cloneTimestamp(attr.Mtime),
+		Atime:  proto.CloneOf(attr.Atime),
+		Mtime:  proto.CloneOf(attr.Mtime),
 		Mode:   attr.Mode,
 		Gid:    attr.Gid,
 		Flags:  attr.Flags,

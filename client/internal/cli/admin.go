@@ -313,10 +313,10 @@ type adminServer struct {
 	shutdownOnce sync.Once
 }
 
-func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) *http.ServeMux {
+func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS) *http.ServeMux {
 	mux := http.NewServeMux()
 	obs.MountAdminRoutes(mux, observability.WithReadyCheck("mount_lease", func(context.Context) error {
-		return checkMountLeaseReady(fs, tracker)
+		return fs.CheckReady()
 	}))
 	mux.Handle("GET /debug/stats", statsHandler(fs))
 	mux.Handle("GET /debug/unmount", unmountProgressHandler(fs))
@@ -334,11 +334,11 @@ func listenAdminAddr(addr string) (net.Listener, error) {
 	return ln, nil
 }
 
-func serveAdminListener(ln net.Listener, obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) *adminServer {
+func serveAdminListener(ln net.Listener, obs *clientRuntime, fs *fusefs.RawFS) *adminServer {
 	if ln == nil {
 		return nil
 	}
-	mux := newAdminMux(obs, fs, tracker)
+	mux := newAdminMux(obs, fs)
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -352,12 +352,12 @@ func serveAdminListener(ln net.Listener, obs *clientRuntime, fs *fusefs.RawFS, t
 	return &adminServer{ln: ln, srv: srv}
 }
 
-func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) (*adminServer, error) {
+func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS) (*adminServer, error) {
 	ln, err := listenAdminAddr(addr)
 	if err != nil {
 		return nil, err
 	}
-	return serveAdminListener(ln, obs, fs, tracker), nil
+	return serveAdminListener(ln, obs, fs), nil
 }
 
 func (a *adminServer) addr() string {

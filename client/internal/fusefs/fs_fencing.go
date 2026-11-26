@@ -1,7 +1,10 @@
 package fusefs
 
 import (
+	"errors"
+	"fmt"
 	"syscall"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -44,16 +47,15 @@ func (fs *RawFS) Fence(status fuse.Status, reason string) {
 	fs.fenceMu.Unlock()
 
 	fs.stage.AbortAll(syscall.Errno(status))
-	fs.cache.clear()
+	fs.dentries.clear()
 	fs.readAhead.InvalidateAll()
 	fs.caps.reset()
-	fs.specialMu.Lock()
-	clear(fs.specialInodes)
-	fs.specialMu.Unlock()
+	fs.clearKnownInodes()
 
 	fs.releaseMu.Lock()
 	fs.releaseClosed = true
 	fs.releaseQueue = nil
+	clear(fs.releaseInos)
 	fs.releaseMu.Unlock()
 	if fs.releaseCancel != nil {
 		fs.releaseCancel()
@@ -122,4 +124,36 @@ func (fs *RawFS) fenceErrToErrno() syscall.Errno {
 		return syscall.EBUSY
 	}
 	return syscall.Errno(st)
+}
+
+func (fs *RawFS) RefreshMountLease(ttlSeconds uint32) {
+	if fs == nil {
+		return
+	}
+	fs.leaseMu.Lock()
+	if fs.leaseActive {
+		fs.leaseExpiresAt = fs.now().Add(time.Duration(ttlSeconds) * time.Second)
+	}
+	fs.leaseMu.Unlock()
+}
+
+func (fs *RawFS) CheckReady() error {
+	if fs == nil {
+		return nil
+	}
+	if fs.IsFenced() {
+		if reason := fs.FenceReason(); reason != "" {
+			return fmt.Errorf("mount fenced: %s", reason)
+		}
+		return errors.New("mount fenced")
+	}
+	fs.leaseMu.Lock()
+	active := fs.leaseActive
+	expiresAt := fs.leaseExpiresAt
+	now := fs.now()
+	fs.leaseMu.Unlock()
+	if active && !now.Before(expiresAt) {
+		return fmt.Errorf("mount lease expired at %s", expiresAt.UTC().Format(time.RFC3339))
+	}
+	return nil
 }

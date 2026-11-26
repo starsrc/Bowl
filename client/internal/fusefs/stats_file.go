@@ -11,14 +11,13 @@ const VirtualStatsIno uint64 = (uint64(1) << 63) - 1
 
 const (
 	virtualStatsName     = ".stats"
-	virtualJFSStatsName  = ".jfs.stats"
 	virtualStatsAttrSize = 64 * 1024
 )
 
 func (fs *RawFS) isVirtualStatsName(parent uint64, name string) bool {
 	return fs.cfg.EnableStatsFile &&
 		parent == fuse.FUSE_ROOT_ID &&
-		(name == virtualStatsName || name == virtualJFSStatsName)
+		name == virtualStatsName
 }
 
 func (fs *RawFS) isVirtualStatsIno(ino uint64) bool {

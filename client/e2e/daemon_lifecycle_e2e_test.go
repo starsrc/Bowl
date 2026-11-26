@@ -27,13 +27,13 @@ import (
 
 var (
 	statsTwoColumnPattern = regexp.MustCompile(`^(?:[a-zA-Z0-9_]+ -?\d+(?:\.\d+)?\n)+$`)
-	jfsOpsTotalLineRegex  = regexp.MustCompile(`(?m)^juicefs_fuse_ops_durations_histogram_seconds_total (\d+)$`)
+	bowlOpsTotalLineRegex = regexp.MustCompile(`(?m)^bowl_client_fuse_ops_total (\d+)$`)
 )
 
 func parseStatsOpsTotal(t *testing.T, content string) uint64 {
 	t.Helper()
-	matches := jfsOpsTotalLineRegex.FindStringSubmatch(content)
-	require.Len(t, matches, 2, "未找到 `juicefs_fuse_ops_durations_histogram_seconds_total` 统计行")
+	matches := bowlOpsTotalLineRegex.FindStringSubmatch(content)
+	require.Len(t, matches, 2, "未找到 `bowl_client_fuse_ops_total` 统计行")
 	val, err := strconv.ParseUint(matches[1], 10, 64)
 	require.NoError(t, err)
 	return val
@@ -137,6 +137,11 @@ func TestDaemonLifecycle_MountAdminStatsAndUmount(t *testing.T) {
 	require.NoError(t, err)
 	require.Regexp(t, statsTwoColumnPattern, string(sentRaw))
 	require.Positive(t, parseStatsOpsTotal(t, string(sentRaw)))
+	require.NotContains(t, string(sentRaw), "juicefs_")
+	require.NotContains(t, string(sentRaw), "bowl_client_nscache_")
+
+	_, jfsStatErr := os.Stat(filepath.Join(mountpoint, ".jfs.stats"))
+	require.ErrorIs(t, jfsStatErr, os.ErrNotExist)
 
 	cleanupOccupier := startMountBusyOccupier(t, mountpoint)
 	t.Cleanup(cleanupOccupier)

@@ -30,6 +30,18 @@ type StorageMetricsCollector struct {
 	pebbleBlockCacheCountDesc     *prometheus.Desc
 	pebbleBlockCacheHitsDesc      *prometheus.Desc
 	pebbleBlockCacheMissesDesc    *prometheus.Desc
+
+	projectionDirtyDisksDesc        *prometheus.Desc
+	projectionDirtyCatalogDisksDesc *prometheus.Desc
+	projectionSyncWritesDesc        *prometheus.Desc
+	projectionSyncWriteErrorsDesc   *prometheus.Desc
+	projectionSyncWriteSkipsDesc    *prometheus.Desc
+	projectionReadFallbacksDesc     *prometheus.Desc
+	projectionReconcileDisksDesc    *prometheus.Desc
+	projectionReconcileErrorsDesc   *prometheus.Desc
+	projectionBatchFlushErrorsDesc  *prometheus.Desc
+	projectionIdleEvictionsDesc     *prometheus.Desc
+	projectionDiskOpensDesc         *prometheus.Desc
 }
 
 func NewStorageMetricsCollector(mgr *ControlManager) *StorageMetricsCollector {
@@ -155,6 +167,72 @@ func NewStorageMetricsCollector(mgr *ControlManager) *StorageMetricsCollector {
 			nil,
 			nil,
 		),
+		projectionDirtyDisksDesc: prometheus.NewDesc(
+			"bowl_storage_projection_dirty_disks",
+			"Current number of dirty disks awaiting projection reconciliation.",
+			nil,
+			nil,
+		),
+		projectionDirtyCatalogDisksDesc: prometheus.NewDesc(
+			"bowl_storage_projection_dirty_catalog_disks",
+			"Current number of dirty catalog disks awaiting projection reconciliation.",
+			nil,
+			nil,
+		),
+		projectionSyncWritesDesc: prometheus.NewDesc(
+			"bowl_storage_projection_sync_writes_total",
+			"Total synchronous projection writes that succeeded.",
+			nil,
+			nil,
+		),
+		projectionSyncWriteErrorsDesc: prometheus.NewDesc(
+			"bowl_storage_projection_sync_write_errors_total",
+			"Total synchronous projection writes that failed due to context or store errors.",
+			nil,
+			nil,
+		),
+		projectionSyncWriteSkipsDesc: prometheus.NewDesc(
+			"bowl_storage_projection_sync_write_skips_total",
+			"Total synchronous projection writes skipped because store is nil or disk is already dirty.",
+			nil,
+			nil,
+		),
+		projectionReadFallbacksDesc: prometheus.NewDesc(
+			"bowl_storage_projection_read_fallbacks_total",
+			"Total projection control-plane reads served via Pebble fallback.",
+			nil,
+			nil,
+		),
+		projectionReconcileDisksDesc: prometheus.NewDesc(
+			"bowl_storage_projection_reconcile_disks_total",
+			"Total disk projection reconciliations executed and succeeded.",
+			nil,
+			nil,
+		),
+		projectionReconcileErrorsDesc: prometheus.NewDesc(
+			"bowl_storage_projection_reconcile_errors_total",
+			"Total disk projection reconciliation failures excluding standalone mode and shutdown cancellation.",
+			nil,
+			nil,
+		),
+		projectionBatchFlushErrorsDesc: prometheus.NewDesc(
+			"bowl_storage_projection_batch_flush_errors_total",
+			"Total failed usage or renew projection batch flushes excluding standalone mode and shutdown cancellation.",
+			nil,
+			nil,
+		),
+		projectionIdleEvictionsDesc: prometheus.NewDesc(
+			"bowl_storage_projection_idle_evictions_total",
+			"Total idle disks evicted from the control manager open pool.",
+			nil,
+			nil,
+		),
+		projectionDiskOpensDesc: prometheus.NewDesc(
+			"bowl_storage_projection_disk_opens_total",
+			"Total Pebble DiskStore opens performed by the control manager.",
+			nil,
+			nil,
+		),
 	}
 }
 
@@ -182,6 +260,17 @@ func (c *StorageMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.pebbleBlockCacheCountDesc
 	ch <- c.pebbleBlockCacheHitsDesc
 	ch <- c.pebbleBlockCacheMissesDesc
+	ch <- c.projectionDirtyDisksDesc
+	ch <- c.projectionDirtyCatalogDisksDesc
+	ch <- c.projectionSyncWritesDesc
+	ch <- c.projectionSyncWriteErrorsDesc
+	ch <- c.projectionSyncWriteSkipsDesc
+	ch <- c.projectionReadFallbacksDesc
+	ch <- c.projectionReconcileDisksDesc
+	ch <- c.projectionReconcileErrorsDesc
+	ch <- c.projectionBatchFlushErrorsDesc
+	ch <- c.projectionIdleEvictionsDesc
+	ch <- c.projectionDiskOpensDesc
 }
 
 func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -208,9 +297,32 @@ func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 		filterHits          int64
 		filterMisses        int64
 		openTableIters      int64
+		dirtyDisks          int
+		dirtyCatalogDisks   int
+		syncWrites          uint64
+		syncWriteErrors     uint64
+		syncWriteSkips      uint64
+		readFallbacks       uint64
+		reconcileDisks      uint64
+		reconcileErrors     uint64
+		batchFlushErrors    uint64
+		idleEvictions       uint64
+		diskOpens           int64
 	)
 
 	if m := c.mgr; m != nil {
+		if m.queue != nil {
+			dirtyDisks, dirtyCatalogDisks = m.queue.dirtyCounts()
+			batchFlushErrors = m.queue.batchFlushErrors.Load()
+		}
+		syncWrites = m.syncWrites.Load()
+		syncWriteErrors = m.syncWriteErrors.Load()
+		syncWriteSkips = m.syncWriteSkips.Load()
+		readFallbacks = m.readFallbacks.Load()
+		reconcileDisks = m.reconcileDisks.Load()
+		reconcileErrors = m.reconcileErrors.Load()
+		idleEvictions = m.idleEvictions.Load()
+		diskOpens = m.openCount.Load()
 		m.slots[0].opMu.RLock()
 		if !m.closed.Load() && m.cache != nil {
 			m.cache.Ref()
@@ -287,4 +399,15 @@ func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.pebbleBlockCacheCountDesc, prometheus.GaugeValue, float64(max(0, cacheMetrics.Count)))
 	ch <- prometheus.MustNewConstMetric(c.pebbleBlockCacheHitsDesc, prometheus.CounterValue, float64(max(0, cacheMetrics.Hits)))
 	ch <- prometheus.MustNewConstMetric(c.pebbleBlockCacheMissesDesc, prometheus.CounterValue, float64(max(0, cacheMetrics.Misses)))
+	ch <- prometheus.MustNewConstMetric(c.projectionDirtyDisksDesc, prometheus.GaugeValue, float64(dirtyDisks))
+	ch <- prometheus.MustNewConstMetric(c.projectionDirtyCatalogDisksDesc, prometheus.GaugeValue, float64(dirtyCatalogDisks))
+	ch <- prometheus.MustNewConstMetric(c.projectionSyncWritesDesc, prometheus.CounterValue, float64(syncWrites))
+	ch <- prometheus.MustNewConstMetric(c.projectionSyncWriteErrorsDesc, prometheus.CounterValue, float64(syncWriteErrors))
+	ch <- prometheus.MustNewConstMetric(c.projectionSyncWriteSkipsDesc, prometheus.CounterValue, float64(syncWriteSkips))
+	ch <- prometheus.MustNewConstMetric(c.projectionReadFallbacksDesc, prometheus.CounterValue, float64(readFallbacks))
+	ch <- prometheus.MustNewConstMetric(c.projectionReconcileDisksDesc, prometheus.CounterValue, float64(reconcileDisks))
+	ch <- prometheus.MustNewConstMetric(c.projectionReconcileErrorsDesc, prometheus.CounterValue, float64(reconcileErrors))
+	ch <- prometheus.MustNewConstMetric(c.projectionBatchFlushErrorsDesc, prometheus.CounterValue, float64(batchFlushErrors))
+	ch <- prometheus.MustNewConstMetric(c.projectionIdleEvictionsDesc, prometheus.CounterValue, float64(idleEvictions))
+	ch <- prometheus.MustNewConstMetric(c.projectionDiskOpensDesc, prometheus.CounterValue, float64(max(0, diskOpens)))
 }

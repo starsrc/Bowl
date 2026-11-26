@@ -12,18 +12,29 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
+func (m *ControlManager) isShutdownCancellation(err error) bool {
+	return isShutdownCancellation(m.bgCtx, err)
+}
+
+func (m *ControlManager) recordReconcileErr(err error) error {
+	if err != nil && !m.isShutdownCancellation(err) {
+		m.reconcileErrors.Add(1)
+	}
+	return err
+}
+
 func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, onlyIfDirty, onlyIfCatalog bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if diskID == uuid.Nil {
-		return fmt.Errorf("%w: disk_id cannot be nil", ErrInvalidArgument)
+		return m.recordReconcileErr(fmt.Errorf("%w: disk_id cannot be nil", ErrInvalidArgument))
 	}
 	if m.store == nil {
 		return ErrUnavailable
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return m.recordReconcileErr(err)
 	}
 
 	slot := m.getSlot(diskID)
@@ -31,7 +42,7 @@ func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, on
 	defer slot.opMu.Unlock()
 
 	if err := ctx.Err(); err != nil {
-		return err
+		return m.recordReconcileErr(err)
 	}
 
 	st, hasDirty := m.queue.dirtyInfo(diskID)
@@ -41,17 +52,18 @@ func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, on
 	gen := st.gen
 
 	if m.closed.Load() {
-		return engine.ErrClosed
+		return m.recordReconcileErr(engine.ErrClosed)
 	}
 	entry := lookupOpenEntry(slot, diskID)
 
 	if entry == nil && !diskExistsOnFS(m.diskDir(diskID)) {
 		if err := m.store.DeleteDisk(ctx, diskID); err != nil {
-			return err
+			return m.recordReconcileErr(err)
 		}
 		if hasDirty {
 			m.queue.clearDirty(diskID, gen)
 		}
+		m.reconcileDisks.Add(1)
 		return nil
 	}
 
@@ -70,16 +82,17 @@ func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, on
 		})
 	}
 	if err != nil {
-		return err
+		return m.recordReconcileErr(err)
 	}
 
-	snap := controlSnapshotToDiskSnapshot(diskID, rawSnap)
+	snap := m.controlSnapshotToDiskSnapshot(ctx, diskID, rawSnap)
 	if repErr := m.store.ReplaceDiskSnapshot(ctx, snap); repErr != nil {
-		return repErr
+		return m.recordReconcileErr(repErr)
 	}
 	if hasDirty {
 		m.queue.clearDirty(diskID, gen)
 	}
+	m.reconcileDisks.Add(1)
 	return nil
 }
 
@@ -161,14 +174,59 @@ func (m *ControlManager) reconcileDirtyDisks(ctx context.Context) error {
 		return nil
 	}
 	dirty := m.queue.takeDirtyDisks()
-	var errs []error
+	if len(dirty) == 0 {
+		return nil
+	}
+	start := time.Now()
+	var (
+		errs         []error
+		firstErr     error
+		sampleDiskID uuid.UUID
+		failedDisks  int
+	)
 	for diskID := range dirty {
 		if err := ctx.Err(); err != nil {
+			if !m.isShutdownCancellation(err) {
+				if firstErr == nil {
+					firstErr = err
+					sampleDiskID = diskID
+				}
+				failedDisks++
+				m.logger.WarnContext(ctx, "projection dirty reconcile cycle failed",
+					"dirty_disks", len(dirty),
+					"failed_disks", failedDisks,
+					"sample_disk_id", sampleDiskID.String(),
+					"duration", time.Since(start),
+					"error", firstErr,
+				)
+			}
 			return err
 		}
 		if err := m.reconcileDisk(ctx, diskID, true, false); err != nil {
+			if m.isShutdownCancellation(err) {
+				return err
+			}
 			errs = append(errs, err)
+			failedDisks++
+			if firstErr == nil {
+				firstErr = err
+				sampleDiskID = diskID
+			}
+			m.logger.DebugContext(ctx, "projection dirty disk reconcile failed",
+				"op", "reconcile_dirty_disk",
+				"disk_id", diskID.String(),
+				"error", err,
+			)
 		}
+	}
+	if failedDisks > 0 {
+		m.logger.WarnContext(ctx, "projection dirty reconcile cycle failed",
+			"dirty_disks", len(dirty),
+			"failed_disks", failedDisks,
+			"sample_disk_id", sampleDiskID.String(),
+			"duration", time.Since(start),
+			"error", firstErr,
+		)
 	}
 	return errors.Join(errs...)
 }
@@ -259,8 +317,17 @@ func (m *ControlManager) tryEvictIdleDisk(ctx context.Context, slot *diskSlot, d
 		return false
 	}
 
-	mounted, err := entry.store.HasActiveMounts("", now)
-	if err != nil || mounted {
+	mounted, err := m.hasActiveMounts(entry.store, "", now)
+	if err != nil {
+		m.logger.WarnContext(ctx, "projection idle eviction active mount check failed",
+			"op", "evict_idle_disk",
+			"disk_id", diskID.String(),
+			"error", err,
+		)
+		entry.store.EvictIdleActors(m.actorIdleTTL)
+		return false
+	}
+	if mounted {
 		entry.store.EvictIdleActors(m.actorIdleTTL)
 		return false
 	}
@@ -271,7 +338,14 @@ func (m *ControlManager) tryEvictIdleDisk(ctx context.Context, slot *diskSlot, d
 	cancel()
 
 	slot.remove(diskID)
-	_ = entry.store.Close()
+	if closeErr := m.closeDisk(entry.store); closeErr != nil {
+		m.logger.WarnContext(ctx, "projection idle eviction disk close failed",
+			"op", "evict_idle_disk",
+			"disk_id", diskID.String(),
+			"error", closeErr,
+		)
+	}
+	m.idleEvictions.Add(1)
 	return true
 }
 
@@ -296,7 +370,14 @@ func (m *ControlManager) runMaintenanceLoop() {
 			m.sampleOpenDiskUsage(opCtx)
 			_ = m.reconcileDirtyDisks(opCtx)
 			if m.store != nil {
-				_, _ = m.store.PruneExpiredMounts(opCtx, m.now())
+				pruneStart := time.Now()
+				if _, pruneErr := m.store.PruneExpiredMounts(opCtx, m.now()); pruneErr != nil && !m.isShutdownCancellation(pruneErr) {
+					m.logger.WarnContext(opCtx, "projection prune expired mounts failed",
+						"op", "prune_expired_mounts",
+						"duration", time.Since(pruneStart),
+						"error", pruneErr,
+					)
+				}
 			}
 			cancel()
 		case <-evictCh:

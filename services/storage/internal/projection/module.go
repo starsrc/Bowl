@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -47,6 +48,7 @@ type ControlManagerParams struct {
 	Store     Store              `optional:"true"`
 	MetaCfg   *config.MetaConfig `optional:"true"`
 	MetaVal   config.MetaConfig  `optional:"true"`
+	Logger    *slog.Logger       `optional:"true"`
 }
 
 func ProvideControlManager(params ControlManagerParams) (*ControlManager, error) {
@@ -70,6 +72,7 @@ func ProvideControlManager(params ControlManagerParams) (*ControlManager, error)
 	mgr, err := NewControlManager(ManagerOptions{
 		StorageRoot:  storageRoot,
 		Store:        params.Store,
+		Logger:       params.Logger,
 		ActorIdleTTL: actorIdleTTL,
 		GCMode:       gcMode,
 		GCInterval:   gcInterval,

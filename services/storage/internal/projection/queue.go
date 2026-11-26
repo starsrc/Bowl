@@ -2,11 +2,21 @@ package projection
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
+
+func isShutdownCancellation(ctx context.Context, err error) bool {
+	return ctx != nil && ctx.Err() != nil &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, engine.ErrClosed))
+}
 
 const (
 	defaultFlushInterval = 5 * time.Second
@@ -16,6 +26,7 @@ const (
 type queueConfig struct {
 	flushInterval time.Duration
 	opTimeout     time.Duration
+	logger        *slog.Logger
 }
 
 type dirtyState struct {
@@ -30,6 +41,7 @@ type mountBatchKey struct {
 
 type queue struct {
 	store         Store
+	logger        *slog.Logger
 	flushInterval time.Duration
 	opTimeout     time.Duration
 
@@ -40,12 +52,13 @@ type queue struct {
 	usageBuf map[uuid.UUID]uint64
 	renewBuf map[mountBatchKey]time.Time
 
-	drainCtx    context.Context
-	drainCancel context.CancelFunc
-	stopBatcher chan struct{}
-	batchDone   chan struct{}
-	closeOnce   sync.Once
-	closeErr    error
+	drainCtx         context.Context
+	drainCancel      context.CancelFunc
+	stopBatcher      chan struct{}
+	batchDone        chan struct{}
+	closeOnce        sync.Once
+	closeErr         error
+	batchFlushErrors atomic.Uint64
 }
 
 func newQueue(store Store, cfg queueConfig) *queue {
@@ -57,10 +70,15 @@ func newQueue(store Store, cfg queueConfig) *queue {
 	if opTimeout <= 0 {
 		opTimeout = defaultOpTimeout
 	}
+	logger := cfg.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 
 	drainCtx, drainCancel := context.WithCancel(context.Background())
 	q := &queue{
 		store:         store,
+		logger:        logger,
 		flushInterval: flushInterval,
 		opTimeout:     opTimeout,
 		dirty:         make(map[uuid.UUID]dirtyState),
@@ -128,6 +146,18 @@ func (q *queue) hasDirtyDisks() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.dirty) > 0
+}
+
+func (q *queue) dirtyCounts() (total, catalog int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	total = len(q.dirty)
+	for _, st := range q.dirty {
+		if st.catalog {
+			catalog++
+		}
+	}
+	return total, catalog
 }
 
 func (q *queue) takeDirtyDisks() map[uuid.UUID]uint64 {
@@ -231,18 +261,30 @@ func (q *queue) flushBatches(ctx context.Context) {
 				UsedBytes: used,
 			})
 		}
-		var err error
 		if q.store == nil {
-			err = ErrUnavailable
-		} else {
-			err = q.store.BatchUpdateDiskUsage(ctx, updates)
-		}
-		if err != nil {
 			q.mu.Lock()
 			for _, u := range updates {
 				q.markDirtyLocked(u.DiskID, false)
 			}
 			q.mu.Unlock()
+		} else {
+			start := time.Now()
+			if err := q.store.BatchUpdateDiskUsage(ctx, updates); err != nil {
+				q.mu.Lock()
+				for _, u := range updates {
+					q.markDirtyLocked(u.DiskID, false)
+				}
+				q.mu.Unlock()
+				if !isShutdownCancellation(q.drainCtx, err) {
+					q.batchFlushErrors.Add(1)
+					q.logger.WarnContext(ctx, "projection batch flush failed",
+						"batch_type", "usage",
+						"batch_size", len(updates),
+						"duration", time.Since(start),
+						"error", err,
+					)
+				}
+			}
 		}
 	}
 
@@ -255,18 +297,30 @@ func (q *queue) flushBatches(ctx context.Context) {
 				ExpiresAt: exp,
 			})
 		}
-		var err error
 		if q.store == nil {
-			err = ErrUnavailable
-		} else {
-			err = q.store.BatchRenewMounts(ctx, updates)
-		}
-		if err != nil {
 			q.mu.Lock()
 			for _, u := range updates {
 				q.markDirtyLocked(u.DiskID, false)
 			}
 			q.mu.Unlock()
+		} else {
+			start := time.Now()
+			if err := q.store.BatchRenewMounts(ctx, updates); err != nil {
+				q.mu.Lock()
+				for _, u := range updates {
+					q.markDirtyLocked(u.DiskID, false)
+				}
+				q.mu.Unlock()
+				if !isShutdownCancellation(q.drainCtx, err) {
+					q.batchFlushErrors.Add(1)
+					q.logger.WarnContext(ctx, "projection batch flush failed",
+						"batch_type", "renew",
+						"batch_size", len(updates),
+						"duration", time.Since(start),
+						"error", err,
+					)
+				}
+			}
 		}
 	}
 }

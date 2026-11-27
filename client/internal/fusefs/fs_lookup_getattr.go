@@ -36,8 +36,6 @@ func (fs *RawFS) lookupInodeWithContext(parentCtx context.Context, cancel <-chan
 	if fs.IsFenced() {
 		return inode, 0, 0, fuse.OK
 	}
-	fs.stage.ObserveServerInode(inode.GetIno(), inode, false)
-	fs.stage.OverlayInode(inode.GetIno(), inode)
 	return inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
@@ -49,6 +47,7 @@ func (fs *RawFS) getAttrInodeWithContext(parentCtx context.Context, cancel <-cha
 	if st != fuse.OK {
 		return nil, 0, st
 	}
+	g0 := fs.metaClock.Load()
 	ctx, cancelFunc := fs.RPCContextFrom(parentCtx, cancel)
 	defer cancelFunc()
 	resp, err := fs.client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
@@ -66,9 +65,7 @@ func (fs *RawFS) getAttrInodeWithContext(parentCtx context.Context, cancel <-cha
 	if fs.IsFenced() {
 		return inode, 0, fuse.OK
 	}
-	fs.stage.ObserveServerInode(serverIno, inode, false)
-	fs.stage.OverlayInode(serverIno, inode)
-	fs.recordKnownInode(ino, inode)
+	fs.recordKnownInode(ino, inode, g0)
 	return inode, resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
@@ -89,14 +86,15 @@ func (fs *RawFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
+	g0 := fs.metaClock.Load()
 	inode, entryTTL, attrTTL, status := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
 	if status == fuse.OK {
 		fs.FillEntryOut(out, inode, entryTTL, attrTTL)
-		fs.stage.OverlayAttr(inode.GetIno(), &out.Attr)
+		fs.stage.OverlayDirty(inode.GetIno(), &out.Attr)
 		out.NodeId = fs.tmpMgr.ObserveKernelLookup(inode.GetIno())
 		out.Ino = out.NodeId
 		if !fs.IsFenced() {
-			fs.recordKnownInode(out.NodeId, inode)
+			fs.recordKnownInode(out.NodeId, inode, g0)
 			fs.dentries.put(header.NodeId, name, out.NodeId)
 		}
 	}
@@ -133,7 +131,7 @@ func (fs *RawFS) GetAttr(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fuse.A
 	inode, attrTTL, status := fs.getAttrInodeWithContext(opCtx, cancel, in.NodeId)
 	if status == fuse.OK {
 		fs.FillAttrOut(out, inode, attrTTL)
-		fs.stage.OverlayAttr(serverIno, &out.Attr)
+		fs.stage.OverlayDirty(serverIno, &out.Attr)
 	}
 	return status
 }

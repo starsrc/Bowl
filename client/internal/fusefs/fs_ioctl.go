@@ -159,6 +159,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
 				return fs.stageErrToStatus(err)
 			}
+			g0 := fs.metaClock.Load()
 			ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 			defer cancelFunc()
 
@@ -171,7 +172,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 				return fs.ToStatus(err)
 			}
 			if !fs.IsFenced() {
-				fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
+				fs.recordKnownInode(input.NodeId, resp.Msg.GetInode(), g0)
 			}
 			protoFlags = resp.Msg.GetInode().GetAttr().GetFlags()
 		}
@@ -207,7 +208,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			if localSt != fuse.OK {
 				return localSt
 			}
-			fs.recordKnownInode(input.NodeId, updatedInode)
+			fs.recordKnownInodeAuthoritative(input.NodeId, updatedInode)
 			if output != nil {
 				output.Result = 0
 			}
@@ -240,7 +241,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 		fs.markMetaDirty()
 		switch {
 		case resp.Msg.GetInode() != nil:
-			fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
+			fs.recordKnownInodeAuthoritative(input.NodeId, resp.Msg.GetInode())
 		case protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0:
 			fs.setKnownInodeSpecial(input.NodeId, true)
 		default:

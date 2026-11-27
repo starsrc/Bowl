@@ -93,10 +93,7 @@ func (fs *RawFS) Create(_ <-chan struct{}, input *fuse.CreateIn, name string, ou
 	ino = fs.tmpMgr.ObserveKernelLookup(inode.GetIno())
 	fs.dentries.put(input.NodeId, name, ino)
 	fs.caps.markAbsent(ino)
-	fs.recordKnownInode(ino, inode)
-	if inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFREG {
-		fs.stage.SeedCreatedInode(inode.GetIno())
-	}
+	fs.recordKnownInodeAuthoritative(ino, inode)
 	fs.FillEntryOut(&out.EntryOut, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	out.Fh = fh
 	out.OpenFlags = resp.Msg.GetOpenFlags()
@@ -162,7 +159,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 			if truncStatus != fuse.OK {
 				return truncStatus
 			}
-			fs.recordKnownInode(input.NodeId, updatedInode)
+			fs.recordKnownInodeAuthoritative(input.NodeId, updatedInode)
 			fs.caps.markAbsent(input.NodeId)
 		} else {
 			ino, st := fs.ToServerIno(input.NodeId)
@@ -190,8 +187,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 				return fs.ToStatus(err)
 			}
 			fs.markMetaDirty()
-			fs.stage.ResetTruncatedInode(ino)
-			fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
+			fs.recordKnownInodeAuthoritative(input.NodeId, resp.Msg.GetInode())
 			fs.caps.markAbsent(input.NodeId)
 		}
 	} else {

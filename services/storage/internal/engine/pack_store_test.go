@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math/rand/v2"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -474,4 +475,198 @@ func TestPackStore_Close_FlushesDirtyPacksAndRejectsSubsequentOps(t *testing.T) 
 		require.True(t, store.hasDirty())
 		require.ErrorIs(t, store.SyncActive(ctx), closeSyncErr)
 	})
+}
+
+func assertReadClockCacheInvariant(t *testing.T, store *PackStore, maxCap int) {
+	t.Helper()
+	store.filesMu.RLock()
+	defer store.filesMu.RUnlock()
+
+	require.LessOrEqual(t, len(store.readFiles), maxCap)
+	require.Len(t, store.readClock, len(store.readFiles))
+	require.Len(t, store.readClockIdx, len(store.readFiles))
+	for idx, packID := range store.readClock {
+		require.Contains(t, store.readFiles, packID)
+		require.Equal(t, idx, store.readClockIdx[packID])
+	}
+	if len(store.readClock) == 0 {
+		require.Equal(t, 0, store.readClockHand)
+	} else {
+		require.GreaterOrEqual(t, store.readClockHand, 0)
+		require.Less(t, store.readClockHand, len(store.readClock))
+	}
+}
+
+func TestPackStore_ReadFilesClockCache_CapsOpenFDsAndPreservesSecondChance(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	store, err := newPackStore(t.TempDir(), 4096, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	require.Equal(t, 64, store.openReadPackLimit())
+	store.maxOpenReadPacks = 3
+	require.Equal(t, 3, store.openReadPackLimit())
+
+	const totalPacks = 7
+	refs := make([]BlobRef, totalPacks)
+	payloads := make([][]byte, totalPacks)
+	for i := range totalPacks {
+		payloads[i] = bytes.Repeat([]byte{byte(0x10 + i + 1)}, 4096)
+		appended, appErr := store.AppendBlocks(ctx, [][]byte{payloads[i]})
+		require.NoError(t, appErr)
+		store.ReleaseInFlight(appended)
+		refs[i] = appended[0]
+		require.Equal(t, uint64(i+1), refs[i].PackID)
+	}
+
+	var ebr epochTracker
+	ebr.init(store.unlinkRetiredPacks)
+
+	readAndCheck := func(packIdx int) {
+		t.Helper()
+		pin := ebr.pin()
+		got, readErr := store.readBlockPinned(pin, refs[packIdx])
+		pin.unpin()
+		require.NoError(t, readErr)
+		require.Equal(t, payloads[packIdx], got)
+	}
+
+	readAndCheck(6)
+	store.filesMu.RLock()
+	require.Empty(t, store.readFiles)
+	store.filesMu.RUnlock()
+	assertReadClockCacheInvariant(t, store, 3)
+
+	readAndCheck(0)
+	readAndCheck(1)
+	readAndCheck(2)
+
+	store.filesMu.RLock()
+	require.Len(t, store.readFiles, 3)
+	require.Len(t, store.readClock, 3)
+	require.Len(t, store.readClockIdx, 3)
+	require.Contains(t, store.readFiles, uint64(1))
+	require.Contains(t, store.readFiles, uint64(2))
+	require.Contains(t, store.readFiles, uint64(3))
+	store.filesMu.RUnlock()
+	assertReadClockCacheInvariant(t, store, 3)
+
+	readAndCheck(0)
+	readAndCheck(3)
+
+	store.filesMu.RLock()
+	require.Len(t, store.readFiles, 3)
+	require.Contains(t, store.readFiles, uint64(1))
+	require.NotContains(t, store.readFiles, uint64(2))
+	require.Contains(t, store.readFiles, uint64(4))
+	store.filesMu.RUnlock()
+	assertReadClockCacheInvariant(t, store, 3)
+
+	readAndCheck(4)
+	assertReadClockCacheInvariant(t, store, 3)
+
+	readAndCheck(5)
+	assertReadClockCacheInvariant(t, store, 3)
+
+	store.filesMu.RLock()
+	require.NotContains(t, store.readFiles, uint64(2))
+	store.filesMu.RUnlock()
+
+	readAndCheck(1)
+	store.filesMu.RLock()
+	require.Contains(t, store.readFiles, uint64(2))
+	store.filesMu.RUnlock()
+	assertReadClockCacheInvariant(t, store, 3)
+
+	require.NoError(t, store.RetirePack(ctx, 2))
+	failed, unlinkErr := store.unlinkRetiredPacks([]uint64{2})
+	require.NoError(t, unlinkErr)
+	require.Empty(t, failed)
+
+	store.filesMu.RLock()
+	require.Len(t, store.readFiles, 2)
+	require.Len(t, store.readClock, 2)
+	require.Len(t, store.readClockIdx, 2)
+	require.NotContains(t, store.readFiles, uint64(2))
+	require.NotContains(t, store.readClockIdx, uint64(2))
+	store.filesMu.RUnlock()
+	assertReadClockCacheInvariant(t, store, 3)
+
+	require.NoError(t, store.Close())
+	store.filesMu.RLock()
+	require.Empty(t, store.readFiles)
+	require.Empty(t, store.readClock)
+	require.Empty(t, store.readClockIdx)
+	require.Equal(t, 0, store.readClockHand)
+	store.filesMu.RUnlock()
+}
+
+func TestPackStore_ReadFilesClockCache_ConcurrentEvictionAndReadsNoEBADF(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	store, err := newPackStore(t.TempDir(), 4096, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	store.maxOpenReadPacks = 2
+
+	const (
+		sealedPacks    = 12
+		totalPacks     = sealedPacks + 1
+		readers        = 8
+		readsPerReader = 300
+	)
+
+	refs := make([]BlobRef, totalPacks)
+	payloads := make([][]byte, totalPacks)
+	for i := range totalPacks {
+		payloads[i] = bytes.Repeat([]byte{byte(i + 1)}, 4096)
+		appended, appErr := store.AppendBlocks(ctx, [][]byte{payloads[i]})
+		require.NoError(t, appErr)
+		store.ReleaseInFlight(appended)
+		refs[i] = appended[0]
+	}
+
+	var ebr epochTracker
+	ebr.init(store.unlinkRetiredPacks)
+
+	var (
+		wg       sync.WaitGroup
+		readErrs = make([]error, readers)
+	)
+
+	for r := range readers {
+		readerIdx := r
+		wg.Go(func() {
+			rng := rand.New(rand.NewPCG(uint64(readerIdx+1), 0x51a7))
+			for range readsPerReader {
+				idx := rng.IntN(sealedPacks)
+				pin := ebr.pin()
+				got, readErr := store.readBlockPinned(pin, refs[idx])
+				pin.unpin()
+				if readErr != nil {
+					readErrs[readerIdx] = readErr
+					return
+				}
+				if !bytes.Equal(got, payloads[idx]) {
+					readErrs[readerIdx] = errors.New("payload mismatch during concurrent clock eviction")
+					return
+				}
+			}
+		})
+	}
+
+	wg.Wait()
+
+	for _, rErr := range readErrs {
+		require.NoError(t, rErr)
+	}
+	assertReadClockCacheInvariant(t, store, 2)
 }

@@ -12,6 +12,8 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 )
 
+const defaultMaxGCRelocatePacksPerCycle = 4
+
 type relocateItem struct {
 	loc    BlockRefLocation
 	oldRef BlobRef
@@ -72,29 +74,29 @@ func (d *DiskStore) retirePackAndRecord(ctx context.Context, packID, totalBytes 
 	return d.ebr.retire(packID)
 }
 
-func (d *DiskStore) sweepSealedPack(ctx context.Context, packID, totalBytes uint64, refMap map[BlobRef][]BlockRefLocation, stats *GCStats) error {
+func (d *DiskStore) sweepSealedPack(ctx context.Context, packID, totalBytes uint64, refMap map[BlobRef][]BlockRefLocation, stats *GCStats) (bool, error) {
 	liveBytes := sumLiveRefBytes(refMap)
 	if liveBytes == 0 {
 		if flushErr := d.flushWALForGC(ctx); flushErr != nil {
-			return flushErr
+			return false, flushErr
 		}
-		return d.retirePackAndRecord(ctx, packID, totalBytes, stats)
+		return false, d.retirePackAndRecord(ctx, packID, totalBytes, stats)
 	}
 	if liveBytes*2 > totalBytes {
-		return nil
+		return false, nil
 	}
 	relocated, skipped, relocErr := d.relocatePack(ctx, packID, refMap)
 	stats.BlocksRelocated += relocated
 	stats.BlocksSkipped += skipped
 	if relocErr != nil {
-		return relocErr
+		return true, relocErr
 	}
 	if skipped > 0 {
 		if flushErr := d.flushWALForGC(ctx); flushErr != nil {
-			return flushErr
+			return true, flushErr
 		}
 	}
-	return d.retirePackAndRecord(ctx, packID, totalBytes, stats)
+	return true, d.retirePackAndRecord(ctx, packID, totalBytes, stats)
 }
 
 type gcGate struct {
@@ -262,6 +264,19 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 	if err := d.lockGCExclusive(ctx); err != nil {
 		return GCStats{}, err
 	}
+	var (
+		stats            GCStats
+		firstErr         error
+		moreWork         bool
+		relocatedPacks   int
+		zeroLiveSealed   []uint64
+		sealedToRelocate []uint64
+	)
+	defer func() {
+		if moreWork && firstErr == nil && ctx.Err() == nil {
+			d.TriggerGC()
+		}
+	}()
 	defer d.unlockGCExclusive()
 
 	insp, err := d.packs.GCInspectionSnapshot(ctx)
@@ -294,13 +309,6 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 	}
 	slices.Sort(packIDs)
 
-	var (
-		stats            GCStats
-		firstErr         error
-		zeroLiveSealed   []uint64
-		sealedToRelocate []uint64
-	)
-
 	for _, packID := range packIDs {
 		if ctx.Err() != nil {
 			firstErr = ctx.Err()
@@ -324,7 +332,8 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 
 	if len(zeroLiveSealed) > 0 && ctx.Err() == nil {
 		if flushErr := d.flushWALForGC(ctx); flushErr != nil {
-			return stats, flushErr
+			firstErr = flushErr
+			return stats, firstErr
 		}
 		for _, packID := range zeroLiveSealed {
 			if ctx.Err() != nil {
@@ -368,8 +377,14 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 							if firstErr == nil {
 								firstErr = scanErr
 							}
-						} else if sweepErr := d.sweepSealedPack(ctx, activePackID, postSize, postRefs[activePackID], &stats); sweepErr != nil && firstErr == nil {
-							firstErr = sweepErr
+						} else {
+							didRelocate, sweepErr := d.sweepSealedPack(ctx, activePackID, postSize, postRefs[activePackID], &stats)
+							if didRelocate {
+								relocatedPacks++
+							}
+							if sweepErr != nil && firstErr == nil {
+								firstErr = sweepErr
+							}
 						}
 					}
 				}
@@ -384,7 +399,15 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 			}
 			break
 		}
-		if sweepErr := d.sweepSealedPack(ctx, packID, packSizes[packID], packLiveRefs[packID], &stats); sweepErr != nil && firstErr == nil {
+		if relocatedPacks >= defaultMaxGCRelocatePacksPerCycle {
+			moreWork = true
+			break
+		}
+		didRelocate, sweepErr := d.sweepSealedPack(ctx, packID, packSizes[packID], packLiveRefs[packID], &stats)
+		if didRelocate {
+			relocatedPacks++
+		}
+		if sweepErr != nil && firstErr == nil {
 			firstErr = sweepErr
 		}
 	}
@@ -557,7 +580,36 @@ func (d *DiskStore) relocatePack(ctx context.Context, packID uint64, refMap map[
 	}
 	slices.Sort(layerIDs)
 
+	var commitLayerIDs []uint64
+	var workLayerIDs []uint64
 	for _, lid := range layerIDs {
+		if layerMeta[lid].IsCommit {
+			commitLayerIDs = append(commitLayerIDs, lid)
+		} else {
+			workLayerIDs = append(workLayerIDs, lid)
+		}
+	}
+
+	if len(commitLayerIDs) > 0 {
+		if d.beforeGCRelocateHook != nil {
+			for _, lid := range commitLayerIDs {
+				for _, item := range byLayer[lid] {
+					if hookErr := d.beforeGCRelocateHook(packID, item.loc); hookErr != nil {
+						return relocated, skipped, hookErr
+					}
+				}
+			}
+		}
+
+		rel, skp, relErr := d.relocateCommitLayers(ctx, commitLayerIDs, layerMeta, byLayer)
+		if relErr != nil {
+			return relocated, skipped, relErr
+		}
+		relocated += rel
+		skipped += skp
+	}
+
+	for _, lid := range workLayerIDs {
 		items := byLayer[lid]
 		if d.beforeGCRelocateHook != nil {
 			for _, item := range items {
@@ -568,7 +620,7 @@ func (d *DiskStore) relocatePack(ctx context.Context, packID uint64, refMap map[
 		}
 
 		target := layerMeta[lid]
-		rel, skp, relErr := d.relocateLayer(ctx, target, items)
+		rel, skp, relErr := d.relocateWorkLayer(ctx, target, items)
 		if relErr != nil {
 			return relocated, skipped, relErr
 		}
@@ -579,63 +631,98 @@ func (d *DiskStore) relocatePack(ctx context.Context, packID uint64, refMap map[
 	return relocated, skipped, nil
 }
 
-func (d *DiskStore) relocateLayer(ctx context.Context, target BlockRefLocation, items []relocateItem) (relocated, skipped int, err error) {
+func (d *DiskStore) relocateCommitLayers(
+	ctx context.Context,
+	commitLayerIDs []uint64,
+	layerMeta map[uint64]BlockRefLocation,
+	byLayer map[uint64][]relocateItem,
+) (relocated, skipped int, err error) {
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
 
-	if !target.IsCommit {
-		bm, bmErr := readBranchMeta(d.db, d.keys, target.BranchName)
-		if errors.Is(bmErr, ErrNotFound) {
-			return 0, len(items), nil
-		}
-		if bmErr != nil {
-			return 0, 0, bmErr
-		}
-		if bm.WorkLayerID != target.LayerID {
-			return 0, len(items), nil
-		}
-		mu, lockErr := d.acquireBranchLock(target.BranchName)
-		if errors.Is(lockErr, ErrNotFound) {
-			return 0, len(items), nil
-		}
-		if lockErr != nil {
-			return 0, 0, lockErr
-		}
-		defer mu.Unlock()
+	batch := d.db.NewIndexedBatch()
+	defer func() { _ = batch.Close() }()
 
-		batch := d.db.NewIndexedBatch()
-		defer func() { _ = batch.Close() }()
-
-		curBM, reErr := readBranchMeta(batch, d.keys, target.BranchName)
-		if errors.Is(reErr, ErrNotFound) {
-			return 0, len(items), nil
+	for _, lid := range commitLayerIDs {
+		target := layerMeta[lid]
+		items := byLayer[lid]
+		cmt, cmtErr := readCommitMeta(d.db, d.keys, target.CommitID)
+		if errors.Is(cmtErr, ErrNotFound) {
+			skipped += len(items)
+			continue
 		}
-		if reErr != nil {
-			return 0, 0, reErr
+		if cmtErr != nil {
+			return 0, 0, cmtErr
 		}
-		if curBM.WorkLayerID != target.LayerID {
-			return 0, len(items), nil
+		if cmt.LayerID != target.LayerID {
+			skipped += len(items)
+			continue
 		}
-		return d.relocateLayerBatch(ctx, batch, items)
+		rel, skp, stageErr := d.stageRelocateLayerItems(batch, items)
+		if stageErr != nil {
+			return 0, 0, stageErr
+		}
+		relocated += rel
+		skipped += skp
 	}
 
-	cmt, cmtErr := readCommitMeta(d.db, d.keys, target.CommitID)
-	if errors.Is(cmtErr, ErrNotFound) {
+	if batch.Count() > 0 {
+		if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
+			return 0, 0, commitErr
+		}
+	}
+	return relocated, skipped, nil
+}
+
+func (d *DiskStore) relocateWorkLayer(ctx context.Context, target BlockRefLocation, items []relocateItem) (relocated, skipped int, err error) {
+	d.branchRegMu.RLock()
+	defer d.branchRegMu.RUnlock()
+
+	bm, bmErr := readBranchMeta(d.db, d.keys, target.BranchName)
+	if errors.Is(bmErr, ErrNotFound) {
 		return 0, len(items), nil
 	}
-	if cmtErr != nil {
-		return 0, 0, cmtErr
+	if bmErr != nil {
+		return 0, 0, bmErr
 	}
-	if cmt.LayerID != target.LayerID {
+	if bm.WorkLayerID != target.LayerID {
 		return 0, len(items), nil
 	}
+	mu, lockErr := d.acquireBranchLock(target.BranchName)
+	if errors.Is(lockErr, ErrNotFound) {
+		return 0, len(items), nil
+	}
+	if lockErr != nil {
+		return 0, 0, lockErr
+	}
+	defer mu.Unlock()
 
 	batch := d.db.NewIndexedBatch()
 	defer func() { _ = batch.Close() }()
-	return d.relocateLayerBatch(ctx, batch, items)
+
+	curBM, reErr := readBranchMeta(batch, d.keys, target.BranchName)
+	if errors.Is(reErr, ErrNotFound) {
+		return 0, len(items), nil
+	}
+	if reErr != nil {
+		return 0, 0, reErr
+	}
+	if curBM.WorkLayerID != target.LayerID {
+		return 0, len(items), nil
+	}
+	relocated, skipped, err = d.stageRelocateLayerItems(batch, items)
+	if err != nil {
+		return 0, 0, err
+	}
+	if batch.Count() > 0 {
+		if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
+			return 0, 0, commitErr
+		}
+	}
+	return relocated, skipped, nil
 }
 
-func (d *DiskStore) relocateLayerBatch(ctx context.Context, batch *pebble.Batch, items []relocateItem) (relocated, skipped int, err error) {
+func (d *DiskStore) stageRelocateLayerItems(batch *pebble.Batch, items []relocateItem) (relocated, skipped int, err error) {
 	dk := d.keys
 	for _, item := range items {
 		key := dk.LayerDataKey(item.loc.LayerID, item.loc.Ino, item.loc.BlockIdx)
@@ -664,11 +751,6 @@ func (d *DiskStore) relocateLayerBatch(ctx context.Context, batch *pebble.Batch,
 			return 0, 0, setErr
 		}
 		relocated++
-	}
-	if batch.Count() > 0 {
-		if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
-			return 0, 0, commitErr
-		}
 	}
 	return relocated, skipped, nil
 }

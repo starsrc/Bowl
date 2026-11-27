@@ -14,9 +14,12 @@ import (
 	"sync/atomic"
 )
 
+const defaultMaxOpenReadPacks = 64
+
 type packReadHandle struct {
-	file *os.File
-	refs atomic.Int32
+	file     *os.File
+	refs     atomic.Int32
+	accessed atomic.Bool
 }
 
 func (h *packReadHandle) acquire() bool {
@@ -56,8 +59,9 @@ type PackGCInspection struct {
 }
 
 type PackStore struct {
-	dir         string
-	maxPackSize uint32
+	dir              string
+	maxPackSize      uint32
+	maxOpenReadPacks int
 
 	syncMu sync.Mutex
 
@@ -89,6 +93,9 @@ type PackStore struct {
 	activeReadID     uint64
 	activeReadHandle *packReadHandle
 	readFiles        map[uint64]*packReadHandle
+	readClock        []uint64
+	readClockIdx     map[uint64]int
+	readClockHand    int
 	filesDeleteGen   uint64
 	closedFiles      bool
 
@@ -110,6 +117,7 @@ func newPackStore(dir string, maxPackSize uint32, onDirty func()) (*PackStore, e
 		retiredPacks:  make(map[uint64]struct{}),
 		inFlightPacks: make(map[uint64]int),
 		readFiles:     make(map[uint64]*packReadHandle),
+		readClockIdx:  make(map[uint64]int),
 		closeDone:     make(chan struct{}),
 	}
 	if err := p.recoverExistingPacks(); err != nil {
@@ -164,15 +172,21 @@ func (p *PackStore) Close() error {
 
 		p.filesMu.Lock()
 		p.closedFiles = true
-		for id, handle := range p.readFiles {
-			delete(p.readFiles, id)
-			handle.release()
+		for id := range p.readFiles {
+			p.removeReadFileLocked(id)
 		}
 		p.filesMu.Unlock()
 
 		p.closeErr = errors.Join(flushErr, closeErr)
 	})
 	return p.closeErr
+}
+
+func (p *PackStore) openReadPackLimit() int {
+	if p.maxOpenReadPacks > 0 {
+		return p.maxOpenReadPacks
+	}
+	return defaultMaxOpenReadPacks
 }
 
 func (p *PackStore) PhysicalBytes() uint64 {
@@ -353,10 +367,7 @@ func (p *PackStore) unlinkRetiredPacks(packIDs []uint64) ([]uint64, error) {
 		p.filesMu.Lock()
 		p.filesDeleteGen++
 		for _, packID := range removed {
-			if handle, ok := p.readFiles[packID]; ok {
-				delete(p.readFiles, packID)
-				handle.release()
-			}
+			p.removeReadFileLocked(packID)
 		}
 		p.filesMu.Unlock()
 
@@ -780,6 +791,46 @@ func (p *PackStore) readBlockForGC(ref BlobRef) ([]byte, error) {
 	return p.readBlockInternal(ref)
 }
 
+func (p *PackStore) removeReadFileLocked(packID uint64) {
+	handle, ok := p.readFiles[packID]
+	if !ok {
+		return
+	}
+	delete(p.readFiles, packID)
+	if idx, hasIdx := p.readClockIdx[packID]; hasIdx {
+		delete(p.readClockIdx, packID)
+		last := len(p.readClock) - 1
+		if idx != last {
+			moved := p.readClock[last]
+			p.readClock[idx] = moved
+			p.readClockIdx[moved] = idx
+		}
+		p.readClock = p.readClock[:last]
+		if len(p.readClock) == 0 || p.readClockHand >= len(p.readClock) {
+			p.readClockHand = 0
+		}
+	}
+	handle.release()
+}
+
+func (p *PackStore) evictReadFileForInsertLocked(limit int) {
+	for len(p.readFiles) >= limit && len(p.readClock) > 0 {
+		if p.readClockHand >= len(p.readClock) {
+			p.readClockHand = 0
+		}
+		packID := p.readClock[p.readClockHand]
+		h := p.readFiles[packID]
+		if h != nil && h.accessed.Swap(false) {
+			p.readClockHand++
+			if p.readClockHand >= len(p.readClock) {
+				p.readClockHand = 0
+			}
+			continue
+		}
+		p.removeReadFileLocked(packID)
+	}
+}
+
 func (p *PackStore) acquireReadHandle(packID uint64) (*packReadHandle, error) {
 	p.filesMu.RLock()
 	if p.activeReadID == packID && p.activeReadHandle != nil && p.activeReadHandle.acquire() {
@@ -788,6 +839,9 @@ func (p *PackStore) acquireReadHandle(packID uint64) (*packReadHandle, error) {
 		return h, nil
 	}
 	if h := p.readFiles[packID]; h != nil && h.acquire() {
+		if !h.accessed.Load() {
+			h.accessed.Store(true)
+		}
 		p.filesMu.RUnlock()
 		return h, nil
 	}
@@ -810,6 +864,9 @@ func (p *PackStore) acquireReadHandle(packID uint64) (*packReadHandle, error) {
 		return h, nil
 	}
 	if existing := p.readFiles[packID]; existing != nil && existing.acquire() {
+		if !existing.accessed.Load() {
+			existing.accessed.Store(true)
+		}
 		p.filesMu.Unlock()
 		_ = file.Close()
 		return existing, nil
@@ -820,8 +877,11 @@ func (p *PackStore) acquireReadHandle(packID uint64) (*packReadHandle, error) {
 		p.filesMu.Unlock()
 		return nh, nil
 	}
+	p.evictReadFileForInsertLocked(p.openReadPackLimit())
 	nh.refs.Store(2)
 	p.readFiles[packID] = nh
+	p.readClockIdx[packID] = len(p.readClock)
+	p.readClock = append(p.readClock, packID)
 	p.filesMu.Unlock()
 	return nh, nil
 }

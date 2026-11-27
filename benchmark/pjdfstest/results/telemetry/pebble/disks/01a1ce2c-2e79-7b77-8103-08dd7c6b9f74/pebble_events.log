@@ -1,5 +1,0 @@
-{"disk_id":"01a1ce2c-2e79-7b77-8103-08dd7c6b9f74","event":"open_begin","max_open_files":128,"memtable_bytes":16777216,"ts":"2026-11-12T05:12:44.409882872Z","wal_bytes_per_sync":4194304}
-{"disk_id":"01a1ce2c-2e79-7b77-8103-08dd7c6b9f74","err":"","event":"wal_created","file_num":"000002","job_id":1,"recycled_file_num":"000000","ts":"2026-11-12T05:12:44.410872944Z"}
-{"disk_id":"01a1ce2c-2e79-7b77-8103-08dd7c6b9f74","err":"","event":"wal_created","file_num":"000004","job_id":3,"recycled_file_num":"000000","ts":"2026-11-12T05:13:04.082287566Z"}
-{"disk_id":"01a1ce2c-2e79-7b77-8103-08dd7c6b9f74","err":"","event":"wal_created","file_num":"000005","job_id":4,"recycled_file_num":"000000","ts":"2026-11-12T05:14:42.722219406Z"}
-{"disk_id":"01a1ce2c-2e79-7b77-8103-08dd7c6b9f74","err":"","event":"wal_created","file_num":"000006","job_id":5,"recycled_file_num":"000000","ts":"2026-11-12T05:15:06.033381996Z"}

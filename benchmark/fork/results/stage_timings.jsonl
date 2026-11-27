@@ -1,8 +1,0 @@
-{"stage":"cross_compile_binaries","duration_sec":6,"timestamp":"2026-11-12T15:12:04Z"}
-{"stage":"provision_ecs_instances","duration_sec":32,"timestamp":"2026-11-12T15:12:36Z"}
-{"stage":"deploy_server_node","duration_sec":179,"timestamp":"2026-11-12T15:15:35Z"}
-{"stage":"setup_client_and_mounts","duration_sec":42,"timestamp":"2026-11-12T15:16:17Z"}
-{"stage": "suite1_fork_matrix", "duration_sec": 53.05, "timestamp": "2026-11-12T15:18:27Z"}
-{"stage": "suite1_copy_baseline", "duration_sec": 25.922, "timestamp": "2026-11-12T15:18:27Z"}
-{"stage": "suite2_online_fork", "duration_sec": 12.036, "timestamp": "2026-11-12T15:18:27Z"}
-{"stage": "suite3_fanout_cow", "duration_sec": 7.529, "timestamp": "2026-11-12T15:18:27Z"}

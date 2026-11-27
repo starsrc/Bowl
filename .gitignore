@@ -31,7 +31,7 @@ go.work.sum
 .tdd_list.md
 services/storage/vendor/
 client/vendor/
-benchmark/**/results/telemetry-*.tar.gz
+benchmark/runs/
 .worktrees/
 .archify/
 

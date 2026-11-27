@@ -27,8 +27,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sys/unix"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -396,7 +394,7 @@ type stageItem struct {
 
 	readers   int
 	uploaded  bool
-	discarded bool
+	discarded atomic.Bool
 	unlinked  bool
 }
 
@@ -436,23 +434,19 @@ func (it *stageItem) recordSpanLinkLocked(ctx context.Context) {
 }
 
 type stageInode struct {
-	ino              uint64
-	nodeID           uint64
-	active           *stageItem
-	pending          []*stageItem
-	activeWriteBusy  bool
-	discarding       bool
-	inflightHooks    int
-	createdInSession bool
-	hasKnownSize     bool
-	logicalSize      uint64
-	lastWriteTS      *timestamppb.Timestamp
-	streamGen        uint64
-	errGen           uint64
-	errSeq           uint64
-	lastErr          error
-	defaultSeenSeq   uint64
-	discardCh        chan struct{}
+	ino               uint64
+	nodeID            uint64
+	active            *stageItem
+	pending           []*stageItem
+	activeWriteBusy   bool
+	discarding        bool
+	lastWriteUnixNano int64
+	streamGen         uint64
+	errGen            uint64
+	errSeq            uint64
+	lastErr           error
+	defaultSeenSeq    uint64
+	discardCh         chan struct{}
 }
 
 func newStageInode(ino uint64) *stageInode {
@@ -464,19 +458,35 @@ func newStageInode(ino uint64) *stageInode {
 }
 
 func (st *stageInode) hasPendingLocked() bool {
-	return st.active != nil || len(st.pending) > 0 || st.inflightHooks > 0
+	return st.active != nil || len(st.pending) > 0
 }
 
 func (st *stageInode) hasInflightLocked() bool {
-	if st.inflightHooks > 0 {
-		return true
-	}
 	for _, it := range st.pending {
 		if it.state == stageStateInflight {
 			return true
 		}
 	}
 	return false
+}
+
+func (st *stageInode) dirtyEndLocked() (end uint64, hasDirty bool) {
+	if st.active != nil && st.active.length > 0 && !st.active.discarded.Load() && !st.active.uploaded {
+		hasDirty = true
+		if chunkEnd := st.active.offset + st.active.length; chunkEnd > end {
+			end = chunkEnd
+		}
+	}
+	for _, it := range st.pending {
+		if it == nil || it.length == 0 || it.discarded.Load() || it.uploaded {
+			continue
+		}
+		hasDirty = true
+		if chunkEnd := it.offset + it.length; chunkEnd > end {
+			end = chunkEnd
+		}
+	}
+	return end, hasDirty
 }
 
 func (st *stageInode) resetStreamLocked() {
@@ -746,6 +756,15 @@ func (c *StageCoordinator) drainingBytesLocked() uint64 {
 	return draining
 }
 
+func (c *StageCoordinator) pruneIdleInodeLocked(st *stageInode) {
+	if st == nil || st.hasPendingLocked() || st.activeWriteBusy || st.discarding || st.errSeq != 0 {
+		return
+	}
+	if c.inodes[st.ino] == st {
+		delete(c.inodes, st.ino)
+	}
+}
+
 func (c *StageCoordinator) sealActiveLocked(st *stageInode) bool {
 	if st == nil || st.active == nil || st.activeWriteBusy || c.stopWorkers || c.aborted.Load() {
 		return false
@@ -756,6 +775,10 @@ func (c *StageCoordinator) sealActiveLocked(st *stageInode) bool {
 		it.state = stageStateDone
 		c.pendingChunks.Add(-1)
 		c.totalActiveItems.Add(-1)
+		if !st.hasPendingLocked() {
+			st.lastWriteUnixNano = 0
+			c.pruneIdleInodeLocked(st)
+		}
 		return false
 	}
 	it.state = stageStateQueued
@@ -790,95 +813,35 @@ func (c *StageCoordinator) HasPending(ino uint64) bool {
 	return pending
 }
 
-func (c *StageCoordinator) SeedCreatedInode(ino uint64) {
-	if c == nil || ino == 0 {
-		return
-	}
-	c.mu.Lock()
-	st := c.getOrCreateInodeLocked(ino)
-	if !st.hasPendingLocked() {
-		st.createdInSession = true
-		st.hasKnownSize = true
-		st.logicalSize = 0
-		st.lastWriteTS = nil
-	}
-	c.mu.Unlock()
-}
-
-func (c *StageCoordinator) ResetTruncatedInode(ino uint64) {
-	if c == nil || ino == 0 {
-		return
-	}
-	c.mu.Lock()
-	st := c.getOrCreateInodeLocked(ino)
-	st.createdInSession = true
-	st.hasKnownSize = true
-	st.logicalSize = 0
-	st.lastWriteTS = nil
-	st.resetStreamLocked()
-	c.mu.Unlock()
-}
-
-func (c *StageCoordinator) ObserveServerInode(ino uint64, inode *storagev1.Inode, truncatedZero bool) {
-	if c == nil || ino == 0 || inode == nil || inode.GetAttr() == nil {
-		return
-	}
-	c.mu.Lock()
-	st := c.getOrCreateInodeLocked(ino)
-	if !st.hasPendingLocked() {
-		st.hasKnownSize = true
-		st.logicalSize = inode.GetAttr().GetSize()
-		st.createdInSession = truncatedZero
-		if truncatedZero {
-			st.lastWriteTS = nil
-		}
-	}
-	c.mu.Unlock()
-}
-
-func (c *StageCoordinator) InvalidateKnownSize(ino uint64) {
-	if c == nil || ino == 0 {
-		return
-	}
-	c.mu.Lock()
-	if st := c.inodes[ino]; st != nil && !st.hasPendingLocked() {
-		st.hasKnownSize = false
-		st.createdInSession = false
-	}
-	c.mu.Unlock()
-}
-
-func (c *StageCoordinator) RemoveIdleInode(ino uint64) {
-	if c == nil || ino == 0 {
-		return
-	}
-	c.mu.Lock()
-	if st := c.inodes[ino]; st != nil && !st.hasPendingLocked() && !st.activeWriteBusy && st.errSeq == 0 {
-		delete(c.inodes, ino)
-	}
-	c.mu.Unlock()
-}
-
-func (c *StageCoordinator) OverlayAttr(ino uint64, attr *fuse.Attr) {
+func (c *StageCoordinator) OverlayDirty(ino uint64, attr *fuse.Attr) bool {
 	if c == nil || attr == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
-		return
+		return false
 	}
 	c.mu.Lock()
-	st := c.inodes[ino]
-	if st == nil || !st.hasPendingLocked() {
+	if c.aborted.Load() {
 		c.mu.Unlock()
-		return
+		return false
 	}
-	if st.logicalSize > attr.Size {
-		attr.Size = st.logicalSize
+	st := c.inodes[ino]
+	if st == nil || st.discarding {
+		c.mu.Unlock()
+		return false
+	}
+	dirtyEnd, hasDirty := st.dirtyEndLocked()
+	if !hasDirty {
+		c.mu.Unlock()
+		return false
+	}
+	if dirtyEnd > attr.Size {
+		attr.Size = dirtyEnd
 		minBlocks := (attr.Size + 511) / 512
 		if minBlocks > attr.Blocks {
 			attr.Blocks = minBlocks
 		}
 	}
-	if st.lastWriteTS != nil {
-		sec := uint64(max(int64(0), st.lastWriteTS.GetSeconds()))
-		nsec := uint32(max(0, st.lastWriteTS.GetNanos()))
+	if st.lastWriteUnixNano > 0 {
+		sec := uint64(st.lastWriteUnixNano / int64(time.Second))
+		nsec := uint32(st.lastWriteUnixNano % int64(time.Second))
 		if sec > attr.Mtime || (sec == attr.Mtime && nsec > attr.Mtimensec) {
 			attr.Mtime = sec
 			attr.Mtimensec = nsec
@@ -889,35 +852,7 @@ func (c *StageCoordinator) OverlayAttr(ino uint64, attr *fuse.Attr) {
 		}
 	}
 	c.mu.Unlock()
-}
-
-func (c *StageCoordinator) OverlayInode(ino uint64, inode *storagev1.Inode) {
-	if c == nil || inode == nil || inode.GetAttr() == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
-		return
-	}
-	c.mu.Lock()
-	st := c.inodes[ino]
-	if st == nil || !st.hasPendingLocked() {
-		c.mu.Unlock()
-		return
-	}
-	a := inode.Attr
-	if st.logicalSize > a.Size {
-		a.Size = st.logicalSize
-		minBlocks := (a.Size + 511) / 512
-		if minBlocks > a.Blocks {
-			a.Blocks = minBlocks
-		}
-	}
-	if st.lastWriteTS != nil {
-		if compareProtoTimestamp(st.lastWriteTS, a.Mtime) > 0 {
-			a.Mtime = proto.CloneOf(st.lastWriteTS)
-		}
-		if compareProtoTimestamp(st.lastWriteTS, a.Ctime) > 0 {
-			a.Ctime = proto.CloneOf(st.lastWriteTS)
-		}
-	}
-	c.mu.Unlock()
+	return true
 }
 
 func (c *StageCoordinator) Write(ctx context.Context, ino, nodeID, offset uint64, data []byte) (written uint32, handled bool, err error) {
@@ -978,10 +913,7 @@ func (c *StageCoordinator) WriteForHandle(
 		step.activeChunk.length = step.oldLength + uint64(step.take)
 		step.activeChunk.recordSpanLinkLocked(ctx)
 		step.st.nodeID = nodeID
-		if curOff+uint64(step.take) > step.st.logicalSize {
-			step.st.logicalSize = curOff + uint64(step.take)
-		}
-		step.st.lastWriteTS = timestamppb.Now()
+		step.st.lastWriteUnixNano = time.Now().UnixNano()
 		step.st.activeWriteBusy = false
 		c.stateCond.Broadcast()
 		c.wakeBackpressureLocked()
@@ -1075,6 +1007,7 @@ func (c *StageCoordinator) prepareWriteStep(
 			continue
 		}
 		if deltaBytes > c.stageSize {
+			c.pruneIdleInodeLocked(st)
 			finishBP()
 			c.mu.Unlock()
 			return stageWriteStep{}, true, syscall.ENOSPC
@@ -1098,6 +1031,7 @@ func (c *StageCoordinator) prepareWriteStep(
 		if cancel != nil {
 			select {
 			case <-cancel:
+				c.pruneIdleInodeLocked(st)
 				finishBP()
 				c.mu.Unlock()
 				return stageWriteStep{}, true, rpc.ErrKernelInterrupted
@@ -1133,6 +1067,7 @@ func (c *StageCoordinator) prepareWriteStep(
 		case <-wakeCh:
 		case <-cancel:
 			c.mu.Lock()
+			c.pruneIdleInodeLocked(st)
 			finishBP()
 			c.mu.Unlock()
 			return stageWriteStep{}, true, rpc.ErrKernelInterrupted
@@ -1212,6 +1147,10 @@ func (c *StageCoordinator) rollbackWriteStepLocked(st *stageInode, activeChunk *
 		_ = os.Remove(activeChunk.path)
 	}
 	st.activeWriteBusy = false
+	if !st.hasPendingLocked() {
+		st.lastWriteUnixNano = 0
+		c.pruneIdleInodeLocked(st)
+	}
 	c.stateCond.Broadcast()
 	c.wakeBackpressureLocked()
 }
@@ -1227,7 +1166,7 @@ func (c *StageCoordinator) abortActiveWriteStepLocked(st *stageInode, activeChun
 	if st.active == activeChunk {
 		st.active = nil
 		activeChunk.state = stageStateDone
-		activeChunk.discarded = true
+		activeChunk.discarded.Store(true)
 		c.pendingChunks.Add(-1)
 		c.totalActiveItems.Add(-1)
 		if activeChunk.readers == 0 && !activeChunk.unlinked && activeChunk.path != "" {
@@ -1236,6 +1175,10 @@ func (c *StageCoordinator) abortActiveWriteStepLocked(st *stageInode, activeChun
 		}
 	}
 	st.activeWriteBusy = false
+	if !st.hasPendingLocked() {
+		st.lastWriteUnixNano = 0
+		c.pruneIdleInodeLocked(st)
+	}
 	c.stateCond.Broadcast()
 	c.wakeBackpressureLocked()
 	return pathToRemove
@@ -1257,6 +1200,9 @@ func (c *StageCoordinator) Read(
 	ctx context.Context,
 	ino, offset uint64,
 	dest []byte,
+	baseSize uint64,
+	hasBaseSize bool,
+	mutatedFn func() bool,
 	serverRead StageChunkReader,
 ) (n int, handled bool, err error) {
 	if c == nil || len(dest) == 0 || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
@@ -1281,13 +1227,10 @@ func (c *StageCoordinator) Read(
 		return 0, false, nil
 	}
 
-	createdInSession := st.createdInSession
-	hasKnownSize := st.hasKnownSize
-	logicalSize := st.logicalSize
-
 	var snapshots []readChunkSnapshot
+	var dirtyEnd uint64
 	collect := func(it *stageItem) {
-		if it == nil || it.length == 0 || it.discarded || it.uploaded {
+		if it == nil || it.length == 0 || it.discarded.Load() || it.uploaded {
 			return
 		}
 		it.readers++
@@ -1297,6 +1240,9 @@ func (c *StageCoordinator) Read(
 			length: it.length,
 			path:   it.path,
 		})
+		if chunkEnd := it.offset + it.length; chunkEnd > dirtyEnd {
+			dirtyEnd = chunkEnd
+		}
 	}
 	for _, it := range st.pending {
 		collect(it)
@@ -1304,18 +1250,32 @@ func (c *StageCoordinator) Read(
 	collect(st.active)
 	c.mu.Unlock()
 
+	if len(snapshots) == 0 {
+		return 0, false, nil
+	}
+
 	defer func() {
 		c.releaseReadSnapshots(snapshots)
 	}()
 
+	if hasBaseSize && mutatedFn != nil && mutatedFn() {
+		hasBaseSize = false
+		baseSize = 0
+	}
+
+	logicalSize := dirtyEnd
+	if hasBaseSize && baseSize > logicalSize {
+		logicalSize = baseSize
+	}
+
 	reqStart := offset
 	reqEnd := offset + uint64(len(dest))
 
-	if createdInSession {
-		if reqStart >= logicalSize {
+	if hasBaseSize && baseSize == 0 {
+		if reqStart >= dirtyEnd {
 			return 0, true, nil
 		}
-		readLen := min(uint64(len(dest)), logicalSize-reqStart)
+		readLen := min(uint64(len(dest)), dirtyEnd-reqStart)
 		clear(dest[:readLen])
 		if overlayErr := overlaySnapshotChunks(dest[:readLen], reqStart, snapshots); overlayErr != nil {
 			return 0, true, overlayErr
@@ -1324,7 +1284,7 @@ func (c *StageCoordinator) Read(
 	}
 
 	targetEnd := reqEnd
-	if hasKnownSize {
+	if hasBaseSize {
 		if reqStart >= logicalSize {
 			return 0, true, nil
 		}
@@ -1371,7 +1331,7 @@ func (c *StageCoordinator) releaseReadSnapshots(snapshots []readChunkSnapshot) {
 	for _, snap := range snapshots {
 		it := snap.item
 		it.readers--
-		if it.readers == 0 && (it.uploaded || it.discarded) && !it.unlinked && it.path != "" {
+		if it.readers == 0 && (it.uploaded || it.discarded.Load()) && !it.unlinked && it.path != "" {
 			it.unlinked = true
 			toRemove = append(toRemove, it.path)
 		}
@@ -1588,7 +1548,7 @@ func (c *StageCoordinator) barrierInodeLocked(ctx context.Context, st *stageInod
 	}
 	if !st.activeWriteBusy && !st.discarding {
 		c.sealActiveLocked(st)
-		if len(st.pending) == 0 && st.inflightHooks == 0 {
+		if len(st.pending) == 0 {
 			return nil
 		}
 	}
@@ -1625,7 +1585,7 @@ func (c *StageCoordinator) barrierInodeLocked(ctx context.Context, st *stageInod
 		if !st.discarding {
 			c.sealActiveLocked(st)
 		}
-		if len(st.pending) == 0 && st.inflightHooks == 0 {
+		if len(st.pending) == 0 {
 			return nil
 		}
 		c.stateCond.Wait()
@@ -1720,7 +1680,7 @@ func (c *StageCoordinator) ResetInodeStream(ctx context.Context, ino uint64) err
 			return err
 		}
 		st.resetStreamLocked()
-		st.createdInSession = false
+		c.pruneIdleInodeLocked(st)
 	}
 	return nil
 }
@@ -1779,7 +1739,7 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 		it := st.active
 		st.active = nil
 		it.state = stageStateDone
-		it.discarded = true
+		it.discarded.Store(true)
 		c.pendingChunks.Add(-1)
 		c.totalActiveItems.Add(-1)
 		if c.usedBytes >= it.length {
@@ -1799,7 +1759,7 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	for _, qIt := range c.queue {
 		if qIt.ino == ino && qIt.state == stageStateQueued {
 			qIt.state = stageStateDone
-			qIt.discarded = true
+			qIt.discarded.Store(true)
 			droppedChunks++
 			freedBytes += qIt.length
 			if qIt.readers == 0 && !qIt.unlinked && qIt.path != "" {
@@ -1817,7 +1777,7 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	keepPending := 0
 	for _, pIt := range st.pending {
 		if pIt.state == stageStateInflight {
-			pIt.discarded = true
+			pIt.discarded.Store(true)
 			st.pending[keepPending] = pIt
 			keepPending++
 		}
@@ -1841,10 +1801,8 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	for st.hasInflightLocked() && !c.aborted.Load() {
 		c.stateCond.Wait()
 	}
-	st.createdInSession = false
-	st.hasKnownSize = false
-	st.logicalSize = 0
-	st.lastWriteTS = nil
+	st.lastWriteUnixNano = 0
+	st.discarding = false
 	st.resetStreamLocked()
 	if c.inodes[ino] == st {
 		delete(c.inodes, ino)
@@ -1883,7 +1841,7 @@ func (c *StageCoordinator) AbortAll(err error) {
 		c.queue[i] = nil
 		if qIt != nil && qIt.state == stageStateQueued {
 			qIt.state = stageStateDone
-			qIt.discarded = true
+			qIt.discarded.Store(true)
 			droppedChunks++
 			freedBytes += qIt.length
 			if qIt.readers == 0 && !qIt.unlinked && qIt.path != "" {
@@ -1908,7 +1866,7 @@ func (c *StageCoordinator) AbortAll(err error) {
 
 		if st.active != nil {
 			it := st.active
-			it.discarded = true
+			it.discarded.Store(true)
 			if !st.activeWriteBusy {
 				st.active = nil
 				it.state = stageStateDone
@@ -1924,7 +1882,7 @@ func (c *StageCoordinator) AbortAll(err error) {
 		keepPending := 0
 		for _, pIt := range st.pending {
 			if pIt.state == stageStateInflight {
-				pIt.discarded = true
+				pIt.discarded.Store(true)
 				st.pending[keepPending] = pIt
 				keepPending++
 			}
@@ -1932,10 +1890,7 @@ func (c *StageCoordinator) AbortAll(err error) {
 		clear(st.pending[keepPending:])
 		st.pending = st.pending[:keepPending]
 
-		st.createdInSession = false
-		st.hasKnownSize = false
-		st.logicalSize = 0
-		st.lastWriteTS = nil
+		st.lastWriteUnixNano = 0
 	}
 
 	if droppedChunks > 0 {
@@ -2066,7 +2021,7 @@ func (c *StageCoordinator) Clear(ctx context.Context, stallTimeout time.Duration
 				c.queue[i] = nil
 				if qIt != nil && qIt.state == stageStateQueued {
 					qIt.state = stageStateDone
-					qIt.discarded = true
+					qIt.discarded.Store(true)
 				}
 			}
 			c.queue = c.queue[:0]
@@ -2075,11 +2030,11 @@ func (c *StageCoordinator) Clear(ctx context.Context, stallTimeout time.Duration
 					continue
 				}
 				if st.active != nil {
-					st.active.discarded = true
+					st.active.discarded.Store(true)
 				}
 				for _, pIt := range st.pending {
 					if pIt != nil {
-						pIt.discarded = true
+						pIt.discarded.Store(true)
 					}
 				}
 			}
@@ -2296,7 +2251,7 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 		if st != nil {
 			discardCh = st.discardCh
 		}
-		aborted := c.aborted.Load() || item.discarded || (st == nil)
+		aborted := c.aborted.Load() || item.discarded.Load() || (st == nil)
 		c.mu.Unlock()
 		if aborted {
 			discardedMid = true
@@ -2364,10 +2319,11 @@ func (c *StageCoordinator) finishUploadItem(
 	discardedMid bool,
 	notFoundAbort bool,
 ) {
+	if finalErr == nil && !discardedMid && !c.aborted.Load() && !item.discarded.Load() && c.hooks.OnCommit != nil {
+		c.hooks.OnCommit(item.nodeID, item.ino, respInode)
+	}
+
 	var pathToRemove string
-	var onCommitNodeID uint64
-	var onCommitIno uint64
-	var callOnCommit bool
 
 	c.mu.Lock()
 	st := item.inodeState
@@ -2388,6 +2344,7 @@ func (c *StageCoordinator) finishUploadItem(
 	}
 
 	c.pendingChunks.Add(-1)
+	c.totalActiveItems.Add(-1)
 	if c.usedBytes >= item.length {
 		c.usedBytes -= item.length
 	} else {
@@ -2404,8 +2361,6 @@ func (c *StageCoordinator) finishUploadItem(
 			}
 		}
 
-		st.createdInSession = false
-
 		if !c.aborted.Load() {
 			if finalErr != nil && !discardedMid {
 				if !notFoundAbort {
@@ -2418,32 +2373,20 @@ func (c *StageCoordinator) finishUploadItem(
 						st.resetStreamLocked()
 					}
 				}
-			} else if finalErr == nil && !discardedMid && !item.discarded {
+			} else if finalErr == nil && !discardedMid && !item.discarded.Load() {
 				select {
 				case c.progressCh <- struct{}{}:
 				default:
 				}
-				if respInode != nil && respInode.GetAttr() != nil {
-					if respInode.GetAttr().GetSize() > st.logicalSize {
-						st.logicalSize = respInode.GetAttr().GetSize()
-					}
-					st.hasKnownSize = true
-				}
-				if c.hooks.OnCommit != nil {
-					callOnCommit = true
-					onCommitNodeID = item.nodeID
-					onCommitIno = item.ino
-				}
 			}
+		}
+
+		if !st.hasPendingLocked() {
+			st.lastWriteUnixNano = 0
+			c.pruneIdleInodeLocked(st)
 		}
 	}
 
-	waitHooks := st != nil && callOnCommit
-	if waitHooks {
-		st.inflightHooks++
-	} else {
-		c.totalActiveItems.Add(-1)
-	}
 	c.wakeBackpressureLocked()
 	c.workerCond.Broadcast()
 	c.stateCond.Broadcast()
@@ -2451,16 +2394,6 @@ func (c *StageCoordinator) finishUploadItem(
 
 	if pathToRemove != "" {
 		_ = os.Remove(pathToRemove)
-	}
-	if callOnCommit {
-		c.hooks.OnCommit(onCommitNodeID, onCommitIno, respInode)
-	}
-	if waitHooks {
-		c.mu.Lock()
-		st.inflightHooks--
-		c.totalActiveItems.Add(-1)
-		c.stateCond.Broadcast()
-		c.mu.Unlock()
 	}
 }
 
@@ -2521,28 +2454,4 @@ func isStageTransportError(err error) bool {
 		return true
 	}
 	return false
-}
-
-func compareProtoTimestamp(a, b *timestamppb.Timestamp) int {
-	var aSec, bSec int64
-	var aNano, bNano int32
-	if a != nil {
-		aSec, aNano = a.GetSeconds(), a.GetNanos()
-	}
-	if b != nil {
-		bSec, bNano = b.GetSeconds(), b.GetNanos()
-	}
-	if aSec != bSec {
-		if aSec > bSec {
-			return 1
-		}
-		return -1
-	}
-	if aNano != bNano {
-		if aNano > bNano {
-			return 1
-		}
-		return -1
-	}
-	return 0
 }

@@ -93,7 +93,23 @@ func (fs *RawFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (r
 	}
 
 	if fs.stage.HasPending(ino) {
-		n, handled, stageErr := fs.stage.Read(ctx, ino, input.Offset, dest, fetchChunk)
+		g0 := fs.metaClock.Load()
+		var baseSize uint64
+		var hasBaseSize bool
+		if info, ok := fs.lookupKnownInode(input.NodeId); ok && info.hasServerSize {
+			baseSize = info.serverSize
+			hasBaseSize = true
+		}
+		n, handled, stageErr := fs.stage.Read(
+			ctx,
+			ino,
+			input.Offset,
+			dest,
+			baseSize,
+			hasBaseSize,
+			func() bool { return fs.inodeMutatedSince(ino, g0) },
+			fetchChunk,
+		)
 		if stageErr != nil {
 			if errno, ok := errors.AsType[syscall.Errno](stageErr); ok {
 				return nil, fuse.Status(errno)
@@ -197,7 +213,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 	if n, updatedInode, local, st := fs.tmpMgr.Write(input.NodeId, input.Offset, data, appendMode); local {
 		if st == fuse.OK && len(data) > 0 {
 			fs.caps.markAbsent(input.NodeId)
-			fs.recordKnownInode(input.NodeId, updatedInode)
+			fs.recordKnownInodeAuthoritative(input.NodeId, updatedInode)
 		}
 		return n, st
 	}
@@ -263,11 +279,10 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 			return 0, fs.ToStatus(err)
 		}
 		fs.markMetaDirty()
-		fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
+		fs.recordKnownInodeMonotonic(input.NodeId, resp.Msg.GetInode())
 		fs.caps.markAbsent(input.NodeId)
 		written = resp.Msg.GetSize()
 		fs.metrics.addStagePassthrough(uint64(written))
-		fs.stage.ObserveServerInode(ino, resp.Msg.GetInode(), false)
 		return written, fuse.OK
 	}
 
@@ -304,12 +319,11 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 			return 0, fs.ToStatus(err)
 		}
 
-		fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
+		fs.recordKnownInodeMonotonic(input.NodeId, resp.Msg.GetInode())
 		fs.caps.markAbsent(input.NodeId)
 		n := resp.Msg.GetSize()
 		fs.markMetaDirty()
 		fs.metrics.addStagePassthrough(uint64(n))
-		fs.stage.ObserveServerInode(ino, resp.Msg.GetInode(), false)
 		totalWritten += n
 		if n < chunkSize {
 			break

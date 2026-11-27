@@ -143,9 +143,18 @@ type unmountProgressState struct {
 	total         uint64
 }
 
+const (
+	metaStripeCount = 1024
+	metaStripeHash  = 0x9e3779b97f4a7c15
+	metaStripeShift = 54
+)
+
 type knownInodeInfo struct {
-	isDir     bool
-	isSpecial bool
+	isDir         bool
+	isSpecial     bool
+	hasServerSize bool
+	serverSize    uint64
+	metaEpoch     uint64
 }
 
 type RawFS struct {
@@ -168,6 +177,8 @@ type RawFS struct {
 	topologySeq   atomic.Uint64
 	metaDirtySeq  atomic.Uint64
 	metaSyncedSeq atomic.Uint64
+	metaClock     atomic.Uint64
+	metaStripes   [metaStripeCount]atomic.Uint64
 	tmpMgr        *TmpFileManager
 	cfg           Config
 	metrics       *Metrics
@@ -322,7 +333,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 		fs.readAhead.configureReadOnly(cfg.AttrTimeoutSeconds, nowFn)
 	}
 	if cfg.RootInode != nil && cfg.RootInode.GetAttr() != nil {
-		fs.recordKnownInode(fuse.FUSE_ROOT_ID, cfg.RootInode)
+		fs.recordKnownInode(fuse.FUSE_ROOT_ID, cfg.RootInode, 0)
 	} else {
 		fs.knownInodes[fuse.FUSE_ROOT_ID] = knownInodeInfo{isDir: true}
 	}
@@ -356,12 +367,13 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 					if fs.IsFenced() {
 						return
 					}
+					epoch := fs.markServerMutated(ino)
 					fs.readAhead.InvalidateInode(ino)
 					fs.markMetaDirty()
-					if inode != nil {
-						fs.recordKnownInode(nodeID, inode)
+					isOpen := fs.handles.IsOpen(nodeID)
+					if fs.recordCommittedInode(nodeID, inode, epoch, isOpen) {
+						fs.caps.markAbsent(nodeID)
 					}
-					fs.caps.markAbsent(nodeID)
 				},
 			},
 		)
@@ -414,19 +426,155 @@ func isSpecialAttr(inode *storagev1.Inode) bool {
 		attr.GetMode()&(syscall.S_ISUID|syscall.S_ISGID) != 0
 }
 
-func (fs *RawFS) recordKnownInode(nodeID uint64, inode *storagev1.Inode) {
+func metaStripeIndex(serverIno uint64) uint64 {
+	return (serverIno * metaStripeHash) >> metaStripeShift
+}
+
+func (fs *RawFS) markServerMutated(serverIno uint64) uint64 {
+	s := fs.metaClock.Add(1)
+	stripe := &fs.metaStripes[metaStripeIndex(serverIno)]
+	for {
+		cur := stripe.Load()
+		if cur >= s {
+			return s
+		}
+		if stripe.CompareAndSwap(cur, s) {
+			return s
+		}
+	}
+}
+
+func (fs *RawFS) inodeMutatedSince(serverIno, g0 uint64) bool {
+	return fs.metaStripes[metaStripeIndex(serverIno)].Load() > g0
+}
+
+func (fs *RawFS) recordKnownInode(nodeID uint64, inode *storagev1.Inode, epoch uint64) {
 	if nodeID == 0 || inode == nil || inode.GetAttr() == nil {
 		return
 	}
 	info := knownInodeInfo{
-		isDir:     inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR,
-		isSpecial: isSpecialAttr(inode),
+		isDir:         inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR,
+		isSpecial:     isSpecialAttr(inode),
+		hasServerSize: true,
+		serverSize:    inode.GetAttr().GetSize(),
+		metaEpoch:     epoch,
 	}
 	fs.knownMu.Lock()
 	if fs.knownInodes == nil {
 		fs.knownInodes = make(map[uint64]knownInodeInfo)
 	}
+	if existing, ok := fs.knownInodes[nodeID]; ok && existing.metaEpoch > epoch {
+		fs.knownMu.Unlock()
+		return
+	}
 	fs.knownInodes[nodeID] = info
+	fs.knownMu.Unlock()
+}
+
+func (fs *RawFS) recordKnownInodeAuthoritative(nodeID uint64, inode *storagev1.Inode) {
+	if nodeID == 0 || inode == nil || inode.GetAttr() == nil {
+		return
+	}
+	epoch := fs.metaClock.Add(1)
+	info := knownInodeInfo{
+		isDir:         inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR,
+		isSpecial:     isSpecialAttr(inode),
+		hasServerSize: true,
+		serverSize:    inode.GetAttr().GetSize(),
+		metaEpoch:     epoch,
+	}
+	fs.knownMu.Lock()
+	if fs.knownInodes == nil {
+		fs.knownInodes = make(map[uint64]knownInodeInfo)
+	}
+	if existing, ok := fs.knownInodes[nodeID]; ok && existing.metaEpoch > info.metaEpoch {
+		info.metaEpoch = existing.metaEpoch
+	}
+	fs.knownInodes[nodeID] = info
+	fs.knownMu.Unlock()
+}
+
+func (fs *RawFS) recordKnownInodeMonotonic(nodeID uint64, inode *storagev1.Inode) {
+	if nodeID == 0 || inode == nil || inode.GetAttr() == nil {
+		return
+	}
+	epoch := fs.metaClock.Add(1)
+	respSize := inode.GetAttr().GetSize()
+	fs.knownMu.Lock()
+	if fs.knownInodes == nil {
+		fs.knownInodes = make(map[uint64]knownInodeInfo)
+	}
+	newSize := respSize
+	newEpoch := epoch
+	if existing, ok := fs.knownInodes[nodeID]; ok {
+		if existing.hasServerSize && existing.serverSize > newSize {
+			newSize = existing.serverSize
+		}
+		if existing.metaEpoch > newEpoch {
+			newEpoch = existing.metaEpoch
+		}
+	}
+	fs.knownInodes[nodeID] = knownInodeInfo{
+		isDir:         inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR,
+		isSpecial:     isSpecialAttr(inode),
+		hasServerSize: true,
+		serverSize:    newSize,
+		metaEpoch:     newEpoch,
+	}
+	fs.knownMu.Unlock()
+}
+
+func (fs *RawFS) recordCommittedInode(nodeID uint64, inode *storagev1.Inode, epoch uint64, isOpen bool) bool {
+	if nodeID == 0 {
+		return false
+	}
+	fs.knownMu.Lock()
+	existing, exists := fs.knownInodes[nodeID]
+	if !exists && !isOpen {
+		fs.knownMu.Unlock()
+		return false
+	}
+	if inode != nil && inode.GetAttr() != nil {
+		newSize := inode.GetAttr().GetSize()
+		if exists && existing.hasServerSize && existing.serverSize > newSize {
+			newSize = existing.serverSize
+		}
+		newEpoch := epoch
+		if exists && existing.metaEpoch > newEpoch {
+			newEpoch = existing.metaEpoch
+		}
+		if fs.knownInodes == nil {
+			fs.knownInodes = make(map[uint64]knownInodeInfo)
+		}
+		fs.knownInodes[nodeID] = knownInodeInfo{
+			isDir:         inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR,
+			isSpecial:     isSpecialAttr(inode),
+			hasServerSize: true,
+			serverSize:    newSize,
+			metaEpoch:     newEpoch,
+		}
+	} else if exists && epoch > existing.metaEpoch {
+		existing.metaEpoch = epoch
+		fs.knownInodes[nodeID] = existing
+	}
+	fs.knownMu.Unlock()
+	return true
+}
+
+func (fs *RawFS) invalidateKnownServerSize(nodeID uint64) {
+	if nodeID == 0 {
+		return
+	}
+	epoch := fs.metaClock.Add(1)
+	fs.knownMu.Lock()
+	if info, ok := fs.knownInodes[nodeID]; ok {
+		info.hasServerSize = false
+		info.serverSize = 0
+		if epoch > info.metaEpoch {
+			info.metaEpoch = epoch
+		}
+		fs.knownInodes[nodeID] = info
+	}
 	fs.knownMu.Unlock()
 }
 

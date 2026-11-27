@@ -54,7 +54,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	}, &out.Attr); local {
 		out.SetTimeout(0)
 		if localSt == fuse.OK {
-			fs.recordKnownInode(input.NodeId, updatedInode)
+			fs.recordKnownInodeAuthoritative(input.NodeId, updatedInode)
 			if valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
 				fs.caps.markAbsent(input.NodeId)
 			}
@@ -126,7 +126,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		inode, attrTTL, st := fs.getAttrInodeWithContext(opCtx, cancel, input.NodeId)
 		if st == fuse.OK {
 			fs.FillAttrOut(out, inode, attrTTL)
-			fs.stage.OverlayAttr(ino, &out.Attr)
+			fs.stage.OverlayDirty(ino, &out.Attr)
 		}
 		return st
 	}
@@ -149,8 +149,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	}
 	fs.markMetaDirty()
 
-	fs.recordKnownInode(input.NodeId, resp.Msg.GetInode())
-	fs.stage.ObserveServerInode(ino, resp.Msg.GetInode(), valid&fuse.FATTR_SIZE != 0 && input.Size == 0)
+	fs.recordKnownInodeAuthoritative(input.NodeId, resp.Msg.GetInode())
 	if valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
 		fs.caps.markAbsent(input.NodeId)
 	}
@@ -198,7 +197,7 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 
 	if updatedInode, local, localSt := fs.tmpMgr.Allocate(input.NodeId, input.Offset, input.Length, input.Mode); local {
 		if localSt == fuse.OK {
-			fs.recordKnownInode(input.NodeId, updatedInode)
+			fs.recordKnownInodeAuthoritative(input.NodeId, updatedInode)
 			fs.caps.markAbsent(input.NodeId)
 		}
 		return localSt
@@ -235,7 +234,7 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
-	fs.stage.InvalidateKnownSize(ino)
+	fs.invalidateKnownServerSize(input.NodeId)
 	fs.caps.markAbsent(input.NodeId)
 
 	return fuse.OK

@@ -452,15 +452,11 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 	require.False(t, coord.HasPending(inoB))
 
 	attr := fuse.Attr{Size: 12}
-	coord.OverlayAttr(inoA, &attr)
-	require.Equal(t, uint64(12), attr.Size, "OverlayAttr must not overlay aborted staged size")
-
-	protoInode := &storagev1.Inode{Ino: inoA, Attr: &storagev1.InodeAttribute{Size: 12}}
-	coord.OverlayInode(inoA, protoInode)
-	require.Equal(t, uint64(12), protoInode.GetAttr().GetSize(), "OverlayInode must not overlay aborted staged size")
+	require.False(t, coord.OverlayDirty(inoA, &attr), "OverlayDirty must return false after AbortAll")
+	require.Equal(t, uint64(12), attr.Size, "OverlayDirty must not overlay aborted staged size")
 
 	buf := make([]byte, 64)
-	_, readHandled, readErr := coord.Read(context.Background(), inoA, 0, buf, func(context.Context, uint64, uint32) (rpc.ReadPayload, error) {
+	_, readHandled, readErr := coord.Read(context.Background(), inoA, 0, buf, 12, true, nil, func(context.Context, uint64, uint32) (rpc.ReadPayload, error) {
 		return rpc.ReadPayload{}, nil
 	})
 	require.NoError(t, readErr)

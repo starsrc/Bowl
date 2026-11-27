@@ -477,7 +477,6 @@ func TestStageCoordinator_CleanChunkLifecycle_CoalesceRYOWOnCommitAndZeroLeftove
 		coord.Clear(ctx, 0)
 	})
 
-	coord.SeedCreatedInode(100)
 	w1, h1, err1 := coord.WriteForHandle(context.Background(), nil, 7, 100, 500, 0, []byte("hello "))
 	require.NoError(t, err1)
 	require.True(t, h1)
@@ -493,11 +492,11 @@ func TestStageCoordinator_CleanChunkLifecycle_CoalesceRYOWOnCommitAndZeroLeftove
 	require.Len(t, matchesBefore, 1, "contiguous writes must coalesce into one stage chunk file")
 
 	var attr fuse.Attr
-	coord.OverlayAttr(100, &attr)
+	require.True(t, coord.OverlayDirty(100, &attr))
 	require.Equal(t, uint64(12), attr.Size)
 
 	readBuf := make([]byte, 12)
-	n, handled, readErr := coord.Read(context.Background(), 100, 0, readBuf, func(context.Context, uint64, uint32) (rpc.ReadPayload, error) {
+	n, handled, readErr := coord.Read(context.Background(), 100, 0, readBuf, 0, true, nil, func(context.Context, uint64, uint32) (rpc.ReadPayload, error) {
 		t.Fatal("RYOW read on staged created inode must not call serverRead")
 		return rpc.ReadPayload{}, nil
 	})

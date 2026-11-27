@@ -79,7 +79,6 @@ func (fs *RawFS) readDirPage(parentCtx context.Context, cancel <-chan struct{}, 
 	if err != nil {
 		return nil, fs.ToStatus(err)
 	}
-	fenced := fs.IsFenced()
 	prevOffset := input.Offset
 	page := resp.Msg.GetEntries()
 	for _, e := range page {
@@ -87,11 +86,7 @@ func (fs *RawFS) readDirPage(parentCtx context.Context, cancel <-chan struct{}, 
 			return nil, fuse.EIO
 		}
 		prevOffset = e.GetNextOffset()
-		serverEntryIno := e.GetIno()
-		if !fenced && e.GetInode() != nil {
-			fs.stage.OverlayInode(serverEntryIno, e.GetInode())
-		}
-		e.Ino = fs.ToKernelIno(serverEntryIno)
+		e.Ino = fs.ToKernelIno(e.GetIno())
 	}
 	return page, fuse.OK
 }
@@ -135,6 +130,7 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
+	g0 := fs.metaClock.Load()
 	entries, status := fs.readDirPage(opCtx, cancel, input)
 	if status != fuse.OK {
 		return status
@@ -161,17 +157,15 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 			if fenced {
 				entryTTL = 0
 				attrTTL = 0
-			} else if entry.GetInode() != nil {
-				fs.stage.ObserveServerInode(entry.GetInode().GetIno(), entry.GetInode(), false)
 			}
 			fs.FillEntryOut(eo, entry.GetInode(), entryTTL, attrTTL)
-			if entry.GetInode() != nil {
-				fs.stage.OverlayAttr(entry.GetInode().GetIno(), &eo.Attr)
+			if !fenced && entry.GetInode() != nil {
+				fs.stage.OverlayDirty(entry.GetInode().GetIno(), &eo.Attr)
 			}
 			eo.NodeId = fs.tmpMgr.ObserveKernelLookup(entry.GetIno())
 			eo.Ino = eo.NodeId
 			if !fenced {
-				fs.recordKnownInode(eo.NodeId, entry.GetInode())
+				fs.recordKnownInode(eo.NodeId, entry.GetInode(), g0)
 				fs.dentries.put(input.NodeId, name, eo.NodeId)
 			}
 		}

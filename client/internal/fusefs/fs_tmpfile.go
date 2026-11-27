@@ -224,7 +224,7 @@ func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse
 		return status
 	}
 	fs.caps.markAbsent(ino)
-	fs.recordKnownInode(ino, inode)
+	fs.recordKnownInodeAuthoritative(ino, inode)
 	fs.FillEntryOut(&out.EntryOut, inode, 0, 0)
 	out.Fh = fh
 	if fs.cfg.DirectIO {
@@ -264,7 +264,7 @@ func (fs *RawFS) tmpfileSync(opCtx context.Context, parentIno uint64, input *fus
 	}
 	fs.markOrphanWithContext(opCtx, ino)
 	fs.caps.markAbsent(ino)
-	fs.recordKnownInode(ino, inode)
+	fs.recordKnownInodeAuthoritative(ino, inode)
 	fs.FillEntryOut(&out.EntryOut, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	out.Fh = fh
 	if fs.cfg.DirectIO {
@@ -284,14 +284,10 @@ func (fs *RawFS) Forget(nodeID, nlookup uint64) {
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	serverIno, st := fs.ToServerIno(nodeID)
 	fs.caps.forget(nodeID)
 	fs.forgetKnownInode(nodeID)
 	fs.dentries.forgetChild(nodeID)
 	fs.tmpMgr.OnForget(nodeID, nlookup, fs.handles.IsOpen)
-	if st == fuse.OK && !fs.handles.IsOpen(nodeID) {
-		fs.stage.RemoveIdleInode(serverIno)
-	}
 }
 
 func (fs *RawFS) linkTmp(parentCtx context.Context, input *fuse.LinkIn, filename string, out *fuse.EntryOut) (fuse.Status, bool) {
@@ -312,14 +308,13 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, input *fuse.LinkIn, filename
 		return status, true
 	}
 	fs.readAhead.InvalidateInode(res.ServerIno)
-	fs.stage.ObserveServerInode(res.ServerIno, res.Inode, false)
 	fs.markMetaDirty()
 	if res.HasSecurityCap {
 		fs.caps.markPresent(input.Oldnodeid)
 	} else {
 		fs.caps.markAbsent(input.Oldnodeid)
 	}
-	fs.recordKnownInode(input.Oldnodeid, res.Inode)
+	fs.recordKnownInodeAuthoritative(input.Oldnodeid, res.Inode)
 	fs.dentries.put(input.NodeId, filename, input.Oldnodeid)
 	fs.topologySeq.Add(1)
 	return fuse.OK, true

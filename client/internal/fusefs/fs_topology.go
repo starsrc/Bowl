@@ -58,7 +58,7 @@ func (fs *RawFS) Mkdir(_ <-chan struct{}, input *fuse.MkdirIn, name string, out 
 	if inode != nil {
 		child := fs.ToKernelIno(inode.GetIno())
 		fs.dentries.put(input.NodeId, name, child)
-		fs.recordKnownInode(child, inode)
+		fs.recordKnownInodeAuthoritative(child, inode)
 	}
 	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
@@ -113,7 +113,7 @@ func (fs *RawFS) Mknod(_ <-chan struct{}, input *fuse.MknodIn, name string, out 
 	if inode != nil {
 		child := fs.ToKernelIno(inode.GetIno())
 		fs.dentries.put(input.NodeId, name, child)
-		fs.recordKnownInode(child, inode)
+		fs.recordKnownInodeAuthoritative(child, inode)
 		fs.caps.markAbsent(child)
 	}
 	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())

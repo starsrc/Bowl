@@ -58,7 +58,7 @@ func (fs *RawFS) Symlink(_ <-chan struct{}, header *fuse.InHeader, pointedTo, li
 	if inode != nil {
 		child := fs.ToKernelIno(inode.GetIno())
 		fs.dentries.put(header.NodeId, linkName, child)
-		fs.recordKnownInode(child, inode)
+		fs.recordKnownInodeAuthoritative(child, inode)
 	}
 	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), attrTTL)
 	return fuse.OK
@@ -159,7 +159,7 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	inode := resp.Msg.GetInode()
 	fs.dentries.put(input.NodeId, filename, input.Oldnodeid)
 	fs.topologySeq.Add(1)
-	fs.recordKnownInode(input.Oldnodeid, inode)
+	fs.recordKnownInodeAuthoritative(input.Oldnodeid, inode)
 	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
 }

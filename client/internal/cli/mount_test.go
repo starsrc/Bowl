@@ -2360,16 +2360,38 @@ func TestMount_Teardown_GivenOverwrittenMountMeta_PreservesNewInstanceAndRemoves
 	})
 }
 
-func TestMountAndDisk_GivenDefaultTransport_MountUsesShardedAndDiskUsesSingleConnection(t *testing.T) {
+type mountTransportTestStorage struct {
+	*fakeStorage
+}
+
+func (s *mountTransportTestStorage) GetAttr(_ context.Context, req *connect.Request[storagev1.GetAttrRequest]) (*connect.Response[storagev1.GetAttrResponse], error) {
+	return connect.NewResponse(&storagev1.GetAttrResponse{
+		Inode: &storagev1.Inode{
+			Ino: req.Msg.GetIno(),
+			Attr: &storagev1.InodeAttribute{
+				Mode:  syscall.S_IFREG | 0o644,
+				Size:  15,
+				Nlink: 1,
+			},
+		},
+	}), nil
+}
+
+func (s *mountTransportTestStorage) StatFS(_ context.Context, _ *connect.Request[storagev1.StatFSRequest]) (*connect.Response[storagev1.StatFSResponse], error) {
+	return connect.NewResponse(&storagev1.StatFSResponse{Blocks: 1024, Bfree: 512, Bavail: 512, Bsize: 4096}), nil
+}
+
+func TestMountAndDisk_GivenDefaultTransport_MountIsolatesControlAndDiskUsesSingleConnection(t *testing.T) {
 	withCleanOTelAndLogger(t)
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "transport-check", 1<<30, 0)
+	storage.seedLiveFile(testDiskID1, "main", 2, []byte("hello-transport"))
 
 	var (
 		addrMu    sync.Mutex
 		addrsByOp = make(map[string]map[string]struct{})
 	)
-	path, connectHandler := storagev1connect.NewStorageServiceHandler(storage)
+	path, connectHandler := storagev1connect.NewStorageServiceHandler(&mountTransportTestStorage{fakeStorage: storage})
 	mux := http.NewServeMux()
 	mux.Handle(path, connectHandler)
 
@@ -2404,8 +2426,16 @@ func TestMountAndDisk_GivenDefaultTransport_MountUsesShardedAndDiskUsesSingleCon
 	mp := t.TempDir()
 	rtMount.serveFUSE = func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
 		ready()
-		var out fuse.StatfsOut
-		_ = rawFS.StatFs(nil, &fuse.InHeader{}, &out)
+		var statOut fuse.StatfsOut
+		require.Equal(t, fuse.OK, rawFS.StatFs(nil, &fuse.InHeader{}, &statOut))
+		var openOut fuse.OpenOut
+		require.Equal(t, fuse.OK, rawFS.Open(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: 2}, Flags: syscall.O_RDONLY}, &openOut))
+		buf := make([]byte, 16)
+		for range 3 {
+			res, st := rawFS.Read(nil, &fuse.ReadIn{InHeader: fuse.InHeader{NodeId: 2}, Fh: openOut.Fh, Size: 15}, buf)
+			require.Equal(t, fuse.OK, st)
+			require.Equal(t, 15, res.Size())
+		}
 		return nil
 	}
 
@@ -2413,14 +2443,36 @@ func TestMountAndDisk_GivenDefaultTransport_MountUsesShardedAndDiskUsesSingleCon
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 
 	addrMu.Lock()
-	controlAddrs := addrsByOp[storagev1connect.StorageServiceMountBranchProcedure]
-	metaAddrs := addrsByOp[storagev1connect.StorageServiceStatFSProcedure]
+	controlAddrs := make(map[string]struct{})
+	for _, op := range []string{
+		storagev1connect.StorageServiceMountBranchProcedure,
+		storagev1connect.StorageServiceUnmountBranchProcedure,
+	} {
+		for addr := range addrsByOp[op] {
+			controlAddrs[addr] = struct{}{}
+		}
+	}
+	businessAddrs := make(map[string]struct{})
+	for _, op := range []string{
+		storagev1connect.StorageServiceStatFSProcedure,
+		storagev1connect.StorageServiceGetAttrProcedure,
+		storagev1connect.StorageServiceReadProcedure,
+	} {
+		for addr := range addrsByOp[op] {
+			businessAddrs[addr] = struct{}{}
+		}
+	}
+	statFSAddrs := addrsByOp[storagev1connect.StorageServiceStatFSProcedure]
+	readAddrs := addrsByOp[storagev1connect.StorageServiceReadProcedure]
 	addrMu.Unlock()
-	require.Len(t, controlAddrs, 1)
-	require.Len(t, metaAddrs, 1)
+
+	require.Len(t, controlAddrs, 1, "mount control RPCs must share one dedicated TCP connection")
+	require.Len(t, statFSAddrs, 1, "mount StatFS must run on the business TCP connection")
+	require.Len(t, readAddrs, 1, "mount Read must run on the business TCP connection")
+	require.Len(t, businessAddrs, 1, "mount metadata and data RPCs must share one business TCP connection")
 	for addr := range controlAddrs {
-		_, overlap := metaAddrs[addr]
-		require.False(t, overlap, "mount must use sharded transport with separate control and meta TCP connections")
+		_, overlap := businessAddrs[addr]
+		require.False(t, overlap, "mount must isolate control TCP connection from business TCP connection")
 	}
 
 	rtDisk := defaultCLIRuntime()

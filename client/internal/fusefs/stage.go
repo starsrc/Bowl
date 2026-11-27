@@ -51,7 +51,7 @@ const (
 
 	StageBlockAlign = 256 * 1024
 
-	StageWorkers = rpc.HTTP2DataConnectionShards
+	StageWorkers = 8
 
 	stageExtentScanPageSize = 4096
 	stageBackoffInitial     = 100 * time.Millisecond

@@ -1,0 +1,117 @@
+profile: full-vpc
+description: Two-node same-AZ NVMe VPC benchmark with shared /bench-target.slice parity.
+disclaimer: null
+disk_size: 64GiB
+
+topology:
+  cgroup_parent: /bench-target.slice
+  cpu_quota: "400%"
+  memory_max: 16G
+  memory_swap_max: "0"
+  network: host
+  stage_size: 512MiB
+  jfs_tier0_cache_mb: 512
+  jfs_tier0_buffer_mb: 300
+
+default_targets:
+  - ext4
+  - passthrough_ll
+  - bowl_staged
+  - bowl_sync
+  - jfs_pg_minio
+  - jfs_redis_minio
+
+default_suites:
+  - pjdfstest
+  - fsx
+  - fsstress
+  - smallfile
+  - juicefs-bench
+  - computesdk-bench
+  - fio-io
+  - metadata
+  - branch-gc
+  - workloads
+
+suites:
+  pjdfstest:
+    mode: full
+  fsx:
+    seeds: [1, 2]
+    variants:
+      - default
+      - no-mmap
+      - aligned
+      - medium
+      - large
+      - large-no-mmap
+      - direct
+  fsstress:
+    ops: 10000
+  smallfile:
+    threads: 4
+    files_per_thread: 25000
+    file_size_kb: 4
+    runs: 3
+  juicefs-bench:
+    procs: 4
+    warmup_runs: 1
+    runs: 5
+  computesdk-bench:
+    storage_sizes_mb: [1, 4, 10, 16]
+    storage_iterations: 20
+    fork_presets: [small, wide, deep, large_1gib, tree_10k]
+    fork_rpc_iterations: 100
+    fork_mount_iterations: 20
+  fio-io:
+    ramp_time_s: 10
+    runtime_s: 60
+    runs: 3
+    seq_write_gb: 4
+    seq_read_cold_gb: 8
+    rand_read_cold_gb: 32
+  metadata:
+    mdtest_procs: 8
+    mdtest_files: 20000
+    mdtest_runs: 5
+    dir_sizes: [200, 2000, 10000]
+    dir_runs: 20
+    seq_create_files: 20000
+    seq_create_runs: 3
+    storm_runtime_s: 60
+    storm_ramp_s: 10
+    storm_runs: 3
+    statfs_samples: 20
+  branch-gc:
+    online_fork_runs: 30
+    commit_depths: [1, 16, 64, 200]
+    depth_runs: 20
+    fanout_branches: 16
+    fanout_cow_mb: 64
+    fanout_runs: 5
+    gc_duration_s: 240
+    gc_interval: 30s
+    gc_sample_interval_s: 10.0
+    multi_disk_counts: [1, 8, 32]
+    multi_disk_runtime_s: 60
+    multi_disk_runs: 3
+  workloads:
+    runs: 5
+    sqlite_tx: 5000
+    sandbox_runs: 20
+
+profiling:
+  enabled: true
+  sample_interval_s: 1.0
+  pprof_duration_s: 15
+  scenes:
+    - id: rand-write-4k-fsync-8j
+      dir: rmw
+    - id: seq-read-64streams-readahead-cap
+      dir: ra64
+    - id: h2-bulk-rw-metadata-contention
+      dir: h2c
+    - id: multi-disk-shared-pebble-scaling
+      dir: 32disk
+    - id: online-pack-gc-240s-churn
+      dir: gc

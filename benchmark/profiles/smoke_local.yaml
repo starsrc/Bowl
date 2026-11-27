@@ -1,0 +1,110 @@
+profile: smoke-local
+description: Single-host local Docker Compose regression profile using Docker named volumes.
+disclaimer: >-
+  本报告来自 smoke-local 本机单栈 Docker 回归档位（loopback 网络与本地 Docker VM，不含双机独立 NVMe 与 /bench-target.slice 隔离），仅用于脚本自检与回归验证，不得用于跨系统性能排名或对外发布。
+disk_size: 8GiB
+
+topology:
+  cgroup_parent: local-docker
+  cpu_quota: host-shared
+  memory_max: host-shared
+  memory_swap_max: host-shared
+  network: docker-bridge
+  stage_size: 64MiB
+  jfs_tier0_cache_mb: 64
+  jfs_tier0_buffer_mb: 64
+
+default_targets:
+  - ext4
+  - passthrough_ll
+  - bowl_staged
+  - bowl_sync
+
+default_suites:
+  - pjdfstest
+  - fsx
+  - fsstress
+  - smallfile
+  - juicefs-bench
+  - computesdk-bench
+  - fio-io
+  - metadata
+  - branch-gc
+  - workloads
+
+suites:
+  pjdfstest:
+    mode: smoke
+    subset_count: 30
+  fsx:
+    seeds: [1]
+    variants:
+      - default
+      - aligned
+      - large
+      - direct
+    ops_scale: 0.05
+  fsstress:
+    ops: 2000
+  smallfile:
+    threads: 4
+    files_per_thread: 2500
+    file_size_kb: 4
+    runs: 1
+  juicefs-bench:
+    procs: 4
+    warmup_runs: 0
+    runs: 2
+    big_file_size_mb: 128
+    small_file_count: 50
+  computesdk-bench:
+    storage_sizes_mb: [1, 4]
+    storage_iterations: 5
+    fork_presets: [small]
+    fork_rpc_iterations: 5
+    fork_mount_iterations: 3
+  fio-io:
+    ramp_time_s: 3
+    runtime_s: 15
+    runs: 2
+    seq_write_mb: 256
+    seq_read_cold_mb: 256
+    rand_read_cold_mb: 256
+    cases:
+      - seq-write-buffered-8j
+      - seq-write-fdatasync-8j
+      - rand-write-4k-fsync-8j
+      - seq-read-cold-e2e-16j
+  metadata:
+    mdtest_procs: 4
+    mdtest_files: 1000
+    mdtest_runs: 2
+    dir_sizes: [200, 2000]
+    dir_runs: 5
+    seq_create_files: 5000
+    seq_create_runs: 1
+    storm_runtime_s: 15
+    storm_ramp_s: 3
+    storm_runs: 1
+    statfs_samples: 5
+  branch-gc:
+    online_fork_runs: 5
+    commit_depths: [1, 16]
+    depth_runs: 5
+    fanout_branches: 4
+    fanout_cow_mb: 4
+    fanout_runs: 1
+    gc_duration_s: 35
+    gc_interval: 10s
+    gc_sample_interval_s: 5.0
+    multi_disk_counts: [1, 4]
+    multi_disk_runtime_s: 15
+    multi_disk_runs: 1
+  workloads:
+    runs: 2
+    sqlite_tx: 1000
+    sandbox_runs: 3
+
+profiling:
+  enabled: false
+  scenes: []

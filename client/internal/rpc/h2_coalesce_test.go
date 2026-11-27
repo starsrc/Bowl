@@ -116,6 +116,7 @@ func TestH2CoalesceConn_GivenTimerExpiresBeforeData_FlushesHeldHeadersAndPropaga
 	_, nextErr := conn.Write([]byte("next"))
 
 	require.ErrorIs(t, nextErr, boom)
+	require.True(t, raw.IsClosed(), "冲刷失败后必须关闭底层连接，否则 Transport 不会替换这条已毒化的连接")
 }
 
 type closeHookNetConn struct {

@@ -1,0 +1,52 @@
+name: bowl-smoke
+
+services:
+  storage-service:
+    image: ${STORAGE_IMAGE_NAME:-bowl-storage}:${TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: services/storage/Dockerfile
+    container_name: bowl-smoke-storage
+    restart: "no"
+    environment:
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "9000"
+      INTERNAL_SERVER_HOST: "0.0.0.0"
+      INTERNAL_SERVER_PORT: "9090"
+      SERVER_READ_HEADER_TIMEOUT: "10s"
+      SERVER_STOP_TIMEOUT: "10s"
+      SERVER_READ_MAX_BYTES: "16777216"
+      STORAGE_DATA_DIR: "/var/lib/bowl/data"
+      STORAGE_ATIME_MODE: "noatime"
+      STORAGE_ENTRY_TIMEOUT_SECONDS: "${STORAGE_ENTRY_TIMEOUT_SECONDS:-1.0}"
+      STORAGE_ATTR_TIMEOUT_SECONDS: "${STORAGE_ATTR_TIMEOUT_SECONDS:-1.0}"
+      STORAGE_DIR_ENTRY_TIMEOUT_SECONDS: "${STORAGE_DIR_ENTRY_TIMEOUT_SECONDS:-1.0}"
+      STORAGE_OPEN_KEEP_CACHE: "false"
+      STORAGE_OPEN_DIR_CACHE: "false"
+      STORAGE_GC_INTERVAL: "${STORAGE_GC_INTERVAL:-30s}"
+      LOG_LEVEL: "info"
+      LOG_FORMAT: "json"
+      LOG_ADD_SOURCE: "false"
+      METRICS_ENABLED: "true"
+      PPROF_ENABLED: "false"
+      PPROF_MUTEX_FRACTION: "0"
+      PPROF_BLOCK_RATE: "0"
+      OTEL_ENABLED: "false"
+    volumes:
+      - bench_storage_data:/var/lib/bowl/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/readyz >/dev/null 2>&1 || nc -z localhost 9000 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 2s
+    networks:
+      - bowl-smoke-net
+
+volumes:
+  bench_storage_data:
+  bench_nvme_data:
+
+networks:
+  bowl-smoke-net:
+    driver: bridge

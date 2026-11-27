@@ -1,0 +1,238 @@
+# ==============================================================================
+# Stage 1: Build Linux bowl CLI binary (Go 1.26)
+# ==============================================================================
+FROM golang:1.26-bookworm AS go-builder
+
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
+ENV GOWORK=off
+
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY gen ./gen
+COPY pkg ./pkg
+COPY client ./client
+
+WORKDIR /src/client
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/bowl ./cmd/bowl
+
+# ==============================================================================
+# Stage 2: Build pinned upstream benchmark binaries on Ubuntu 24.04
+# ==============================================================================
+FROM ubuntu:24.04 AS tools-builder
+
+ARG TARGETARCH
+ARG XFSTESTS_COMMIT=22348afe338c0f6d540c0d7ef0db749eaa51b218
+ARG SMALLFILE_COMMIT=aa2519de
+ARG LIBFUSE_TAG=fuse-3.16.2
+ARG JUICEFS_VERSION=1.2.1
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y -qq && \
+    apt-get install -y -qq --no-install-recommends \
+      git \
+      curl \
+      ca-certificates \
+      build-essential \
+      meson \
+      ninja-build \
+      pkg-config \
+      autoconf \
+      automake \
+      libtool \
+      uuid-dev \
+      libaio-dev \
+      xfslibs-dev \
+      libfuse3-dev \
+      libattr1-dev \
+      libacl1-dev && \
+    (apt-get install -y -qq --no-install-recommends liburing-dev || true) && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /usr/local/bench/bin /build
+
+# 1. JuiceFS CLI
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    curl -fsSL "https://github.com/juicedata/juicefs/releases/download/v${JUICEFS_VERSION}/juicefs-${JUICEFS_VERSION}-linux-${ARCH}.tar.gz" \
+      -o /build/juicefs.tar.gz && \
+    tar -xzf /build/juicefs.tar.gz -C /build juicefs && \
+    install -m 0755 /build/juicefs /usr/local/bench/bin/juicefs && \
+    rm -rf /build/juicefs /build/juicefs.tar.gz
+
+# 2. xfstests-dev ltp/fsx & ltp/fsstress
+RUN mkdir -p /build/xfstests && cd /build/xfstests && \
+    git init -q && \
+    git remote add origin https://github.com/kdave/xfstests.git && \
+    git fetch --depth 1 origin "${XFSTESTS_COMMIT}" && \
+    git checkout -q FETCH_HEAD && \
+    (make configure || autoreconf -fiv) && \
+    ./configure && \
+    (make -C include -j"$(nproc)" || true) && \
+    make -C lib -j"$(nproc)" && \
+    make -C ltp fsx fsstress -j"$(nproc)" && \
+    install -m 0755 ltp/fsx /usr/local/bench/bin/fsx && \
+    install -m 0755 ltp/fsstress /usr/local/bench/bin/fsstress && \
+    rm -rf /build/xfstests
+
+# 3. libfuse passthrough_ll
+RUN git clone --depth 1 --branch "${LIBFUSE_TAG}" https://github.com/libfuse/libfuse.git /build/libfuse && \
+    cd /build/libfuse && \
+    meson setup build -Dtests=false -Dutils=false -Dexamples=true && \
+    ninja -C build example/passthrough_ll && \
+    install -m 0755 build/example/passthrough_ll /usr/local/bench/bin/passthrough_ll && \
+    rm -rf /build/libfuse
+
+# 4. pjd/pjdfstest
+RUN git clone --depth 1 https://github.com/pjd/pjdfstest.git /usr/local/bench/pjdfstest && \
+    cd /usr/local/bench/pjdfstest && \
+    autoreconf -ifs && \
+    ./configure && \
+    make -j"$(nproc)" && \
+    ln -sf /usr/local/bench/pjdfstest/pjdfstest /usr/local/bench/bin/pjdfstest
+
+# 5. distributed-system-analysis/smallfile
+RUN git clone --quiet https://github.com/distributed-system-analysis/smallfile.git /usr/local/bench/smallfile && \
+    git -C /usr/local/bench/smallfile checkout -q "${SMALLFILE_COMMIT}" && \
+    chmod +x /usr/local/bench/smallfile/smallfile_cli.py
+
+# ==============================================================================
+# Stage 3: Final lean benchmark runtime image
+# ==============================================================================
+FROM ubuntu:24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/usr/local/bench/bin:/usr/local/go/bin:${PATH}"
+ENV GOWORK=off
+
+RUN apt-get update -y -qq && \
+    apt-get install -y -qq --no-install-recommends \
+      fio \
+      git \
+      sqlite3 \
+      python3 \
+      python3-yaml \
+      fuse3 \
+      libfuse3-3 \
+      liburing2 \
+      iperf3 \
+      strace \
+      jq \
+      perl \
+      curl \
+      ca-certificates \
+      util-linux \
+      psmisc \
+      attr \
+      iputils-ping && \
+    rm -rf /var/lib/apt/lists/* && \
+    grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo 'user_allow_other' >> /etc/fuse.conf
+
+COPY --from=go-builder /usr/local/go /usr/local/go
+COPY --from=go-builder /out/bowl /usr/local/bin/bowl
+COPY --from=tools-builder /usr/local/bench /usr/local/bench
+
+RUN ln -sf /usr/local/bench/bin/juicefs /usr/local/bin/juicefs && \
+    ln -sf /usr/local/bench/bin/pjdfstest /usr/local/bin/pjdfstest && \
+    mkdir -p /mnt/nvme /usr/local/bench/corpus && \
+    for bin in /usr/local/bench/bin/fsx /usr/local/bench/bin/fsstress /usr/local/bench/bin/passthrough_ll /usr/local/bench/bin/pjdfstest; do \
+      if ldd "$bin" | grep -q "not found"; then ldd "$bin"; exit 1; fi; \
+    done
+
+# Build deterministic offline workload corpus (compact 5,000-file tar + 20-package Go repo)
+RUN CORPUS_DIR=/usr/local/bench/corpus CORPUS_TAR_FILE_BYTES=4096 python3 - <<'PY_CORPUS'
+import hashlib, io, json, os, shutil, subprocess, tarfile
+from pathlib import Path
+
+corpus_dir = Path(os.environ["CORPUS_DIR"])
+tar_file_bytes = int(os.environ.get("CORPUS_TAR_FILE_BYTES", "4096"))
+corpus_dir.mkdir(parents=True, exist_ok=True)
+
+go_work = corpus_dir / "go-repo"
+go_bare = corpus_dir / "go-repo.git"
+go_work.mkdir(parents=True, exist_ok=True)
+(go_work / "go.mod").write_text("module bench.local/corpusapp\n\ngo 1.22\n", encoding="utf-8")
+
+pkg_imports, pkg_calls = [], []
+for i in range(1, 21):
+    pkg = f"pkg{i:02d}"
+    pdir = go_work / "internal" / pkg
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / f"{pkg}.go").write_text(
+        f'package {pkg}\n\nimport (\n\t"crypto/sha256"\n\t"encoding/binary"\n\t"fmt"\n)\n\n'
+        f'func Compute(n int) uint64 {{\n\tvar sum uint64\n\tvar buf [8]byte\n\tfor j := 0; j < n; j++ {{\n'
+        f'\t\tbinary.LittleEndian.PutUint64(buf[:], uint64({i * 10007}+j*31))\n'
+        f'\t\td := sha256.Sum256(buf[:])\n\t\tsum ^= binary.LittleEndian.Uint64(d[:8])\n\t}}\n\treturn sum\n}}\n\n'
+        f'func Label(n int) string {{ return fmt.Sprintf("{pkg}:%016x", Compute(n)) }}\n',
+        encoding="utf-8",
+    )
+    (pdir / f"{pkg}_test.go").write_text(
+        f'package {pkg}\n\nimport "testing"\n\nfunc TestComputeDeterministic(t *testing.T) {{\n'
+        f'\tif Compute(32) != Compute(32) || Label(16) == "" {{ t.Fatal("mismatch") }}\n}}\n',
+        encoding="utf-8",
+    )
+    pkg_imports.append(f'\t"bench.local/corpusapp/internal/{pkg}"')
+    pkg_calls.append(f'\tsum ^= {pkg}.Compute(32)')
+
+cmd_dir = go_work / "cmd" / "corpusapp"
+cmd_dir.mkdir(parents=True, exist_ok=True)
+(cmd_dir / "main.go").write_text(
+    'package main\n\nimport (\n\t"fmt"\n' + "\n".join(pkg_imports) + '\n)\n\n'
+    'func main() {\n\tvar sum uint64\n' + "\n".join(pkg_calls) + '\n\tfmt.Printf("corpusapp:%016x\\n", sum)\n}\n',
+    encoding="utf-8",
+)
+
+git_env = dict(os.environ, GIT_AUTHOR_NAME="Bowl Bench", GIT_AUTHOR_EMAIL="bench@bowl.local",
+               GIT_COMMITTER_NAME="Bowl Bench", GIT_COMMITTER_EMAIL="bench@bowl.local",
+               GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
+subprocess.run(["git", "init", "-q", "-b", "main"], cwd=go_work, env=git_env, check=True)
+subprocess.run(["git", "add", "."], cwd=go_work, env=git_env, check=True)
+subprocess.run(["git", "commit", "-q", "-m", "Initial deterministic corpus"], cwd=go_work, env=git_env, check=True)
+subprocess.run(["git", "clone", "--bare", "-q", str(go_work), str(go_bare)], env=git_env, check=True)
+head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=go_work, text=True).strip()
+
+tar_path = corpus_dir / "files_5k.tar"
+files_manifest_path = corpus_dir / "files_5k.sha256"
+base_block = bytearray()
+counter = 0
+while len(base_block) < max(tar_file_bytes + 4096, 65536):
+    base_block.extend(hashlib.sha256(f"bowl-corpus-block-{counter}".encode()).digest())
+    counter += 1
+base_bytes = bytes(base_block)
+
+manifest_lines, total_bytes = [], 0
+with tarfile.open(tar_path, "w") as tf:
+    for d in range(50):
+        for f in range(100):
+            idx = d * 100 + f
+            rel = f"d{d:02d}/f{f:03d}.dat"
+            header = f"BOWL_CORPUS_FILE:{idx:06d}\n".encode("ascii")
+            off = (idx * 37) % 2048
+            content = header + base_bytes[off:off + max(0, tar_file_bytes - len(header))]
+            manifest_lines.append(f"{hashlib.sha256(content).hexdigest()}  {rel}\n")
+            info = tarfile.TarInfo(name=rel)
+            info.size, info.mtime, info.mode = len(content), 1767225600, 0o644
+            tf.addfile(info, io.BytesIO(content))
+            total_bytes += len(content)
+
+files_manifest_path.write_text("".join(manifest_lines), encoding="utf-8")
+def sha256_file(p):
+    h = hashlib.sha256()
+    with p.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1048576), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+tar_sha = sha256_file(tar_path)
+m_sha = sha256_file(files_manifest_path)
+(corpus_dir / "manifest.sha256").write_text(f"{tar_sha}  files_5k.tar\n{m_sha}  files_5k.sha256\n", encoding="utf-8")
+(corpus_dir / "corpus_meta.json").write_text(json.dumps({
+    "go_repo_bare": str(go_bare), "go_repo_work": str(go_work), "go_repo_head": head_sha,
+    "tar_archive": str(tar_path), "tar_sha256": tar_sha, "tar_file_count": 5000,
+    "tar_total_payload_bytes": total_bytes, "files_sha256_manifest": str(files_manifest_path),
+}, indent=2) + "\n", encoding="utf-8")
+PY_CORPUS
+
+WORKDIR /workspace
+COPY benchmark /workspace/benchmark
+RUN chmod +x /workspace/benchmark/infra/*.sh

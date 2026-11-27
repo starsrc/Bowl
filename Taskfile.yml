@@ -162,3 +162,128 @@ tasks:
       - golangci-lint run ./...
       - cd services/storage && golangci-lint run --config ../../.golangci.yml ./...
       - cd client && GOOS=linux CGO_ENABLED=0 golangci-lint run --config ../.golangci.yml ./...
+
+  bench:smoke:
+    desc: "Run local Docker smoke-local regression across all 10 benchmark suites"
+    cmds:
+      - bash benchmark/infra/smoke_local.sh {{.CLI_ARGS}}
+
+  bench:pjdfstest:
+    desc: "Run standalone pjdfstest POSIX compliance suite (PROFILE=smoke-local|full-vpc)"
+    vars:
+      PROFILE: '{{.PROFILE | default "smoke-local"}}'
+    cmds:
+      - >-
+        if [ "{{.PROFILE}}" = "full-vpc" ]; then
+          bash benchmark/infra/aliyun_ecs.sh --suite pjdfstest {{.CLI_ARGS}}
+        else
+          bash benchmark/infra/smoke_local.sh --suite pjdfstest {{.CLI_ARGS}}
+        fi
+
+  bench:fsx:
+    desc: "Run standalone xfstests ltp/fsx 14-variant byte-consistency suite (PROFILE=smoke-local|full-vpc)"
+    vars:
+      PROFILE: '{{.PROFILE | default "smoke-local"}}'
+    cmds:
+      - >-
+        if [ "{{.PROFILE}}" = "full-vpc" ]; then
+          bash benchmark/infra/aliyun_ecs.sh --suite fsx {{.CLI_ARGS}}
+        else
+          bash benchmark/infra/smoke_local.sh --suite fsx {{.CLI_ARGS}}
+        fi
+
+  bench:fsstress:
+    desc: "Run standalone xfstests ltp/fsstress + Commit/Fork full-tree suite (PROFILE=smoke-local|full-vpc)"
+    vars:
+      PROFILE: '{{.PROFILE | default "smoke-local"}}'
+    cmds:
+      - >-
+        if [ "{{.PROFILE}}" = "full-vpc" ]; then
+          bash benchmark/infra/aliyun_ecs.sh --suite fsstress {{.CLI_ARGS}}
+        else
+          bash benchmark/infra/smoke_local.sh --suite fsstress {{.CLI_ARGS}}
+        fi
+
+  bench:smallfile:
+    desc: "Run standalone 100k smallfile + Commit suite (PROFILE=smoke-local|full-vpc)"
+    vars:
+      PROFILE: '{{.PROFILE | default "smoke-local"}}'
+    cmds:
+      - >-
+        if [ "{{.PROFILE}}" = "full-vpc" ]; then
+          bash benchmark/infra/aliyun_ecs.sh --suite smallfile {{.CLI_ARGS}}
+        else
+          bash benchmark/infra/smoke_local.sh --suite smallfile {{.CLI_ARGS}}
+        fi
+
+  bench:juicefs:
+    desc: "Run standalone fair juicefs-bench suite (PROFILE=smoke-local|full-vpc)"
+    vars:
+      PROFILE: '{{.PROFILE | default "smoke-local"}}'
+    cmds:
+      - >-
+        if [ "{{.PROFILE}}" = "full-vpc" ]; then
+          bash benchmark/infra/aliyun_ecs.sh --suite juicefs-bench {{.CLI_ARGS}}
+        else
+          bash benchmark/infra/smoke_local.sh --suite juicefs-bench {{.CLI_ARGS}}
+        fi
+
+  bench:computesdk:
+    desc: "Run standalone computesdk-bench storage and snapshot-fork suite (PROFILE=smoke-local|full-vpc)"
+    vars:
+      PROFILE: '{{.PROFILE | default "smoke-local"}}'
+    cmds:
+      - >-
+        if [ "{{.PROFILE}}" = "full-vpc" ]; then
+          bash benchmark/infra/aliyun_ecs.sh --suite computesdk-bench {{.CLI_ARGS}}
+        else
+          bash benchmark/infra/smoke_local.sh --suite computesdk-bench {{.CLI_ARGS}}
+        fi
+
+  bench:suite:
+    desc: "Run specific benchmark suite(s) (SUITE=branch-gc PROFILE=smoke-local|full-vpc TARGETS=...)"
+    vars:
+      SUITE: '{{.SUITE | default "all"}}'
+      PROFILE: '{{.PROFILE | default "smoke-local"}}'
+      TARGETS: '{{.TARGETS | default ""}}'
+    cmds:
+      - >-
+        TARGET_ARGS="";
+        if [ -n "{{.TARGETS}}" ]; then TARGET_ARGS="--targets {{.TARGETS}}"; fi;
+        if [ "{{.PROFILE}}" = "full-vpc" ]; then
+          bash benchmark/infra/aliyun_ecs.sh --suite "{{.SUITE}}" ${TARGET_ARGS} {{.CLI_ARGS}}
+        else
+          bash benchmark/infra/smoke_local.sh --suite "{{.SUITE}}" ${TARGET_ARGS} {{.CLI_ARGS}}
+        fi
+
+  bench:full:
+    desc: "Run full 10-suite VPC benchmark plus separate Profiling Pass on Aliyun ECS"
+    cmds:
+      - bash benchmark/infra/aliyun_ecs.sh --suite all --profiling {{.CLI_ARGS}}
+
+  bench:aliyun:
+    desc: "Run Aliyun 2-node ECS benchmark orchestrator with custom flags"
+    cmds:
+      - bash benchmark/infra/aliyun_ecs.sh {{.CLI_ARGS}}
+
+  bench:report:
+    desc: "Re-verify Validity Gates and render standalone and top-level REPORT.md (RUN=<run_id>)"
+    vars:
+      RUN: '{{.RUN | default ""}}'
+    cmds:
+      - >-
+        if [ -n "{{.RUN}}" ]; then
+          RUN_DIR="benchmark/runs/{{.RUN}}";
+        else
+          RUN_DIR="$(ls -1dt benchmark/runs/* 2>/dev/null | head -n1)";
+        fi;
+        if [ -z "${RUN_DIR}" ] || [ ! -d "${RUN_DIR}" ]; then
+          echo "ERROR: No benchmark run directory found. Pass RUN=<run_id> or run a suite first." >&2;
+          exit 1;
+        fi;
+        PYTHONPATH=. python3 benchmark/report.py --run-dir "${RUN_DIR}" {{.CLI_ARGS}}
+
+  bench:test:
+    desc: "Run Benchmark v2 Python unit tests"
+    cmds:
+      - PYTHONPATH=. python3 -m unittest discover -s benchmark/tests -v {{.CLI_ARGS}}

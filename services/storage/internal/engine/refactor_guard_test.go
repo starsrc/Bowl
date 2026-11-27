@@ -5,7 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -516,4 +522,121 @@ func TestStep13_CommitCacheInvalidation_StaleSnapshotAndConcurrentPrune_Race(t *
 		_, gErr := disk.GetAttrAtCommit(ctx, id, f.Ino)
 		require.ErrorIs(t, gErr, ErrNotFound)
 	}
+}
+
+func TestReadView_Guard_RejectsNilPinAndClosedView(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	disk, err := openTestDisk(testDiskOptions{
+		Dir:       t.TempDir(),
+		DiskID:    "readview-guard",
+		BlockSize: 4096,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, disk.Close())
+	})
+
+	payload := bytes.Repeat([]byte{0x5c}, 4096)
+	refs, err := disk.packs.AppendBlocks(ctx, [][]byte{payload})
+	require.NoError(t, err)
+	disk.packs.ReleaseInFlight(refs)
+
+	_, err = disk.packs.readBlockPinned(nil, refs[0])
+	require.ErrorIs(t, err, ErrInvalid)
+
+	rv := disk.openReadView()
+	got, err := rv.readBlock(refs[0])
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+
+	require.NoError(t, rv.Close())
+	require.NoError(t, rv.Close())
+
+	_, err = rv.readBlock(refs[0])
+	require.ErrorIs(t, err, ErrClosed)
+}
+
+func isReadViewReadBlockMethod(decl *ast.FuncDecl) bool {
+	if decl == nil || decl.Name == nil || decl.Name.Name != "readBlock" || decl.Recv == nil || len(decl.Recv.List) != 1 {
+		return false
+	}
+	star, ok := decl.Recv.List[0].Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := star.X.(*ast.Ident)
+	return ok && ident.Name == "readView"
+}
+
+func TestReadView_ASTGuard_ForbidsDirectPackBlockReadsOutsideReadViewAndGC(t *testing.T) {
+	t.Parallel()
+
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	var (
+		pinnedCalls   int
+		gcCalls       int
+		internalCalls int
+		violations    []string
+	)
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, parseErr := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		require.NoError(t, parseErr)
+
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			inReadViewReadBlock := name == "read_view.go" && isReadViewReadBlockMethod(fn)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, isCall := n.(*ast.CallExpr)
+				if !isCall {
+					return true
+				}
+				sel, isSel := call.Fun.(*ast.SelectorExpr)
+				if !isSel || sel.Sel == nil {
+					return true
+				}
+				pos := fset.Position(sel.Sel.Pos())
+				switch sel.Sel.Name {
+				case "ReadBlock":
+					violations = append(violations, fmt.Sprintf("%s:%d calls forbidden ReadBlock", name, pos.Line))
+				case "readBlockPinned":
+					if !inReadViewReadBlock {
+						violations = append(violations, fmt.Sprintf("%s:%d calls readBlockPinned outside (*readView).readBlock", name, pos.Line))
+					} else {
+						pinnedCalls++
+					}
+				case "readBlockForGC":
+					if name != "gc.go" {
+						violations = append(violations, fmt.Sprintf("%s:%d calls readBlockForGC outside gc.go", name, pos.Line))
+					} else {
+						gcCalls++
+					}
+				case "readBlockInternal":
+					if name != "pack_store.go" {
+						violations = append(violations, fmt.Sprintf("%s:%d calls readBlockInternal outside pack_store.go", name, pos.Line))
+					} else {
+						internalCalls++
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	require.Empty(t, violations)
+	require.Equal(t, 1, pinnedCalls)
+	require.Equal(t, 1, gcCalls)
+	require.Equal(t, 2, internalCalls)
 }

@@ -152,15 +152,16 @@ type NodeStore struct {
 
 	slots [nodeSlotStripes]nodeDiskSlot
 
-	syncGate       sync.RWMutex
-	walWriteGen    atomic.Uint64
-	walSyncedGen   atomic.Uint64
-	walSyncMu      sync.Mutex
-	activeSyncWave *walSyncWave
-	syncWaveWG     sync.WaitGroup
-	dirtyPacksMu   sync.Mutex
-	dirtyPacks     map[uuid.UUID]*dirtyPackEntry
-	walCommitHook  func(sync bool)
+	syncGate          sync.RWMutex
+	walWriteGen       atomic.Uint64
+	walSyncedGen      atomic.Uint64
+	walSyncMu         sync.Mutex
+	activeSyncWave    *walSyncWave
+	syncWaveWG        sync.WaitGroup
+	dirtyPacksMu      sync.Mutex
+	dirtyPacks        map[uuid.UUID]*dirtyPackEntry
+	walCommitHook     func(sync bool)
+	flushWALForGCHook func() error
 
 	idleEvictions atomic.Uint64
 
@@ -748,6 +749,30 @@ func (n *NodeStore) deleteKeySync(ctx context.Context, key []byte, diskHook func
 	})
 }
 
+func (n *NodeStore) FlushWALForGC(ctx context.Context) error {
+	return n.flushWALForGCWithHook(ctx, nil)
+}
+
+func (n *NodeStore) flushWALForGCWithHook(ctx context.Context, diskHook func(sync bool)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if n.closed.Load() {
+		return ErrClosed
+	}
+	return n.runWithSyncBarrier(ctx, diskHook, func() error {
+		if n.flushWALForGCHook != nil {
+			if err := n.flushWALForGCHook(); err != nil {
+				return err
+			}
+		}
+		return n.db.LogData(nil, pebble.Sync)
+	})
+}
+
 func (n *NodeStore) instantiateDiskStore(diskID uuid.UUID, meta DiskMeta, fresh bool) (*DiskStore, error) {
 	if n.maxPackSize < meta.BlockSize {
 		return nil, ErrInvalid
@@ -787,6 +812,7 @@ func (n *NodeStore) instantiateDiskStore(diskID uuid.UUID, meta DiskMeta, fresh 
 		return nil, err
 	}
 	ds.packs = packs
+	ds.ebr.init(packs.unlinkRetiredPacks)
 
 	if n.gcMode != GCModeDisabled {
 		gcCtx, gcCancel := context.WithCancel(context.Background())

@@ -502,6 +502,7 @@ func (h *dirSliceHeap) Pop() any {
 type treeCompareCtx struct {
 	ctx          context.Context
 	disk         *DiskStore
+	rv           *readView
 	base         layerView
 	target       layerView
 	source       layerView
@@ -509,13 +510,14 @@ type treeCompareCtx struct {
 	dirty        *dirtySet
 }
 
-func newTreeCompareCtx(ctx context.Context, disk *DiskStore, base, target, source layerView, targetIsBase bool, dirty *dirtySet) *treeCompareCtx {
+func newTreeCompareCtx(ctx context.Context, disk *DiskStore, rv *readView, base, target, source layerView, targetIsBase bool, dirty *dirtySet) *treeCompareCtx {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return &treeCompareCtx{
 		ctx:          ctx,
 		disk:         disk,
+		rv:           rv,
 		base:         base,
 		target:       target,
 		source:       source,
@@ -575,7 +577,7 @@ func (tc *treeCompareCtx) singleBlockIsZero(fileSize, blockIdx uint64, ref BlobR
 	if readLen == 0 {
 		return true, nil
 	}
-	data, err := tc.disk.packs.ReadBlock(ref)
+	data, err := tc.rv.readBlock(ref)
 	if err != nil {
 		return false, err
 	}
@@ -590,11 +592,11 @@ func (tc *treeCompareCtx) blocksEqual(fileSize, blockIdx uint64, refA, refB Blob
 	if logicalLen == 0 {
 		return true, nil
 	}
-	dataA, err := tc.disk.packs.ReadBlock(refA)
+	dataA, err := tc.rv.readBlock(refA)
 	if err != nil {
 		return false, err
 	}
-	dataB, err := tc.disk.packs.ReadBlock(refB)
+	dataB, err := tc.rv.readBlock(refB)
 	if err != nil {
 		return false, err
 	}
@@ -1793,6 +1795,7 @@ func (tc *treeCompareCtx) analyzeRootInode(requirePresent bool) (*analyzedNode, 
 }
 
 type diffRunParams struct {
+	rv                   *readView
 	baseCommitID         uint64
 	targetCommitID       uint64
 	sourceCommitID       uint64
@@ -1847,7 +1850,7 @@ func (d *DiskStore) diffViews(ctx context.Context, p diffRunParams) (*DiffResult
 		return res, nil
 	}
 
-	tc := newTreeCompareCtx(ctx, d, p.baseView, p.targetView, p.sourceView, p.targetIsBase, dirty)
+	tc := newTreeCompareCtx(ctx, d, p.rv, p.baseView, p.targetView, p.sourceView, p.targetIsBase, dirty)
 
 	var allMatched []*DiffEntry
 	hlTracker := newTargetHardlinkTracker()
@@ -1978,47 +1981,48 @@ func (d *DiskStore) Diff(ctx context.Context, opts DiffOptions) (*DiffResult, er
 	}
 
 	dk := d.keys
-	snap, snapGen := d.newReadSnapshot()
-	defer func() { _ = snap.Close() }()
+	rv := d.openReadView()
+	defer func() { _ = rv.Close() }()
 
-	srcBranch, err := readBranchMeta(snap, dk, opts.SourceBranch)
+	srcBranch, err := readBranchMeta(rv.snap, dk, opts.SourceBranch)
 	if err != nil {
 		return nil, err
 	}
-	tgtBranch, err := readBranchMeta(snap, dk, opts.TargetBranch)
-	if err != nil {
-		return nil, err
-	}
-
-	lca, err := findLCA(snap, dk, srcBranch.HeadCommitID, tgtBranch.HeadCommitID)
+	tgtBranch, err := readBranchMeta(rv.snap, dk, opts.TargetBranch)
 	if err != nil {
 		return nil, err
 	}
 
-	_, baseLayers, err := d.resolveCommitLayersWithGen(snap, lca, snapGen)
+	lca, err := findLCA(rv.snap, dk, srcBranch.HeadCommitID, tgtBranch.HeadCommitID)
+	if err != nil {
+		return nil, err
+	}
+
+	_, baseLayers, err := d.resolveCommitLayersWithGen(rv.snap, lca, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
 	targetIsBase := tgtBranch.HeadCommitID == lca
 	targetLayers := baseLayers
 	if !targetIsBase {
-		_, targetLayers, err = d.resolveCommitLayersWithGen(snap, tgtBranch.HeadCommitID, snapGen)
+		_, targetLayers, err = d.resolveCommitLayersWithGen(rv.snap, tgtBranch.HeadCommitID, rv.snapGen)
 		if err != nil {
 			return nil, err
 		}
 	}
-	_, sourceLayers, err := d.resolveCommitLayersWithGen(snap, srcBranch.HeadCommitID, snapGen)
+	_, sourceLayers, err := d.resolveCommitLayersWithGen(rv.snap, srcBranch.HeadCommitID, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
 
 	return d.diffViews(ctx, diffRunParams{
+		rv:                   rv,
 		baseCommitID:         lca,
 		targetCommitID:       tgtBranch.HeadCommitID,
 		sourceCommitID:       srcBranch.HeadCommitID,
-		baseView:             layerView{r: snap, keys: dk, layers: baseLayers},
-		targetView:           layerView{r: snap, keys: dk, layers: targetLayers},
-		sourceView:           layerView{r: snap, keys: dk, layers: sourceLayers},
+		baseView:             layerView{r: rv.snap, keys: dk, layers: baseLayers},
+		targetView:           layerView{r: rv.snap, keys: dk, layers: targetLayers},
+		sourceView:           layerView{r: rv.snap, keys: dk, layers: sourceLayers},
 		targetIsBase:         targetIsBase,
 		includeTargetSummary: true,
 		pathPrefix:           opts.PathPrefix,
@@ -2037,26 +2041,27 @@ func (d *DiskStore) DiffCommits(ctx context.Context, opts DiffCommitsOptions) (*
 	}
 
 	dk := d.keys
-	snap, snapGen := d.newReadSnapshot()
-	defer func() { _ = snap.Close() }()
+	rv := d.openReadView()
+	defer func() { _ = rv.Close() }()
 
-	_, baseLayers, err := d.resolveCommitLayersWithGen(snap, opts.BaseCommitID, snapGen)
+	_, baseLayers, err := d.resolveCommitLayersWithGen(rv.snap, opts.BaseCommitID, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
-	_, sourceLayers, err := d.resolveCommitLayersWithGen(snap, opts.SourceCommitID, snapGen)
+	_, sourceLayers, err := d.resolveCommitLayersWithGen(rv.snap, opts.SourceCommitID, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
 
-	baseView := layerView{r: snap, keys: dk, layers: baseLayers}
+	baseView := layerView{r: rv.snap, keys: dk, layers: baseLayers}
 	return d.diffViews(ctx, diffRunParams{
+		rv:                   rv,
 		baseCommitID:         opts.BaseCommitID,
 		targetCommitID:       opts.BaseCommitID,
 		sourceCommitID:       opts.SourceCommitID,
 		baseView:             baseView,
 		targetView:           baseView,
-		sourceView:           layerView{r: snap, keys: dk, layers: sourceLayers},
+		sourceView:           layerView{r: rv.snap, keys: dk, layers: sourceLayers},
 		targetIsBase:         true,
 		includeTargetSummary: false,
 		pathPrefix:           opts.PathPrefix,
@@ -2075,14 +2080,14 @@ func (d *DiskStore) DiffWork(ctx context.Context, branch string, opts DiffWorkOp
 	}
 
 	dk := d.keys
-	snap, snapGen := d.newReadSnapshot()
-	defer func() { _ = snap.Close() }()
+	rv := d.openReadView()
+	defer func() { _ = rv.Close() }()
 
-	bm, err := readBranchMeta(snap, dk, branch)
+	bm, err := readBranchMeta(rv.snap, dk, branch)
 	if err != nil {
 		return nil, err
 	}
-	_, headLayers, err := d.resolveCommitLayersWithGen(snap, bm.HeadCommitID, snapGen)
+	_, headLayers, err := d.resolveCommitLayersWithGen(rv.snap, bm.HeadCommitID, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
@@ -2094,14 +2099,15 @@ func (d *DiskStore) DiffWork(ctx context.Context, branch string, opts DiffWorkOp
 		sourceLayers = append(sourceLayers, headLayers...)
 	}
 
-	baseView := layerView{r: snap, keys: dk, layers: headLayers}
+	baseView := layerView{r: rv.snap, keys: dk, layers: headLayers}
 	return d.diffViews(ctx, diffRunParams{
+		rv:                   rv,
 		baseCommitID:         bm.HeadCommitID,
 		targetCommitID:       bm.HeadCommitID,
 		sourceCommitID:       0,
 		baseView:             baseView,
 		targetView:           baseView,
-		sourceView:           layerView{r: snap, keys: dk, layers: sourceLayers},
+		sourceView:           layerView{r: rv.snap, keys: dk, layers: sourceLayers},
 		targetIsBase:         true,
 		includeTargetSummary: false,
 		pathPrefix:           opts.PathPrefix,

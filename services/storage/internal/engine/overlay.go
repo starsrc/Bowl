@@ -570,6 +570,7 @@ func layerHasAnyKey(r pebbleReader, dk diskKeys, layerID uint64) (bool, error) {
 }
 
 func (d *DiskStore) readRegularData(
+	rv *readView,
 	inode Inode,
 	offset int64,
 	size int,
@@ -601,7 +602,7 @@ func (d *DiskStore) readRegularData(
 		if !ok {
 			continue
 		}
-		blkData, readErr := d.packs.ReadBlock(ref)
+		blkData, readErr := rv.readBlock(ref)
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -618,11 +619,11 @@ func (d *DiskStore) readRegularData(
 	return out, nil
 }
 
-func (d *DiskStore) readDataFromLayers(r pebbleReader, layers []uint64, ino uint64, offset int64, size int) ([]byte, error) {
+func (d *DiskStore) readDataFromLayers(rv *readView, layers []uint64, ino uint64, offset int64, size int) ([]byte, error) {
 	if offset < 0 || size < 0 {
 		return nil, ErrInvalid
 	}
-	inode, err := overlayGetInode(r, d.keys, layers, ino)
+	inode, err := overlayGetInode(rv.snap, d.keys, layers, ino)
 	if err != nil {
 		return nil, err
 	}
@@ -633,12 +634,12 @@ func (d *DiskStore) readDataFromLayers(r pebbleReader, layers []uint64, ino uint
 	default:
 		return nil, ErrInvalid
 	}
-	return d.readRegularDataInto(r, layers, inode, offset, size, nil)
+	return d.readRegularDataInto(rv, layers, inode, offset, size, nil)
 }
 
-func (d *DiskStore) readRegularDataInto(r pebbleReader, layers []uint64, inode Inode, offset int64, size int, dst []byte) ([]byte, error) {
-	return d.readRegularData(inode, offset, size, dst, func(blkIdx uint64) (BlobRef, bool, error) {
-		return overlayGetDataRef(r, d.keys, layers, inode.Ino, blkIdx)
+func (d *DiskStore) readRegularDataInto(rv *readView, layers []uint64, inode Inode, offset int64, size int, dst []byte) ([]byte, error) {
+	return d.readRegularData(rv, inode, offset, size, dst, func(blkIdx uint64) (BlobRef, bool, error) {
+		return overlayGetDataRef(rv.snap, d.keys, layers, inode.Ino, blkIdx)
 	})
 }
 
@@ -1015,15 +1016,15 @@ func (d *DiskStore) ReadInto(_ context.Context, branch string, ino uint64, offse
 	if offset < 0 || size < 0 {
 		return nil, ErrInvalid
 	}
-	snap, snapGen := d.newReadSnapshot()
-	defer func() { _ = snap.Close() }()
+	rv := d.openReadView()
+	defer func() { _ = rv.Close() }()
 
-	bm, err := readBranchMeta(snap, d.keys, branch)
+	bm, err := readBranchMeta(rv.snap, d.keys, branch)
 	if err != nil {
 		return nil, err
 	}
 	var cursor branchLayerCursor
-	d.initBranchCursor(&cursor, snap, bm, snapGen)
+	d.initBranchCursor(&cursor, rv.snap, bm, rv.snapGen)
 
 	inode, err := cursor.getInode(ino)
 	if err != nil {
@@ -1036,7 +1037,7 @@ func (d *DiskStore) ReadInto(_ context.Context, branch string, ino uint64, offse
 	default:
 		return nil, ErrInvalid
 	}
-	return d.readRegularData(inode, offset, size, dst, func(blkIdx uint64) (BlobRef, bool, error) {
+	return d.readRegularData(rv, inode, offset, size, dst, func(blkIdx uint64) (BlobRef, bool, error) {
 		return cursor.getDataRef(inode.Ino, blkIdx)
 	})
 }
@@ -1101,14 +1102,14 @@ func (d *DiskStore) ReadAtCommit(_ context.Context, commitID, ino uint64, offset
 	if d.closing.Load() {
 		return nil, ErrClosed
 	}
-	snap, snapGen := d.newReadSnapshot()
-	defer func() { _ = snap.Close() }()
+	rv := d.openReadView()
+	defer func() { _ = rv.Close() }()
 
-	_, layers, err := d.resolveCommitLayersWithGen(snap, commitID, snapGen)
+	_, layers, err := d.resolveCommitLayersWithGen(rv.snap, commitID, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
-	return d.readDataFromLayers(snap, layers, ino, offset, size)
+	return d.readDataFromLayers(rv, layers, ino, offset, size)
 }
 
 func (d *DiskStore) ReadCommitNode(_ context.Context, commitID, ino uint64, offset int64, size int) (CommitNodeResult, error) {
@@ -1118,15 +1119,15 @@ func (d *DiskStore) ReadCommitNode(_ context.Context, commitID, ino uint64, offs
 	if commitID == 0 || ino == 0 || ino > math.MaxInt64 || offset < 0 || size < 0 {
 		return CommitNodeResult{}, ErrInvalid
 	}
-	snap, snapGen := d.newReadSnapshot()
-	defer func() { _ = snap.Close() }()
+	rv := d.openReadView()
+	defer func() { _ = rv.Close() }()
 
 	dk := d.keys
-	_, layers, err := d.resolveCommitLayersWithGen(snap, commitID, snapGen)
+	_, layers, err := d.resolveCommitLayersWithGen(rv.snap, commitID, rv.snapGen)
 	if err != nil {
 		return CommitNodeResult{}, err
 	}
-	inode, err := overlayGetInode(snap, dk, layers, ino)
+	inode, err := overlayGetInode(rv.snap, dk, layers, ino)
 	if err != nil {
 		return CommitNodeResult{}, err
 	}
@@ -1142,7 +1143,7 @@ func (d *DiskStore) ReadCommitNode(_ context.Context, commitID, ino uint64, offs
 			SymlinkTarget: append([]byte(nil), inode.SymlinkTarget...),
 		}, nil
 	case ModeRegular:
-		data, readErr := d.readRegularDataInto(snap, layers, inode, offset, size, nil)
+		data, readErr := d.readRegularDataInto(rv, layers, inode, offset, size, nil)
 		if readErr != nil {
 			return CommitNodeResult{}, readErr
 		}

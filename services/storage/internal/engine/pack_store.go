@@ -73,12 +73,14 @@ type PackStore struct {
 	dirtyDirGen        uint64
 	dirtyAtomic        atomic.Bool
 	packSizes          map[uint64]uint64
+	retiredPacks       map[uint64]struct{}
 	totalPhysicalBytes uint64
 	atomicPhysical     atomic.Uint64
 
-	syncFileHook func(packID uint64) error
-	syncDirHook  func(dir string) error
-	onDirty      func()
+	syncFileHook   func(packID uint64) error
+	syncDirHook    func(dir string) error
+	removePackHook func(packID uint64) error
+	onDirty        func()
 
 	inFlightMu    sync.Mutex
 	inFlightPacks map[uint64]int
@@ -105,6 +107,7 @@ func newPackStore(dir string, maxPackSize uint32, onDirty func()) (*PackStore, e
 		onDirty:       onDirty,
 		dirtyPacks:    make(map[uint64]uint64),
 		packSizes:     make(map[uint64]uint64),
+		retiredPacks:  make(map[uint64]struct{}),
 		inFlightPacks: make(map[uint64]int),
 		readFiles:     make(map[uint64]*packReadHandle),
 		closeDone:     make(chan struct{}),
@@ -283,12 +286,14 @@ func (p *PackStore) pinInFlight(refs []BlobRef) {
 	p.inFlightMu.Unlock()
 }
 
-func (p *PackStore) DeletePack(ctx context.Context, packID uint64) error {
+func (p *PackStore) RetirePack(ctx context.Context, packID uint64) error {
 	if packID == 0 {
 		return ErrInvalidValue
 	}
-	if err := p.flushDirty(ctx, false); err != nil {
-		return err
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 
 	p.packMu.Lock()
@@ -307,32 +312,66 @@ func (p *PackStore) DeletePack(ctx context.Context, packID uint64) error {
 		return ErrInvalid
 	}
 
+	p.retiredPacks[packID] = struct{}{}
 	delete(p.dirtyPacks, packID)
 	p.updateDirtyAtomic()
+	return nil
+}
 
-	path := packFilePath(p.dir, packID)
-	if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-		return rmErr
+func (p *PackStore) removePackFile(packID uint64) error {
+	if p.removePackHook != nil {
+		if err := p.removePackHook(packID); err != nil {
+			return err
+		}
+	}
+	return os.Remove(packFilePath(p.dir, packID))
+}
+
+func (p *PackStore) unlinkRetiredPacks(packIDs []uint64) ([]uint64, error) {
+	if len(packIDs) == 0 {
+		return nil, nil
+	}
+	var (
+		removed []uint64
+		failed  []uint64
+		errs    []error
+	)
+	for _, packID := range packIDs {
+		if packID == 0 {
+			continue
+		}
+		if rmErr := p.removePackFile(packID); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			failed = append(failed, packID)
+			errs = append(errs, rmErr)
+			continue
+		}
+		removed = append(removed, packID)
 	}
 
-	p.filesMu.Lock()
-	p.filesDeleteGen++
-	if handle, ok := p.readFiles[packID]; ok {
-		delete(p.readFiles, packID)
-		handle.release()
-	}
-	p.filesMu.Unlock()
+	if len(removed) > 0 {
+		p.packMu.Lock()
+		p.filesMu.Lock()
+		p.filesDeleteGen++
+		for _, packID := range removed {
+			if handle, ok := p.readFiles[packID]; ok {
+				delete(p.readFiles, packID)
+				handle.release()
+			}
+		}
+		p.filesMu.Unlock()
 
-	if sz, ok := p.packSizes[packID]; ok {
-		delete(p.packSizes, packID)
-		if p.totalPhysicalBytes >= sz {
-			p.totalPhysicalBytes -= sz
-		} else {
-			p.totalPhysicalBytes = 0
+		for _, packID := range removed {
+			delete(p.retiredPacks, packID)
+			if sz, ok := p.packSizes[packID]; ok {
+				delete(p.packSizes, packID)
+				p.totalPhysicalBytes = saturatingSub(p.totalPhysicalBytes, sz)
+			}
 		}
 		p.atomicPhysical.Store(p.totalPhysicalBytes)
+		p.packMu.Unlock()
 	}
-	return nil
+
+	return failed, errors.Join(errs...)
 }
 
 func (p *PackStore) SealedWatermark(ctx context.Context) (uint64, error) {
@@ -699,13 +738,16 @@ func (p *PackStore) computeWatermarkAndSizes() (watermark uint64, sizes map[uint
 	sizes = make(map[uint64]uint64, len(p.packSizes))
 	for packID, sz := range p.packSizes {
 		if packID <= watermark && packID != p.activePackID {
+			if _, retired := p.retiredPacks[packID]; retired {
+				continue
+			}
 			sizes[packID] = sz
 		}
 	}
 	return watermark, sizes
 }
 
-func (p *PackStore) ReadBlock(ref BlobRef) ([]byte, error) {
+func (p *PackStore) readBlockInternal(ref BlobRef) ([]byte, error) {
 	if ref.PackID == 0 || ref.Length == 0 || ref.Length > MaxBlockSize {
 		return nil, ErrInvalidValue
 	}
@@ -725,6 +767,17 @@ func (p *PackStore) ReadBlock(ref BlobRef) ([]byte, error) {
 		return nil, ErrInvalidValue
 	}
 	return buf, nil
+}
+
+func (p *PackStore) readBlockPinned(pin *readEpoch, ref BlobRef) ([]byte, error) {
+	if pin == nil {
+		return nil, ErrInvalid
+	}
+	return p.readBlockInternal(ref)
+}
+
+func (p *PackStore) readBlockForGC(ref BlobRef) ([]byte, error) {
+	return p.readBlockInternal(ref)
 }
 
 func (p *PackStore) acquireReadHandle(packID uint64) (*packReadHandle, error) {

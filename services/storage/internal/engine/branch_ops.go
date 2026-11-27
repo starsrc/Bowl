@@ -1203,60 +1203,67 @@ func (d *DiskStore) SetAttr(ctx context.Context, branch string, ino uint64, req 
 		defer mu.Unlock()
 
 		newSize := *req.Size
-		snap, snapGen := d.newReadSnapshot()
-		branchMeta, bmErr := readBranchMeta(snap, d.keys, branch)
+		rv := d.openReadView()
+		branchMeta, bmErr := readBranchMeta(rv.snap, d.keys, branch)
 		if bmErr != nil {
-			_ = snap.Close()
+			_ = rv.Close()
 			return Inode{}, bmErr
 		}
 		if epoch := writerEpochFromContext(ctx); epoch != 0 && epoch != branchMeta.WriterEpoch {
-			_ = snap.Close()
+			_ = rv.Close()
 			return Inode{}, ErrStaleEpoch
 		}
 		var snapCursor branchLayerCursor
-		d.initBranchCursor(&snapCursor, snap, branchMeta, snapGen)
+		d.initBranchCursor(&snapCursor, rv.snap, branchMeta, rv.snapGen)
 		curInode, inoErr := snapCursor.getInode(ino)
 		if inoErr != nil {
-			_ = snap.Close()
+			_ = rv.Close()
 			return Inode{}, inoErr
 		}
 		if valErr := validateSetAttrInode(curInode, req); valErr != nil {
-			_ = snap.Close()
+			_ = rv.Close()
 			return Inode{}, valErr
 		}
 		blkSize := uint64(d.blockSize)
+		var (
+			trimmedTail []byte
+			tailBlk     uint64
+		)
 		if newSize < curInode.Size && newSize%blkSize != 0 {
-			tailBlk := newSize / blkSize
+			tailBlk = newSize / blkSize
 			tailLen := uint32(newSize % blkSize)
 			existingRef, exists, refErr := snapCursor.getDataRef(ino, tailBlk)
-			_ = snap.Close()
 			if refErr != nil {
+				_ = rv.Close()
 				return Inode{}, refErr
 			}
 			if exists && existingRef.Length > tailLen {
-				oldData, readErr := d.packs.ReadBlock(existingRef)
+				oldData, readErr := rv.readBlock(existingRef)
 				if readErr != nil {
+					_ = rv.Close()
 					return Inode{}, readErr
 				}
-				trimmed := make([]byte, tailLen)
-				copy(trimmed, oldData[:tailLen])
-				if isAllZero(trimmed) {
-					tailUpd.hasTailRef = true
-					tailUpd.tailTombstone = true
-					tailUpd.tailBlkIdx = tailBlk
-				} else {
-					refs, appErr := d.packs.AppendBlocks(ctx, [][]byte{trimmed})
-					if appErr != nil {
-						return Inode{}, appErr
-					}
-					defer d.packs.ReleaseInFlight(refs)
-					tailUpd.hasTailRef = true
-					tailUpd.tailBlkIdx = tailBlk
-					tailUpd.tailRef = refs[0]
-				}
+				trimmedTail = make([]byte, tailLen)
+				copy(trimmedTail, oldData[:tailLen])
 			}
-		} else {
-			_ = snap.Close()
+		}
+		_ = rv.Close()
+
+		if trimmedTail != nil {
+			if isAllZero(trimmedTail) {
+				tailUpd.hasTailRef = true
+				tailUpd.tailTombstone = true
+				tailUpd.tailBlkIdx = tailBlk
+			} else {
+				refs, appErr := d.packs.AppendBlocks(ctx, [][]byte{trimmedTail})
+				if appErr != nil {
+					return Inode{}, appErr
+				}
+				defer d.packs.ReleaseInFlight(refs)
+				tailUpd.hasTailRef = true
+				tailUpd.tailBlkIdx = tailBlk
+				tailUpd.tailRef = refs[0]
+			}
 		}
 	}
 
@@ -1566,25 +1573,25 @@ func (d *DiskStore) WriteWithAttr(ctx context.Context, branch string, ino uint64
 	mu.Lock()
 	defer mu.Unlock()
 
-	snap, snapGen := d.newReadSnapshot()
-	branchMeta, bmErr := readBranchMeta(snap, d.keys, branch)
+	rv := d.openReadView()
+	branchMeta, bmErr := readBranchMeta(rv.snap, d.keys, branch)
 	if bmErr != nil {
-		_ = snap.Close()
+		_ = rv.Close()
 		return 0, Inode{}, bmErr
 	}
 	if epoch := writerEpochFromContext(ctx); epoch != 0 && epoch != branchMeta.WriterEpoch {
-		_ = snap.Close()
+		_ = rv.Close()
 		return 0, Inode{}, ErrStaleEpoch
 	}
 	var snapCursor branchLayerCursor
-	d.initBranchCursor(&snapCursor, snap, branchMeta, snapGen)
+	d.initBranchCursor(&snapCursor, rv.snap, branchMeta, rv.snapGen)
 	curInode, inoErr := snapCursor.getInode(ino)
 	if inoErr != nil {
-		_ = snap.Close()
+		_ = rv.Close()
 		return 0, Inode{}, inoErr
 	}
 	if valErr := validateWritableRegularInode(curInode, startOff, uint64(len(data))); valErr != nil {
-		_ = snap.Close()
+		_ = rv.Close()
 		return 0, Inode{}, valErr
 	}
 
@@ -1614,13 +1621,13 @@ func (d *DiskStore) WriteWithAttr(ctx context.Context, branch string, ino uint64
 		if inStart > 0 || inEnd < blkSize {
 			oldRef, exists, refErr := snapCursor.getDataRef(ino, blkIdx)
 			if refErr != nil {
-				_ = snap.Close()
+				_ = rv.Close()
 				return 0, Inode{}, refErr
 			}
 			if exists {
-				existingData, refErr = d.packs.ReadBlock(oldRef)
+				existingData, refErr = rv.readBlock(oldRef)
 				if refErr != nil {
-					_ = snap.Close()
+					_ = rv.Close()
 					return 0, Inode{}, refErr
 				}
 			}
@@ -1634,7 +1641,7 @@ func (d *DiskStore) WriteWithAttr(ctx context.Context, branch string, ino uint64
 		payloads = append(payloads, buf)
 		blkIndices = append(blkIndices, blkIdx)
 	}
-	_ = snap.Close()
+	_ = rv.Close()
 
 	refs, err := d.packs.AppendBlocks(ctx, payloads)
 	if err != nil {

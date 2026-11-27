@@ -217,34 +217,34 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 	var partialUpdates []fallocateBlockUpdate
 
 	if zeroRange {
-		snap, snapGen := d.newReadSnapshot()
-		branchMeta, bmErr := readBranchMeta(snap, d.keys, branch)
+		rv := d.openReadView()
+		branchMeta, bmErr := readBranchMeta(rv.snap, d.keys, branch)
 		if bmErr != nil {
-			_ = snap.Close()
+			_ = rv.Close()
 			return bmErr
 		}
 		if epoch := writerEpochFromContext(ctx); epoch != 0 && epoch != branchMeta.WriterEpoch {
-			_ = snap.Close()
+			_ = rv.Close()
 			return ErrStaleEpoch
 		}
 		var snapCursor branchLayerCursor
-		d.initBranchCursor(&snapCursor, snap, branchMeta, snapGen)
+		d.initBranchCursor(&snapCursor, rv.snap, branchMeta, rv.snapGen)
 		curInode, inoErr := snapCursor.getInode(ino)
 		if inoErr != nil {
-			_ = snap.Close()
+			_ = rv.Close()
 			return inoErr
 		}
 		switch curInode.Mode & ModeTypeMask {
 		case ModeDir:
-			_ = snap.Close()
+			_ = rv.Close()
 			return ErrIsDir
 		case ModeRegular:
 		default:
-			_ = snap.Close()
+			_ = rv.Close()
 			return ErrNotSupported
 		}
 		if curInode.Flags&(FlagImmutable|FlagAppend) != 0 {
-			_ = snap.Close()
+			_ = rv.Close()
 			return ErrPerm
 		}
 
@@ -273,15 +273,15 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 
 			oldRef, exists, refErr := snapCursor.getDataRef(ino, blkIdx)
 			if refErr != nil {
-				_ = snap.Close()
+				_ = rv.Close()
 				return refErr
 			}
 			if !exists || inBlock >= int(oldRef.Length) {
 				continue
 			}
-			oldData, readErr := d.packs.ReadBlock(oldRef)
+			oldData, readErr := rv.readBlock(oldRef)
 			if readErr != nil {
-				_ = snap.Close()
+				_ = rv.Close()
 				return readErr
 			}
 			clearEnd := min(inBlock+clearLen, len(oldData))
@@ -299,7 +299,7 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 			toAppend = append(toAppend, oldData)
 			toAppendIndices = append(toAppendIndices, blkIdx)
 		}
-		_ = snap.Close()
+		_ = rv.Close()
 
 		if len(toAppend) > 0 {
 			refs, appErr := d.packs.AppendBlocks(ctx, toAppend)

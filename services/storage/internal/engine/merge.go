@@ -56,14 +56,14 @@ func (d *DiskStore) Merge(ctx context.Context, opts MergeOptions) (*MergeResult,
 
 func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStrategies map[string]MergeStrategy) (*MergeResult, error) {
 	dk := d.keys
-	snap, snapGen := d.newReadSnapshot()
-	defer func() { _ = snap.Close() }()
+	rv := d.openReadView()
+	defer func() { _ = rv.Close() }()
 
-	tgtBranch, err := readBranchMeta(snap, dk, opts.TargetBranch)
+	tgtBranch, err := readBranchMeta(rv.snap, dk, opts.TargetBranch)
 	if err != nil {
 		return nil, err
 	}
-	tgtDirty, err := layerHasAnyKey(snap, dk, tgtBranch.WorkLayerID)
+	tgtDirty, err := layerHasAnyKey(rv.snap, dk, tgtBranch.WorkLayerID)
 	if err != nil {
 		return nil, err
 	}
@@ -73,11 +73,11 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 
 	srcBranch := tgtBranch
 	if opts.SourceBranch != opts.TargetBranch {
-		srcBranch, err = readBranchMeta(snap, dk, opts.SourceBranch)
+		srcBranch, err = readBranchMeta(rv.snap, dk, opts.SourceBranch)
 		if err != nil {
 			return nil, err
 		}
-		srcDirty, sErr := layerHasAnyKey(snap, dk, srcBranch.WorkLayerID)
+		srcDirty, sErr := layerHasAnyKey(rv.snap, dk, srcBranch.WorkLayerID)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -86,7 +86,7 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 		}
 	}
 
-	lca, err := findLCA(snap, dk, srcBranch.HeadCommitID, tgtBranch.HeadCommitID)
+	lca, err := findLCA(rv.snap, dk, srcBranch.HeadCommitID, tgtBranch.HeadCommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -113,29 +113,30 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 		}, nil
 	}
 
-	_, baseLayers, err := d.resolveCommitLayersWithGen(snap, lca, snapGen)
+	_, baseLayers, err := d.resolveCommitLayersWithGen(rv.snap, lca, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
 	targetIsBase := tgtBranch.HeadCommitID == lca
 	targetLayers := baseLayers
 	if !targetIsBase {
-		_, targetLayers, err = d.resolveCommitLayersWithGen(snap, tgtBranch.HeadCommitID, snapGen)
+		_, targetLayers, err = d.resolveCommitLayersWithGen(rv.snap, tgtBranch.HeadCommitID, rv.snapGen)
 		if err != nil {
 			return nil, err
 		}
 	}
-	_, sourceLayers, err := d.resolveCommitLayersWithGen(snap, srcBranch.HeadCommitID, snapGen)
+	_, sourceLayers, err := d.resolveCommitLayersWithGen(rv.snap, srcBranch.HeadCommitID, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
 
 	plan, err := d.planDeltaMerge(
 		ctx,
+		rv,
 		lca,
-		layerView{r: snap, keys: dk, layers: baseLayers},
-		layerView{r: snap, keys: dk, layers: targetLayers},
-		layerView{r: snap, keys: dk, layers: sourceLayers},
+		layerView{r: rv.snap, keys: dk, layers: baseLayers},
+		layerView{r: rv.snap, keys: dk, layers: targetLayers},
+		layerView{r: rv.snap, keys: dk, layers: sourceLayers},
 		targetIsBase,
 		opts,
 		normStrategies,
@@ -179,8 +180,8 @@ func (d *DiskStore) execMerge(batch *pebble.Batch, branch BranchMeta, opts Merge
 		}
 	}
 
-	snap, snapGen := d.newReadSnapshot()
-	defer func() { _ = snap.Close() }()
+	rv := d.openReadView()
+	defer func() { _ = rv.Close() }()
 
 	tgtDirty, err := layerHasAnyKey(batch, dk, branch.WorkLayerID)
 	if err != nil {
@@ -191,15 +192,15 @@ func (d *DiskStore) execMerge(batch *pebble.Batch, branch BranchMeta, opts Merge
 	}
 
 	srcBranch := branch
-	srcReader := pebbleReader(snap)
+	srcReader := pebbleReader(rv.snap)
 	if opts.SourceBranch == branch.Name {
 		srcReader = batch
 	} else {
-		srcBranch, err = readBranchMeta(snap, dk, opts.SourceBranch)
+		srcBranch, err = readBranchMeta(rv.snap, dk, opts.SourceBranch)
 		if err != nil {
 			return nil, err
 		}
-		srcDirty, sErr := layerHasAnyKey(snap, dk, srcBranch.WorkLayerID)
+		srcDirty, sErr := layerHasAnyKey(rv.snap, dk, srcBranch.WorkLayerID)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -249,7 +250,7 @@ func (d *DiskStore) execMerge(batch *pebble.Batch, branch BranchMeta, opts Merge
 		}, nil
 	}
 
-	targetHeadCmt, targetLayers, err := d.resolveCommitLayersWithGen(batch, oldTargetHead, snapGen)
+	targetHeadCmt, targetLayers, err := d.resolveCommitLayersWithGen(batch, oldTargetHead, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
@@ -259,13 +260,13 @@ func (d *DiskStore) execMerge(batch *pebble.Batch, branch BranchMeta, opts Merge
 	if targetIsBase {
 		baseView = targetView
 	} else {
-		_, baseLayers, bErr := d.resolveCommitLayersWithGen(snap, lca, snapGen)
+		_, baseLayers, bErr := d.resolveCommitLayersWithGen(rv.snap, lca, rv.snapGen)
 		if bErr != nil {
 			return nil, bErr
 		}
-		baseView = layerView{r: snap, keys: dk, layers: baseLayers}
+		baseView = layerView{r: rv.snap, keys: dk, layers: baseLayers}
 	}
-	_, sourceLayers, err := d.resolveCommitLayersWithGen(srcReader, srcBranch.HeadCommitID, snapGen)
+	_, sourceLayers, err := d.resolveCommitLayersWithGen(srcReader, srcBranch.HeadCommitID, rv.snapGen)
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +274,7 @@ func (d *DiskStore) execMerge(batch *pebble.Batch, branch BranchMeta, opts Merge
 
 	plan, err := d.planDeltaMerge(
 		context.Background(),
+		rv,
 		lca,
 		baseView,
 		targetView,
@@ -429,6 +431,7 @@ type deltaMergeBuilder struct {
 
 func (d *DiskStore) planDeltaMerge(
 	ctx context.Context,
+	rv *readView,
 	lcaCommitID uint64,
 	baseView, targetView, sourceView layerView,
 	targetIsBase bool,
@@ -444,7 +447,7 @@ func (d *DiskStore) planDeltaMerge(
 		return &deltaMergePlan{deltaKV: make(map[string][]byte)}, nil
 	}
 
-	tc := newTreeCompareCtx(ctx, d, baseView, targetView, sourceView, targetIsBase, dirty)
+	tc := newTreeCompareCtx(ctx, d, rv, baseView, targetView, sourceView, targetIsBase, dirty)
 	b := &deltaMergeBuilder{
 		ctx:             ctx,
 		disk:            d,

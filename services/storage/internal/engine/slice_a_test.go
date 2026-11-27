@@ -98,7 +98,9 @@ func TestStep1_OpenDisk_ReopenPersistsDiskMetaAndRecoversPackAccounting(t *testi
 	require.Zero(t, stat.UsedBytes)
 	require.Equal(t, uint64(64<<10), stat.AvailBytes)
 
-	got, err := reopened.packs.ReadBlock(refs[0])
+	rv := reopened.openReadView()
+	got, err := rv.readBlock(refs[0])
+	require.NoError(t, rv.Close())
 	require.NoError(t, err)
 	require.Equal(t, payload, got)
 
@@ -204,7 +206,9 @@ func TestStep4_PackStore_SerializesConcurrentAppendsAndServesConcurrentReads(t *
 		require.Equal(t, uint64(1), refs[i].PackID)
 		require.Equal(t, uint32(4096), refs[i].Length)
 		offsets[refs[i].Offset] = struct{}{}
-		got, readErr := disk.packs.ReadBlock(refs[i])
+		rv := disk.openReadView()
+		got, readErr := rv.readBlock(refs[i])
+		require.NoError(t, rv.Close())
 		require.NoError(t, readErr)
 		require.Equal(t, payloads[i], got)
 	}

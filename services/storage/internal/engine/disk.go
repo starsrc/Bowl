@@ -46,6 +46,7 @@ type DiskStore struct {
 
 	branchRegMu sync.RWMutex
 	gcGate      gcGate
+	ebr         epochTracker
 
 	beforeGCRelocateHook   func(packID uint64, loc BlockRefLocation) error
 	beforeGCSealActiveHook func(packID uint64) error
@@ -179,8 +180,12 @@ func (d *DiskStore) closeResources(onDetached func()) error {
 		entry.removed = true
 		entry.mu.Unlock()
 	}
-	var packErr error
+	var (
+		drainErr error
+		packErr  error
+	)
 	if d.packs != nil {
+		drainErr = d.ebr.drainAll()
 		packErr = d.packs.Close()
 	}
 	if onDetached != nil {
@@ -191,7 +196,7 @@ func (d *DiskStore) closeResources(onDetached func()) error {
 	}
 	d.branchRegMu.Unlock()
 	d.gcGate.unlockExclusive()
-	return packErr
+	return errors.Join(drainErr, packErr)
 }
 
 func (d *DiskStore) recoverUsedBytes() error {
@@ -341,6 +346,13 @@ func (d *DiskStore) setKeySync(ctx context.Context, key, val []byte) error {
 
 func (d *DiskStore) deleteKeySync(ctx context.Context, key []byte) error {
 	return d.node.deleteKeySync(ctx, key, d.walCommitHook)
+}
+
+func (d *DiskStore) flushWALForGC(ctx context.Context) error {
+	if d.node == nil {
+		return nil
+	}
+	return d.node.flushWALForGCWithHook(ctx, d.walCommitHook)
 }
 
 func (d *DiskStore) DiskMeta() DiskMeta {

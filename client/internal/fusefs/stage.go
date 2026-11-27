@@ -51,12 +51,11 @@ const (
 
 	StageBlockAlign = 256 * 1024
 
-	StageWorkers = rpc.HTTP2DataConnectionShards
+	StageWorkers = 8
 
-	stageExtentScanPageSize = 4096
-	stageBackoffInitial     = 100 * time.Millisecond
-	stageBackoffMax         = 2 * time.Second
-	maxStageSpanLinks       = 32
+	stageBackoffInitial = 100 * time.Millisecond
+	stageBackoffMax     = 2 * time.Second
+	maxStageSpanLinks   = 32
 )
 
 var (
@@ -323,62 +322,6 @@ func isPIDAlive(pid int) bool {
 	return !errors.Is(err, unix.ESRCH)
 }
 
-type stageExtent struct {
-	offset uint64
-	length uint64
-}
-
-func createAndUnlinkTempFile(dir string) (*os.File, error) {
-	f, err := os.CreateTemp(dir, "tmpfile-*")
-	if err != nil {
-		return nil, err
-	}
-	if rmErr := os.Remove(f.Name()); rmErr != nil {
-		_ = f.Close()
-		return nil, rmErr
-	}
-	return f, nil
-}
-
-func fallocateHostFileFallback(f *os.File, mode uint32, offset, length int64, curSize uint64) error {
-	switch mode {
-	case 0:
-		end := uint64(offset + length)
-		if end > curSize {
-			return f.Truncate(int64(end))
-		}
-		return nil
-	case fallocFlKeepSize:
-		return nil
-	case fallocFlPunchHole | fallocFlKeepSize:
-		if uint64(offset) >= curSize {
-			return nil
-		}
-		punchEnd := min(uint64(offset+length), curSize)
-		return writeZerosAt(f, offset, int64(punchEnd-uint64(offset)))
-	default:
-		return syscall.EOPNOTSUPP
-	}
-}
-
-func writeZerosAt(f *os.File, offset, length int64) error {
-	if length <= 0 {
-		return nil
-	}
-	var zeroBuf [32 * 1024]byte
-	pos := offset
-	rem := length
-	for rem > 0 {
-		n := min(rem, int64(len(zeroBuf)))
-		if err := writeAtFull(f, zeroBuf[:n], pos); err != nil {
-			return err
-		}
-		pos += n
-		rem -= n
-	}
-	return nil
-}
-
 func writeAtFull(f *os.File, data []byte, offset int64) error {
 	written := 0
 	for written < len(data) {
@@ -422,106 +365,13 @@ func readAtFull(f *os.File, buf []byte, offset int64) (int, error) {
 	return total, nil
 }
 
-func appendSplitExtents(extents []stageExtent, start, end uint64) []stageExtent {
-	for pos := start; pos < end; {
-		n := min(end-pos, StageChunkSize)
-		extents = append(extents, stageExtent{offset: pos, length: n})
-		pos += n
-	}
-	return extents
-}
-
-func isAllZeroBytes(buf []byte) bool {
-	for _, b := range buf {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func scanNonZeroExtents(f *os.File, startOff, size uint64) ([]stageExtent, error) {
-	if startOff >= size {
-		return nil, nil
-	}
-	var extents []stageExtent
-	var page [stageExtentScanPageSize]byte
-	hasCur := false
-	var curStart, curEnd uint64
-
-	flushExtent := func() {
-		if hasCur && curEnd > curStart {
-			extents = appendSplitExtents(extents, curStart, curEnd)
-		}
-		hasCur = false
-	}
-
-	for pos := startOff; pos < size; {
-		want := int(min(uint64(len(page)), size-pos))
-		n, err := readAtFull(f, page[:want], int64(pos))
-		if err != nil {
-			return nil, err
-		}
-		if n == 0 {
-			break
-		}
-		if !isAllZeroBytes(page[:n]) {
-			switch {
-			case !hasCur:
-				curStart = pos
-				curEnd = pos + uint64(n)
-				hasCur = true
-			case pos == curEnd && curEnd-curStart+uint64(n) <= StageChunkSize:
-				curEnd += uint64(n)
-			default:
-				flushExtent()
-				curStart = pos
-				curEnd = pos + uint64(n)
-				hasCur = true
-			}
-		} else if hasCur {
-			flushExtent()
-		}
-		pos += uint64(n)
-	}
-	flushExtent()
-	return extents, nil
-}
-
 type StageChunkWriter func(ctx context.Context, ino, offset uint64, data []byte) (uint32, *storagev1.Inode, error)
 
 type StageChunkReader func(ctx context.Context, offset uint64, length uint32) (rpc.ReadPayload, error)
 
-type StagedXattr struct {
-	Name  string
-	Value []byte
-}
-
-type StagePromotedMeta struct {
-	Size   uint64
-	Atime  *timestamppb.Timestamp
-	Mtime  *timestamppb.Timestamp
-	Mode   uint32
-	Gid    uint32
-	Flags  uint32
-	Xattrs []StagedXattr
-}
-
-type StageAttrCommitter func(ctx context.Context, ino uint64, meta StagePromotedMeta) (*storagev1.Inode, error)
-
 type StageHooks struct {
-	OnStage  func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
-	OnCommit func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr, preserveMeta, capPresent bool)
-	OnError  func(nodeID uint64)
+	OnCommit func(nodeID, ino uint64, inode *storagev1.Inode)
 }
-
-type stageItemKind uint8
-
-const (
-	stageItemChunkFile stageItemKind = iota
-	stageItemPromotedExtent
-	stageItemPromotedCommit
-)
 
 type stageItemState uint8
 
@@ -532,43 +382,16 @@ const (
 	stageStateDone
 )
 
-type promotedTmpState struct {
-	file     *os.File
-	size     uint64
-	atime    *timestamppb.Timestamp
-	mtime    *timestamppb.Timestamp
-	mode     uint32
-	gid      uint32
-	flags    uint32
-	xattrs   []StagedXattr
-	hasCap   bool
-	readers  int
-	finished bool
-	hasErr   bool
-}
-
-func (p *promotedTmpState) maybeDetachFileLocked() *os.File {
-	if p == nil || !p.finished || p.readers > 0 || p.file == nil {
-		return nil
-	}
-	f := p.file
-	p.file = nil
-	return f
-}
-
 type stageItem struct {
 	seq        uint64
-	kind       stageItemKind
 	state      stageItemState
 	ino        uint64
 	nodeID     uint64
-	cacheEpoch uint64
 	offset     uint64
 	length     uint64
 	path       string
 	gen        uint64
 	inodeState *stageInode
-	promoted   *promotedTmpState
 	links      []trace.Link
 
 	readers   int
@@ -578,9 +401,7 @@ type stageItem struct {
 }
 
 func (it *stageItem) isAlignedFullChunk() bool {
-	return it.kind != stageItemPromotedCommit &&
-		it.length == StageChunkSize &&
-		it.offset%StageBlockAlign == 0
+	return it.length == StageChunkSize && it.offset%StageBlockAlign == 0
 }
 
 func (it *stageItem) blockRange() (startBlock, endBlock uint64) {
@@ -617,10 +438,8 @@ func (it *stageItem) recordSpanLinkLocked(ctx context.Context) {
 type stageInode struct {
 	ino              uint64
 	nodeID           uint64
-	cacheEpoch       uint64
 	active           *stageItem
 	pending          []*stageItem
-	promoted         *promotedTmpState
 	activeWriteBusy  bool
 	discarding       bool
 	inflightHooks    int
@@ -628,7 +447,6 @@ type stageInode struct {
 	hasKnownSize     bool
 	logicalSize      uint64
 	lastWriteTS      *timestamppb.Timestamp
-	lastCommitted    *storagev1.Inode
 	streamGen        uint64
 	errGen           uint64
 	errSeq           uint64
@@ -646,7 +464,7 @@ func newStageInode(ino uint64) *stageInode {
 }
 
 func (st *stageInode) hasPendingLocked() bool {
-	return st.active != nil || len(st.pending) > 0 || st.promoted != nil || st.inflightHooks > 0
+	return st.active != nil || len(st.pending) > 0 || st.inflightHooks > 0
 }
 
 func (st *stageInode) hasInflightLocked() bool {
@@ -663,7 +481,6 @@ func (st *stageInode) hasInflightLocked() bool {
 
 func (st *stageInode) resetStreamLocked() {
 	st.streamGen++
-	st.lastCommitted = nil
 }
 
 func (st *stageInode) hasUnseenErrLocked(c *StageCoordinator, fh uint64) bool {
@@ -699,7 +516,6 @@ type StageCoordinator struct {
 	instanceDir string
 	stageSize   uint64
 	writer      StageChunkWriter
-	committer   StageAttrCommitter
 	hooks       StageHooks
 
 	nextSeq          atomic.Uint64
@@ -744,7 +560,6 @@ func NewStageCoordinator(
 	instanceDir string,
 	stageSize uint64,
 	writer StageChunkWriter,
-	committer StageAttrCommitter,
 	hooks StageHooks,
 ) *StageCoordinator {
 	if stageSize == 0 {
@@ -755,7 +570,6 @@ func NewStageCoordinator(
 		instanceDir:  instanceDir,
 		stageSize:    stageSize,
 		writer:       writer,
-		committer:    committer,
 		hooks:        hooks,
 		handleSeq:    make(map[uint64]uint64),
 		inodes:       make(map[uint64]*stageInode),
@@ -925,7 +739,7 @@ func (c *StageCoordinator) wakeBackpressureLocked() {
 func (c *StageCoordinator) drainingBytesLocked() uint64 {
 	draining := c.inflightBytes
 	for _, qIt := range c.queue {
-		if qIt != nil && qIt.kind != stageItemPromotedCommit {
+		if qIt != nil {
 			draining += qIt.length
 		}
 	}
@@ -1074,10 +888,6 @@ func (c *StageCoordinator) OverlayAttr(ino uint64, attr *fuse.Attr) {
 			attr.Ctimensec = nsec
 		}
 	}
-	if st.promoted != nil && !st.promoted.finished {
-		attr.Mode = st.promoted.mode
-		attr.Gid = st.promoted.gid
-	}
 	c.mu.Unlock()
 }
 
@@ -1107,16 +917,11 @@ func (c *StageCoordinator) OverlayInode(ino uint64, inode *storagev1.Inode) {
 			a.Ctime = proto.CloneOf(st.lastWriteTS)
 		}
 	}
-	if st.promoted != nil && !st.promoted.finished {
-		a.Mode = st.promoted.mode
-		a.Gid = st.promoted.gid
-		a.Flags = st.promoted.flags
-	}
 	c.mu.Unlock()
 }
 
-func (c *StageCoordinator) Write(ctx context.Context, ino, nodeID, offset uint64, data []byte, cacheEpoch uint64) (written uint32, handled bool, err error) {
-	return c.WriteForHandle(ctx, nil, 0, ino, nodeID, offset, data, cacheEpoch)
+func (c *StageCoordinator) Write(ctx context.Context, ino, nodeID, offset uint64, data []byte) (written uint32, handled bool, err error) {
+	return c.WriteForHandle(ctx, nil, 0, ino, nodeID, offset, data)
 }
 
 func (c *StageCoordinator) WriteForHandle(
@@ -1124,7 +929,6 @@ func (c *StageCoordinator) WriteForHandle(
 	cancel <-chan struct{},
 	fh, ino, nodeID, offset uint64,
 	data []byte,
-	cacheEpoch uint64,
 ) (written uint32, handled bool, err error) {
 	if c == nil || len(data) == 0 || len(data) > StageChunkSize || c.writer == nil {
 		return 0, false, nil
@@ -1134,7 +938,7 @@ func (c *StageCoordinator) WriteForHandle(
 	curOff := offset
 
 	for len(rem) > 0 {
-		step, earlyDone, earlyErr := c.prepareWriteStep(ctx, cancel, fh, ino, nodeID, curOff, rem, cacheEpoch)
+		step, earlyDone, earlyErr := c.prepareWriteStep(ctx, cancel, fh, ino, nodeID, curOff, rem)
 		if earlyDone {
 			if written > 0 {
 				return written, true, nil
@@ -1152,8 +956,6 @@ func (c *StageCoordinator) WriteForHandle(
 			_ = os.Truncate(step.chunkPath, int64(step.oldLength))
 		}
 
-		var onStageEnd uint64
-		var onStageTS *timestamppb.Timestamp
 		c.mu.Lock()
 		if c.aborted.Load() {
 			abortErr := c.abortErr
@@ -1176,14 +978,10 @@ func (c *StageCoordinator) WriteForHandle(
 		step.activeChunk.length = step.oldLength + uint64(step.take)
 		step.activeChunk.recordSpanLinkLocked(ctx)
 		step.st.nodeID = nodeID
-		step.st.cacheEpoch = cacheEpoch
 		if curOff+uint64(step.take) > step.st.logicalSize {
 			step.st.logicalSize = curOff + uint64(step.take)
 		}
-		nowTS := timestamppb.Now()
-		step.st.lastWriteTS = nowTS
-		onStageEnd = step.st.logicalSize
-		onStageTS = nowTS
+		step.st.lastWriteTS = timestamppb.Now()
 		step.st.activeWriteBusy = false
 		c.stateCond.Broadcast()
 		c.wakeBackpressureLocked()
@@ -1191,10 +989,6 @@ func (c *StageCoordinator) WriteForHandle(
 			c.sealActiveLocked(step.st)
 		}
 		c.mu.Unlock()
-
-		if c.hooks.OnStage != nil {
-			c.hooks.OnStage(nodeID, cacheEpoch, onStageEnd, onStageTS)
-		}
 
 		rem = rem[step.take:]
 		curOff += uint64(step.take)
@@ -1220,7 +1014,6 @@ func (c *StageCoordinator) prepareWriteStep(
 	cancel <-chan struct{},
 	fh, ino, nodeID, curOff uint64,
 	rem []byte,
-	cacheEpoch uint64,
 ) (step stageWriteStep, earlyDone bool, earlyErr error) {
 	var bpStart time.Time
 	var bpSpan trace.Span = noopSpanInstance
@@ -1256,7 +1049,6 @@ func (c *StageCoordinator) prepareWriteStep(
 			continue
 		}
 		st.nodeID = nodeID
-		st.cacheEpoch = cacheEpoch
 
 		for st.activeWriteBusy {
 			c.stateCond.Wait()
@@ -1353,11 +1145,9 @@ func (c *StageCoordinator) prepareWriteStep(
 		seq := c.nextSeq.Add(1)
 		st.active = &stageItem{
 			seq:        seq,
-			kind:       stageItemChunkFile,
 			state:      stageStateActive,
 			ino:        ino,
 			nodeID:     nodeID,
-			cacheEpoch: cacheEpoch,
 			offset:     curOff,
 			path:       filepath.Join(c.instanceDir, fmt.Sprintf("chunk-%d.stage", seq)),
 			gen:        st.streamGen,
@@ -1451,127 +1241,6 @@ func (c *StageCoordinator) abortActiveWriteStepLocked(st *stageInode, activeChun
 	return pathToRemove
 }
 
-func (c *StageCoordinator) PromoteTmpfile(
-	ctx context.Context,
-	serverIno, nodeID, cacheEpoch uint64,
-	file *os.File,
-	meta StagePromotedMeta,
-	extents []stageExtent,
-) error {
-	if c == nil {
-		if file != nil {
-			_ = file.Close()
-		}
-		return nil
-	}
-
-	var xattrsCopy []StagedXattr
-	hasCap := false
-	if len(meta.Xattrs) > 0 {
-		xattrsCopy = make([]StagedXattr, len(meta.Xattrs))
-		for i, xa := range meta.Xattrs {
-			if xa.Name == securityCapabilityXattr {
-				hasCap = true
-			}
-			xattrsCopy[i] = StagedXattr{
-				Name:  xa.Name,
-				Value: slices.Clone(xa.Value),
-			}
-		}
-	}
-
-	p := &promotedTmpState{
-		file:   file,
-		size:   meta.Size,
-		atime:  proto.CloneOf(meta.Atime),
-		mtime:  proto.CloneOf(meta.Mtime),
-		mode:   meta.Mode,
-		gid:    meta.Gid,
-		flags:  meta.Flags,
-		xattrs: xattrsCopy,
-		hasCap: hasCap,
-	}
-
-	var totalExtentBytes uint64
-	for _, ext := range extents {
-		totalExtentBytes += ext.length
-	}
-
-	c.mu.Lock()
-	for {
-		if c.aborted.Load() {
-			abortErr := c.abortErr
-			c.mu.Unlock()
-			if file != nil {
-				_ = file.Close()
-			}
-			if abortErr == nil {
-				return syscall.EBUSY
-			}
-			return abortErr
-		}
-		if existing := c.inodes[serverIno]; existing != nil && existing.discarding {
-			c.stateCond.Wait()
-			continue
-		}
-		break
-	}
-	st := c.getOrCreateInodeLocked(serverIno)
-	st.nodeID = nodeID
-	st.cacheEpoch = cacheEpoch
-	st.promoted = p
-	st.createdInSession = true
-	st.hasKnownSize = true
-	if meta.Size > st.logicalSize {
-		st.logicalSize = meta.Size
-	}
-	if meta.Mtime != nil {
-		st.lastWriteTS = proto.CloneOf(meta.Mtime)
-	}
-
-	for _, ext := range extents {
-		it := &stageItem{
-			seq:        c.nextSeq.Add(1),
-			kind:       stageItemPromotedExtent,
-			state:      stageStateQueued,
-			ino:        serverIno,
-			nodeID:     nodeID,
-			cacheEpoch: cacheEpoch,
-			offset:     ext.offset,
-			length:     ext.length,
-			gen:        st.streamGen,
-			inodeState: st,
-			promoted:   p,
-		}
-		it.recordSpanLinkLocked(ctx)
-		st.pending = append(st.pending, it)
-		c.queue = append(c.queue, it)
-		c.pendingChunks.Add(1)
-		c.totalActiveItems.Add(1)
-	}
-
-	commitItem := &stageItem{
-		seq:        c.nextSeq.Add(1),
-		kind:       stageItemPromotedCommit,
-		state:      stageStateQueued,
-		ino:        serverIno,
-		nodeID:     nodeID,
-		cacheEpoch: cacheEpoch,
-		gen:        st.streamGen,
-		inodeState: st,
-		promoted:   p,
-	}
-	commitItem.recordSpanLinkLocked(ctx)
-	st.pending = append(st.pending, commitItem)
-	c.queue = append(c.queue, commitItem)
-	c.totalActiveItems.Add(1)
-
-	c.usedBytes += totalExtentBytes
-	c.workerCond.Broadcast()
-	c.mu.Unlock()
-	return nil
-}
-
 type readChunkSnapshot struct {
 	item   *stageItem
 	offset uint64
@@ -1615,14 +1284,10 @@ func (c *StageCoordinator) Read(
 	createdInSession := st.createdInSession
 	hasKnownSize := st.hasKnownSize
 	logicalSize := st.logicalSize
-	promoted := st.promoted
-	if promoted != nil {
-		promoted.readers++
-	}
 
 	var snapshots []readChunkSnapshot
 	collect := func(it *stageItem) {
-		if it == nil || it.kind != stageItemChunkFile || it.length == 0 || it.discarded || it.uploaded {
+		if it == nil || it.length == 0 || it.discarded || it.uploaded {
 			return
 		}
 		it.readers++
@@ -1640,7 +1305,7 @@ func (c *StageCoordinator) Read(
 	c.mu.Unlock()
 
 	defer func() {
-		c.releaseReadSnapshots(st, promoted, snapshots)
+		c.releaseReadSnapshots(snapshots)
 	}()
 
 	reqStart := offset
@@ -1652,12 +1317,6 @@ func (c *StageCoordinator) Read(
 		}
 		readLen := min(uint64(len(dest)), logicalSize-reqStart)
 		clear(dest[:readLen])
-		if promoted != nil && promoted.file != nil && reqStart < promoted.size {
-			pLen := min(readLen, promoted.size-reqStart)
-			if _, readErr := readAtFull(promoted.file, dest[:pLen], int64(reqStart)); readErr != nil {
-				return 0, true, readErr
-			}
-		}
 		if overlayErr := overlaySnapshotChunks(dest[:readLen], reqStart, snapshots); overlayErr != nil {
 			return 0, true, overlayErr
 		}
@@ -1705,9 +1364,8 @@ func (c *StageCoordinator) Read(
 	return int(readLen), true, nil
 }
 
-func (c *StageCoordinator) releaseReadSnapshots(st *stageInode, promoted *promotedTmpState, snapshots []readChunkSnapshot) {
+func (c *StageCoordinator) releaseReadSnapshots(snapshots []readChunkSnapshot) {
 	var toRemove []string
-	var fileToClose *os.File
 
 	c.mu.Lock()
 	for _, snap := range snapshots {
@@ -1718,20 +1376,12 @@ func (c *StageCoordinator) releaseReadSnapshots(st *stageInode, promoted *promot
 			toRemove = append(toRemove, it.path)
 		}
 	}
-	if promoted != nil {
-		promoted.readers--
-		fileToClose = promoted.maybeDetachFileLocked()
-	}
 	c.stateCond.Broadcast()
 	c.mu.Unlock()
 
 	for _, p := range toRemove {
 		_ = os.Remove(p)
 	}
-	if fileToClose != nil {
-		_ = fileToClose.Close()
-	}
-	_ = st
 }
 
 func overlaySnapshotChunks(dest []byte, reqStart uint64, snapshots []readChunkSnapshot) error {
@@ -2075,17 +1725,6 @@ func (c *StageCoordinator) ResetInodeStream(ctx context.Context, ino uint64) err
 	return nil
 }
 
-func (c *StageCoordinator) HasPromotedPending(ino uint64) bool {
-	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
-		return false
-	}
-	c.mu.Lock()
-	st := c.inodes[ino]
-	pending := st != nil && st.promoted != nil && !st.promoted.finished
-	c.mu.Unlock()
-	return pending
-}
-
 func (c *StageCoordinator) BarrierAll(ctx context.Context) error {
 	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return nil
@@ -2110,7 +1749,6 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 		return
 	}
 	var pathsToRemove []string
-	var fileToClose *os.File
 
 	c.mu.Lock()
 	st := c.inodes[ino]
@@ -2157,18 +1795,14 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 
 	var freedBytes uint64
 	var droppedChunks int64
-	var droppedTotal int64
 	keepQueue := 0
 	for _, qIt := range c.queue {
 		if qIt.ino == ino && qIt.state == stageStateQueued {
 			qIt.state = stageStateDone
 			qIt.discarded = true
-			droppedTotal++
-			if qIt.kind != stageItemPromotedCommit {
-				droppedChunks++
-				freedBytes += qIt.length
-			}
-			if qIt.kind == stageItemChunkFile && qIt.readers == 0 && !qIt.unlinked && qIt.path != "" {
+			droppedChunks++
+			freedBytes += qIt.length
+			if qIt.readers == 0 && !qIt.unlinked && qIt.path != "" {
 				qIt.unlinked = true
 				pathsToRemove = append(pathsToRemove, qIt.path)
 			}
@@ -2193,9 +1827,7 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 
 	if droppedChunks > 0 {
 		c.pendingChunks.Add(-droppedChunks)
-	}
-	if droppedTotal > 0 {
-		c.totalActiveItems.Add(-droppedTotal)
+		c.totalActiveItems.Add(-droppedChunks)
 	}
 	if freedBytes > 0 {
 		if c.usedBytes >= freedBytes {
@@ -2204,22 +1836,10 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 			c.usedBytes = 0
 		}
 	}
-	if len(st.pending) == 0 && st.promoted != nil {
-		st.promoted.finished = true
-		fileToClose = st.promoted.maybeDetachFileLocked()
-		st.promoted = nil
-	}
 	c.wakeBackpressureLocked()
 
 	for st.hasInflightLocked() && !c.aborted.Load() {
 		c.stateCond.Wait()
-	}
-	if st.promoted != nil && len(st.pending) == 0 {
-		st.promoted.finished = true
-		if f := st.promoted.maybeDetachFileLocked(); f != nil {
-			fileToClose = f
-		}
-		st.promoted = nil
 	}
 	st.createdInSession = false
 	st.hasKnownSize = false
@@ -2235,9 +1855,6 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	for _, p := range pathsToRemove {
 		_ = os.Remove(p)
 	}
-	if fileToClose != nil {
-		_ = fileToClose.Close()
-	}
 }
 
 func (c *StageCoordinator) AbortAll(err error) {
@@ -2249,7 +1866,6 @@ func (c *StageCoordinator) AbortAll(err error) {
 	}
 
 	var pathsToRemove []string
-	var filesToClose []*os.File
 
 	c.mu.Lock()
 	if c.aborted.Load() {
@@ -2263,18 +1879,14 @@ func (c *StageCoordinator) AbortAll(err error) {
 
 	var freedBytes uint64
 	var droppedChunks int64
-	var droppedTotal int64
 	for i, qIt := range c.queue {
 		c.queue[i] = nil
 		if qIt != nil && qIt.state == stageStateQueued {
 			qIt.state = stageStateDone
 			qIt.discarded = true
-			droppedTotal++
-			if qIt.kind != stageItemPromotedCommit {
-				droppedChunks++
-				freedBytes += qIt.length
-			}
-			if qIt.kind == stageItemChunkFile && qIt.readers == 0 && !qIt.unlinked && qIt.path != "" {
+			droppedChunks++
+			freedBytes += qIt.length
+			if qIt.readers == 0 && !qIt.unlinked && qIt.path != "" {
 				qIt.unlinked = true
 				pathsToRemove = append(pathsToRemove, qIt.path)
 			}
@@ -2301,7 +1913,6 @@ func (c *StageCoordinator) AbortAll(err error) {
 				st.active = nil
 				it.state = stageStateDone
 				droppedChunks++
-				droppedTotal++
 				freedBytes += it.length
 				if it.readers == 0 && !it.unlinked && it.path != "" {
 					it.unlinked = true
@@ -2321,17 +1932,6 @@ func (c *StageCoordinator) AbortAll(err error) {
 		clear(st.pending[keepPending:])
 		st.pending = st.pending[:keepPending]
 
-		if st.promoted != nil {
-			st.promoted.hasErr = true
-			if len(st.pending) == 0 {
-				st.promoted.finished = true
-				if f := st.promoted.maybeDetachFileLocked(); f != nil {
-					filesToClose = append(filesToClose, f)
-				}
-				st.promoted = nil
-			}
-		}
-
 		st.createdInSession = false
 		st.hasKnownSize = false
 		st.logicalSize = 0
@@ -2340,9 +1940,7 @@ func (c *StageCoordinator) AbortAll(err error) {
 
 	if droppedChunks > 0 {
 		c.pendingChunks.Add(-droppedChunks)
-	}
-	if droppedTotal > 0 {
-		c.totalActiveItems.Add(-droppedTotal)
+		c.totalActiveItems.Add(-droppedChunks)
 	}
 	if freedBytes > 0 {
 		if c.usedBytes >= freedBytes {
@@ -2365,9 +1963,6 @@ func (c *StageCoordinator) AbortAll(err error) {
 	for _, p := range pathsToRemove {
 		_ = os.Remove(p)
 	}
-	for _, f := range filesToClose {
-		_ = f.Close()
-	}
 }
 
 func (c *StageCoordinator) countUnuploadedChunksLocked() int64 {
@@ -2376,11 +1971,11 @@ func (c *StageCoordinator) countUnuploadedChunksLocked() int64 {
 		if st == nil {
 			continue
 		}
-		if st.active != nil && st.active.kind != stageItemPromotedCommit && !st.active.uploaded {
+		if st.active != nil && !st.active.uploaded {
 			dropped++
 		}
 		for _, it := range st.pending {
-			if it != nil && it.kind != stageItemPromotedCommit && !it.uploaded {
+			if it != nil && !it.uploaded {
 				dropped++
 			}
 		}
@@ -2519,18 +2114,10 @@ func (c *StageCoordinator) Clear(ctx context.Context, stallTimeout time.Duration
 		c.abortCancel()
 	}
 
-	var leftoverFiles []*os.File
 	var leftoverPaths []string
 	c.mu.Lock()
 	c.workersDone = true
 	for _, st := range c.inodes {
-		if st.promoted != nil {
-			st.promoted.finished = true
-			if f := st.promoted.maybeDetachFileLocked(); f != nil {
-				leftoverFiles = append(leftoverFiles, f)
-			}
-			st.promoted = nil
-		}
 		if st.active != nil && st.active.path != "" && !st.active.unlinked {
 			st.active.unlinked = true
 			leftoverPaths = append(leftoverPaths, st.active.path)
@@ -2551,9 +2138,6 @@ func (c *StageCoordinator) Clear(ctx context.Context, stallTimeout time.Duration
 	c.totalActiveItems.Store(0)
 	c.mu.Unlock()
 
-	for _, f := range leftoverFiles {
-		_ = f.Close()
-	}
 	for _, p := range leftoverPaths {
 		_ = os.Remove(p)
 	}
@@ -2621,9 +2205,7 @@ func (c *StageCoordinator) uploadWorker() {
 		}
 		discardCh := item.inodeState.discardCh
 		c.inflightCount++
-		if item.kind != stageItemPromotedCommit {
-			c.inflightBytes += item.length
-		}
+		c.inflightBytes += item.length
 		c.mu.Unlock()
 
 		c.metrics.Load().addStageInflight(1)
@@ -2674,55 +2256,22 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 			discardedMid = true
 			break
 		}
-		if item.kind == stageItemPromotedCommit {
-			c.mu.Lock()
-			skipCommit := item.promoted != nil && item.promoted.hasErr
-			c.mu.Unlock()
-			if skipCommit {
-				break
-			}
-			rpcCtx, cancel := context.WithTimeout(uploadBaseCtx, DefaultRPCTimeout)
-			if c.committer != nil && item.promoted != nil {
-				meta := StagePromotedMeta{
-					Size:   item.promoted.size,
-					Atime:  proto.CloneOf(item.promoted.atime),
-					Mtime:  proto.CloneOf(item.promoted.mtime),
-					Mode:   item.promoted.mode,
-					Gid:    item.promoted.gid,
-					Flags:  item.promoted.flags,
-					Xattrs: item.promoted.xattrs,
-				}
-				respInode, finalErr = c.committer(rpcCtx, item.ino, meta)
-			} else {
-				finalErr = syscall.EIO
-			}
-			cancel()
-		} else {
-			buf := acquireStageBuf()
-			dataLen := int(item.length)
-			var readErr error
-			switch {
-			case item.kind == stageItemChunkFile:
-				readErr = readChunkBytesForUpload(item.path, buf[:dataLen])
-			case item.promoted != nil && item.promoted.file != nil:
-				_, readErr = readAtFull(item.promoted.file, buf[:dataLen], int64(item.offset))
-			default:
-				readErr = syscall.EIO
-			}
-			if readErr != nil {
-				releaseStageBuf(buf)
-				finalErr = readErr
-				break
-			}
-
-			rpcCtx, cancel := context.WithTimeout(uploadBaseCtx, DefaultRPCTimeout)
-			writtenBytes, respInode, finalErr = c.writer(rpcCtx, item.ino, item.offset, buf[:dataLen:dataLen])
-			cancel()
+		buf := acquireStageBuf()
+		dataLen := int(item.length)
+		readErr := readChunkBytesForUpload(item.path, buf[:dataLen])
+		if readErr != nil {
 			releaseStageBuf(buf)
+			finalErr = readErr
+			break
+		}
 
-			if finalErr == nil && writtenBytes < uint32(dataLen) {
-				finalErr = syscall.EIO
-			}
+		rpcCtx, cancel := context.WithTimeout(uploadBaseCtx, DefaultRPCTimeout)
+		writtenBytes, respInode, finalErr = c.writer(rpcCtx, item.ino, item.offset, buf[:dataLen:dataLen])
+		cancel()
+		releaseStageBuf(buf)
+
+		if finalErr == nil && writtenBytes < uint32(dataLen) {
+			finalErr = syscall.EIO
 		}
 
 		if finalErr == nil {
@@ -2776,16 +2325,14 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 	if finalErr != nil && !discardedMid && !notFoundAbort {
 		uploadSpan.RecordError(finalErr)
 		uploadSpan.SetStatus(codes.Error, finalErr.Error())
-		if item.kind != stageItemPromotedCommit {
-			c.metrics.Load().incStageUploadRPC(true)
-		}
+		c.metrics.Load().incStageUploadRPC(true)
 		c.activeLogger().ErrorContext(uploadBaseCtx, "stage_upload_failed",
 			"ino", item.ino,
 			"offset", item.offset,
 			"length", item.length,
 			"error", finalErr,
 		)
-	} else if item.kind != stageItemPromotedCommit && !discardedMid {
+	} else if !discardedMid {
 		c.metrics.Load().incStageUploadRPC(false)
 		uploadSpan.SetAttributes(attribute.Int("stage.written_bytes", int(writtenBytes)))
 	}
@@ -2818,17 +2365,9 @@ func (c *StageCoordinator) finishUploadItem(
 	notFoundAbort bool,
 ) {
 	var pathToRemove string
-	var fileToClose *os.File
 	var onCommitNodeID uint64
 	var onCommitIno uint64
-	var onCommitEpoch uint64
-	var onCommitMinSize uint64
-	var onCommitRefresh bool
-	var onCommitPreserveMeta bool
-	var onCommitCapPresent bool
 	var callOnCommit bool
-	var callOnError bool
-	var onErrorNodeID uint64
 
 	c.mu.Lock()
 	st := item.inodeState
@@ -2837,32 +2376,25 @@ func (c *StageCoordinator) finishUploadItem(
 	if c.inflightCount > 0 {
 		c.inflightCount--
 	}
-	if item.kind != stageItemPromotedCommit {
-		if c.inflightBytes >= item.length {
-			c.inflightBytes -= item.length
-		} else {
-			c.inflightBytes = 0
-		}
+	if c.inflightBytes >= item.length {
+		c.inflightBytes -= item.length
+	} else {
+		c.inflightBytes = 0
 	}
 
-	if item.kind == stageItemChunkFile {
-		if item.readers == 0 && !item.unlinked && item.path != "" {
-			item.unlinked = true
-			pathToRemove = item.path
-		}
+	if item.readers == 0 && !item.unlinked && item.path != "" {
+		item.unlinked = true
+		pathToRemove = item.path
 	}
 
-	if item.kind != stageItemPromotedCommit {
-		c.pendingChunks.Add(-1)
-		if c.usedBytes >= item.length {
-			c.usedBytes -= item.length
-		} else {
-			c.usedBytes = 0
-		}
+	c.pendingChunks.Add(-1)
+	if c.usedBytes >= item.length {
+		c.usedBytes -= item.length
+	} else {
+		c.usedBytes = 0
 	}
 
 	if st != nil {
-
 		for i, p := range st.pending {
 			if p == item {
 				rem := copy(st.pending[i:], st.pending[i+1:])
@@ -2872,33 +2404,11 @@ func (c *StageCoordinator) finishUploadItem(
 			}
 		}
 
-		if item.kind == stageItemChunkFile || item.kind == stageItemPromotedCommit {
-
-			st.createdInSession = false
-		}
-
-		if item.kind == stageItemPromotedCommit && item.promoted != nil {
-			item.promoted.finished = true
-			fileToClose = item.promoted.maybeDetachFileLocked()
-			if st.promoted == item.promoted {
-				st.promoted = nil
-			}
-		} else if c.aborted.Load() && st.promoted != nil && len(st.pending) == 0 {
-			st.promoted.finished = true
-			fileToClose = st.promoted.maybeDetachFileLocked()
-			st.promoted = nil
-		}
+		st.createdInSession = false
 
 		if !c.aborted.Load() {
 			if finalErr != nil && !discardedMid {
-				if notFoundAbort {
-					if item.promoted != nil {
-						item.promoted.hasErr = true
-					}
-				} else {
-					if item.promoted != nil {
-						item.promoted.hasErr = true
-					}
+				if !notFoundAbort {
 					if st.errGen != item.gen {
 						st.errGen = item.gen
 						st.lastErr = finalErr
@@ -2907,8 +2417,6 @@ func (c *StageCoordinator) finishUploadItem(
 					if st.streamGen == item.gen {
 						st.resetStreamLocked()
 					}
-					callOnError = true
-					onErrorNodeID = item.nodeID
 				}
 			} else if finalErr == nil && !discardedMid && !item.discarded {
 				select {
@@ -2921,33 +2429,16 @@ func (c *StageCoordinator) finishUploadItem(
 					}
 					st.hasKnownSize = true
 				}
-				if item.kind == stageItemChunkFile || (item.kind == stageItemPromotedCommit && respInode != nil) {
+				if c.hooks.OnCommit != nil {
 					callOnCommit = true
 					onCommitNodeID = item.nodeID
 					onCommitIno = item.ino
-					onCommitEpoch = item.cacheEpoch
-					if item.kind == stageItemPromotedCommit && item.promoted != nil {
-						onCommitCapPresent = item.promoted.hasCap
-					}
-					if item.gen == st.streamGen {
-						onCommitMinSize = st.logicalSize
-						if isNotOlderCommittedInode(st.lastCommitted, respInode) {
-							st.lastCommitted = proto.CloneOf(respInode)
-							onCommitRefresh = true
-						}
-					}
-				} else if item.kind == stageItemPromotedExtent {
-					callOnCommit = true
-					onCommitNodeID = item.nodeID
-					onCommitIno = item.ino
-					onCommitEpoch = item.cacheEpoch
-					onCommitPreserveMeta = true
 				}
 			}
 		}
 	}
 
-	waitHooks := st != nil && (callOnCommit || callOnError)
+	waitHooks := st != nil && callOnCommit
 	if waitHooks {
 		st.inflightHooks++
 	} else {
@@ -2961,14 +2452,8 @@ func (c *StageCoordinator) finishUploadItem(
 	if pathToRemove != "" {
 		_ = os.Remove(pathToRemove)
 	}
-	if fileToClose != nil {
-		_ = fileToClose.Close()
-	}
-	if callOnError && c.hooks.OnError != nil {
-		c.hooks.OnError(onErrorNodeID)
-	}
-	if callOnCommit && c.hooks.OnCommit != nil {
-		c.hooks.OnCommit(onCommitNodeID, onCommitIno, onCommitEpoch, respInode, onCommitMinSize, onCommitRefresh, onCommitPreserveMeta, onCommitCapPresent)
+	if callOnCommit {
+		c.hooks.OnCommit(onCommitNodeID, onCommitIno, respInode)
 	}
 	if waitHooks {
 		c.mu.Lock()
@@ -3060,22 +2545,4 @@ func compareProtoTimestamp(a, b *timestamppb.Timestamp) int {
 		return -1
 	}
 	return 0
-}
-
-func isNotOlderCommittedInode(prev, cand *storagev1.Inode) bool {
-	if cand == nil || cand.GetAttr() == nil {
-		return false
-	}
-	if prev == nil || prev.GetAttr() == nil {
-		return true
-	}
-	candAttr := cand.GetAttr()
-	prevAttr := prev.GetAttr()
-	if candAttr.GetSize() != prevAttr.GetSize() {
-		return candAttr.GetSize() > prevAttr.GetSize()
-	}
-	if cmp := compareProtoTimestamp(candAttr.GetCtime(), prevAttr.GetCtime()); cmp != 0 {
-		return cmp > 0
-	}
-	return compareProtoTimestamp(candAttr.GetMtime(), prevAttr.GetMtime()) >= 0
 }

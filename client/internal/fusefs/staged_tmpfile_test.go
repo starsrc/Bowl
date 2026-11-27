@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -814,27 +815,15 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		}, immBuf, &ioOut, nil))
 
 		var linkOut fuse.EntryOut
-		requireStatus(t, "Link promote", fuse.OK, fs.Link(nil, &fuse.LinkIn{
-			InHeader: fuse.InHeader{NodeId: dstDir.NodeId}, Oldnodeid: nodeID,
-		}, "promoted.bin", &linkOut))
+		linkDone := make(chan fuse.Status, 1)
+		go func() {
+			linkDone <- fs.Link(nil, &fuse.LinkIn{
+				InHeader: fuse.InHeader{NodeId: dstDir.NodeId}, Oldnodeid: nodeID,
+			}, "promoted.bin", &linkOut)
+		}()
 		<-uploadStarted
 
-		require.Equal(t, int64(1), srv.mknodCalls.Load())
-		require.Equal(t, uint32(syscall.S_IFREG|0o4755), linkOut.Mode)
-		require.Equal(t, uint32(2500), linkOut.Gid)
-		require.Equal(t, uint64(8196), linkOut.Size)
-		duringAttr := mustGetAttr(t, fs, nodeID)
-		require.Equal(t, uint32(syscall.S_IFREG|0o4755), duringAttr.Mode)
-		require.Equal(t, uint32(2500), duringAttr.Gid)
-		duringLookup := mustLookup(t, fs, dstDir.NodeId, "promoted.bin")
-		require.Equal(t, uint32(syscall.S_IFREG|0o4755), duringLookup.Mode)
-		require.Equal(t, uint32(2500), duringLookup.Gid)
-
 		setAttrBefore := srv.setAttrCalls.Load()
-		unlinkDone := make(chan fuse.Status, 1)
-		go func() {
-			unlinkDone <- fs.Unlink(nil, &fuse.InHeader{NodeId: dstDir.NodeId}, "promoted.bin")
-		}()
 		truncDone := make(chan fuse.Status, 1)
 		go func() {
 			var openOut fuse.OpenOut
@@ -843,12 +832,23 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 			}, &openOut)
 		}()
 		time.Sleep(30 * time.Millisecond)
-		require.Zero(t, srv.unlinkCalls.Load(), "Unlink of promoted immutable file must wait for stageItemPromotedCommit")
-		require.Equal(t, setAttrBefore, srv.setAttrCalls.Load(), "Open(O_TRUNC) of promoted immutable file must wait for stageItemPromotedCommit")
+		require.Equal(t, setAttrBefore, srv.setAttrCalls.Load(), "Open(O_TRUNC) while sync Link is running must wait for Link lock")
 
 		releaseUpload()
-		requireStatus(t, "Unlink immutable after commit", fuse.EPERM, waitUntilStatusChan(t, unlinkDone, "Unlink immutable"))
+		requireStatus(t, "Link promote", fuse.OK, waitUntilStatusChan(t, linkDone, "Link promote"))
 		requireStatus(t, "Open(O_TRUNC) immutable after commit", fuse.EPERM, waitUntilStatusChan(t, truncDone, "Open(O_TRUNC) immutable"))
+
+		require.Equal(t, int64(1), srv.mknodCalls.Load())
+		require.Equal(t, uint32(syscall.S_IFREG|0o4755), linkOut.Mode)
+		require.Equal(t, uint32(2500), linkOut.Gid)
+		require.Equal(t, uint64(8196), linkOut.Size)
+		afterAttr := mustGetAttr(t, fs, nodeID)
+		require.Equal(t, uint32(syscall.S_IFREG|0o4755), afterAttr.Mode)
+		require.Equal(t, uint32(2500), afterAttr.Gid)
+		afterLookup := mustLookup(t, fs, dstDir.NodeId, "promoted.bin")
+		require.Equal(t, uint32(syscall.S_IFREG|0o4755), afterLookup.Mode)
+		require.Equal(t, uint32(2500), afterLookup.Gid)
+		requireStatus(t, "Unlink immutable after commit", fuse.EPERM, fs.Unlink(nil, &fuse.InHeader{NodeId: dstDir.NodeId}, "promoted.bin"))
 		requireStatus(t, "Fsync promoted", fuse.OK, fs.Fsync(nil, &fuse.FsyncIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Fh: fh,
 		}))
@@ -1027,21 +1027,18 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		}
 
 		var linkOut fuse.EntryOut
-		requireStatus(t, "Link retry succeeds", fuse.OK, fs.Link(nil, &fuse.LinkIn{
-			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: nodeID,
-		}, "final.bin", &linkOut))
+		linkDone := make(chan fuse.Status, 1)
+		go func() {
+			linkDone <- fs.Link(nil, &fuse.LinkIn{
+				InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: nodeID,
+			}, "final.bin", &linkOut)
+		}()
 		<-ext1Done
 		<-ext2Started
 
-		unlinkDone := make(chan fuse.Status, 1)
-		go func() {
-			unlinkDone <- fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "final.bin")
-		}()
-		time.Sleep(30 * time.Millisecond)
-		require.Zero(t, srv.unlinkCalls.Load(), "Unlink must barrier even after first extent finished")
-
 		releaseExt2()
-		requireStatus(t, "Unlink after commit", fuse.EPERM, waitUntilStatusChan(t, unlinkDone, "Unlink immutable zero-ttl"))
+		requireStatus(t, "Link retry succeeds", fuse.OK, waitUntilStatusChan(t, linkDone, "Link retry"))
+		requireStatus(t, "Unlink after commit", fuse.EPERM, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "final.bin"))
 		gotCapSz, gotCapSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", capCheck)
 		requireStatus(t, "cap preserved after commit", fuse.OK, gotCapSt)
 		require.Equal(t, "cap-edge", string(capCheck[:gotCapSz]))
@@ -1050,7 +1047,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		fs.Forget(nodeID, 2)
 	})
 
-	t.Run("OpenTruncateWhilePromotedCommitPendingPreservesXattrsAndExplicitGid", func(t *testing.T) {
+	t.Run("OpenTruncateWhileSyncLinkInProgressPreservesXattrsAndExplicitGid", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		uploadGate, releaseUpload := newTestGate()
@@ -1094,9 +1091,12 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		}, "user.keep", []byte("stay")))
 
 		var linkOut fuse.EntryOut
-		requireStatus(t, "Link into sgidDst", fuse.OK, fs.Link(nil, &fuse.LinkIn{
-			InHeader: fuse.InHeader{NodeId: sgidDst.NodeId}, Oldnodeid: nodeID,
-		}, "trunc-pending.bin", &linkOut))
+		linkDone := make(chan fuse.Status, 1)
+		go func() {
+			linkDone <- fs.Link(nil, &fuse.LinkIn{
+				InHeader: fuse.InHeader{NodeId: sgidDst.NodeId}, Oldnodeid: nodeID,
+			}, "trunc-pending.bin", &linkOut)
+		}()
 		<-uploadStarted
 
 		setAttrBefore := srv.setAttrCalls.Load()
@@ -1109,9 +1109,10 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		}()
 		time.Sleep(30 * time.Millisecond)
 
-		require.Equal(t, setAttrBefore, srv.setAttrCalls.Load(), "Open with O_TRUNC must barrier on pending stageItemPromotedCommit")
+		require.Equal(t, setAttrBefore, srv.setAttrCalls.Load(), "Open with O_TRUNC must wait for sync Link promotion")
 
 		releaseUpload()
+		requireStatus(t, "Link into sgidDst", fuse.OK, waitUntilStatusChan(t, linkDone, "Link sgidDst"))
 		requireStatus(t, "Open with O_TRUNC after commit", fuse.OK, waitUntilStatusChan(t, truncDone, "Open O_TRUNC"))
 		afterAttr := mustGetAttr(t, fs, nodeID)
 		require.Zero(t, afterAttr.Size)
@@ -1126,21 +1127,9 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		fs.Forget(nodeID, 2)
 	})
 
-	t.Run("CacheMissAfterUnlinkOrZeroTTLLookupWhilePromotedCommitPendingPreservesSpecialFlags", func(t *testing.T) {
+	t.Run("CacheMissAfterUnlinkOrZeroTTLLookupAfterSyncPromotionPreservesSpecialFlags", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(0, 0))
-		uploadGate, releaseUpload := newTestGate()
-		defer releaseUpload()
-		var startedCount atomic.Int32
-		allStarted := make(chan struct{})
-		srv.writeHook = func(_ context.Context, _ *storagev1.WriteRequest) (uint32, error) {
-			if startedCount.Add(1) == 2 {
-				close(allStarted)
-			}
-			<-uploadGate
-			return 0, nil
-		}
-
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		var ioOut fuse.IoctlOut
 		appFlags := make([]byte, 8)
@@ -1175,7 +1164,6 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		requireStatus(t, "Link lookup case", fuse.OK, fs.Link(nil, &fuse.LinkIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: tmpLookup.NodeId,
 		}, "app-lookup.bin", &linkLookup))
-		<-allStarted
 
 		requireStatus(t, "Unlink append file", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "app-unlink.bin"))
 		gotUnlinkAttr := mustGetAttr(t, fs, tmpUnlink.NodeId)
@@ -1183,33 +1171,14 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		gotLookupAttr := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "app-lookup.bin")
 		require.Equal(t, uint32(syscall.S_IFREG|0o644), gotLookupAttr.Mode)
 
-		wr1Done := make(chan fuse.Status, 1)
-		go func() {
-			_, st := fs.Write(nil, &fuse.WriteIn{
-				InHeader: fuse.InHeader{NodeId: tmpUnlink.NodeId}, Fh: tmpUnlink.Fh, Offset: 0, Size: 3,
-			}, []byte("bad"))
-			wr1Done <- st
-		}()
-		wr2Done := make(chan fuse.Status, 1)
-		go func() {
-			_, st := fs.Write(nil, &fuse.WriteIn{
-				InHeader: fuse.InHeader{NodeId: tmpLookup.NodeId}, Fh: tmpLookup.Fh, Offset: 0, Size: 3,
-			}, []byte("bad"))
-			wr2Done <- st
-		}()
-
-		time.Sleep(30 * time.Millisecond)
-		select {
-		case st := <-wr1Done:
-			t.Fatalf("getInodeMissWithContext lost specialInodes flag and allowed early staged Write with status %v", st)
-		case st := <-wr2Done:
-			t.Fatalf("lookupInodeAfterCache lost specialInodes flag and allowed early staged Write with status %v", st)
-		default:
-		}
-
-		releaseUpload()
-		requireStatus(t, "post-unlink cache-miss non-EOF Write on append file", fuse.EPERM, waitUntilStatusChan(t, wr1Done, "wr1Done"))
-		requireStatus(t, "lookup cache-miss non-EOF Write on append file", fuse.EPERM, waitUntilStatusChan(t, wr2Done, "wr2Done"))
+		_, wr1St := fs.Write(nil, &fuse.WriteIn{
+			InHeader: fuse.InHeader{NodeId: tmpUnlink.NodeId}, Fh: tmpUnlink.Fh, Offset: 0, Size: 3,
+		}, []byte("bad"))
+		_, wr2St := fs.Write(nil, &fuse.WriteIn{
+			InHeader: fuse.InHeader{NodeId: tmpLookup.NodeId}, Fh: tmpLookup.Fh, Offset: 0, Size: 3,
+		}, []byte("bad"))
+		requireStatus(t, "post-unlink cache-miss non-EOF Write on append file", fuse.EPERM, wr1St)
+		requireStatus(t, "lookup cache-miss non-EOF Write on append file", fuse.EPERM, wr2St)
 
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpUnlink.NodeId}, Fh: tmpUnlink.Fh})
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpLookup.NodeId}, Fh: tmpLookup.Fh})
@@ -1232,7 +1201,7 @@ func TestStagedTmpfile_LinkPromotion_WhenFencedBeforePromote_ReturnsEBUSYAndSkip
 	mustWriteAt(t, fs, nodeID, tmpOut.Fh, 0, []byte("fence-before-promote-payload"))
 
 	srv.mknodHook = func(_ context.Context, _ *storagev1.MknodRequest) error {
-		fs.Fence(fuse.EBUSY, "fenced between Mknod and PromoteTmpfile")
+		fs.Fence(fuse.EBUSY, "fenced between Mknod and extent upload")
 		return nil
 	}
 
@@ -1243,12 +1212,308 @@ func TestStagedTmpfile_LinkPromotion_WhenFencedBeforePromote_ReturnsEBUSYAndSkip
 	}, "fenced-promote.bin", &linkOut)
 
 	requireStatus(t, "fenced linkTmp", fuse.EBUSY, st)
+	require.Zero(t, srv.unlinkCalls.Load(), "fenced linkTmp must skip Unlink rollback")
 	require.Zero(t, linkOut.NodeId, "scene=fenced_linktmp_entryout want=0 got=%d", linkOut.NodeId)
 	snap := fs.Snapshot()
 	require.Zero(t, snap.TmpFile.Promotes, "scene=fenced_linktmp_promotes want=0 got=%d", snap.TmpFile.Promotes)
-	require.Zero(t, snap.TmpFile.ActiveFiles, "scene=fenced_linktmp_active_files want=0 got=%d", snap.TmpFile.ActiveFiles)
-	require.Zero(t, snap.TmpFile.ResidentBytes, "scene=fenced_linktmp_resident_bytes want=0 got=%d", snap.TmpFile.ResidentBytes)
+	require.Equal(t, 1, snap.TmpFile.ActiveFiles, "scene=fenced_linktmp_active_files want=1 got=%d", snap.TmpFile.ActiveFiles)
+	require.Positive(t, snap.TmpFile.ResidentBytes, "scene=fenced_linktmp_resident_bytes want=>0 got=%d", snap.TmpFile.ResidentBytes)
 
 	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
 	fs.Forget(nodeID, 1)
+	snapAfter := fs.Snapshot()
+	require.Zero(t, snapAfter.TmpFile.ActiveFiles, "scene=fenced_linktmp_after_forget_active want=0 got=%d", snapAfter.TmpFile.ActiveFiles)
+	require.Zero(t, snapAfter.TmpFile.ResidentBytes, "scene=fenced_linktmp_after_forget_resident want=0 got=%d", snapAfter.TmpFile.ResidentBytes)
+}
+
+func TestStagedTmpfile_SyncLinkPromotion_OrderedRPCsAndCompletedBeforeReturn(t *testing.T) {
+	srv := newFakeStorage(t, withTTL(2.0, 2.0))
+	var (
+		traceMu        sync.Mutex
+		events         []string
+		inFlight       atomic.Int32
+		maxParallelism atomic.Int32
+	)
+	record := func(ev string) {
+		traceMu.Lock()
+		events = append(events, ev)
+		traceMu.Unlock()
+	}
+
+	srv.mknodHook = func(_ context.Context, req *storagev1.MknodRequest) error {
+		record(fmt.Sprintf("Mknod(mode=%o,gid=%d)", req.GetMode(), req.GetGid()))
+		return nil
+	}
+	srv.writeHook = func(_ context.Context, req *storagev1.WriteRequest) (uint32, error) {
+		cur := inFlight.Add(1)
+		for {
+			prev := maxParallelism.Load()
+			if cur <= prev || maxParallelism.CompareAndSwap(prev, cur) {
+				break
+			}
+		}
+		record(fmt.Sprintf("Write(off=%d,len=%d)", req.GetOffset(), len(req.GetData())))
+		time.Sleep(5 * time.Millisecond)
+		inFlight.Add(-1)
+		return 0, nil
+	}
+	srv.setAttrHook = func(_ context.Context, req *storagev1.SetAttrRequest) error {
+		if req.Flags != nil {
+			record(fmt.Sprintf("SetAttr(flags=%d)", req.GetFlags()))
+		} else {
+			record(fmt.Sprintf("SetAttr(size=%d,mode=%o,gid=%d)", req.GetSize(), req.GetMode(), req.GetGid()))
+		}
+		return nil
+	}
+	srv.setXattrHook = func(_ context.Context, req *storagev1.SetXattrRequest) error {
+		record(fmt.Sprintf("SetXattr(%s)", string(req.GetName())))
+		return nil
+	}
+
+	fs := newTestRawFS(t, srv, withDirectIO(false))
+	var tmpOut fuse.CreateOut
+	requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+		InHeader: fuse.InHeader{
+			NodeId: fuse.FUSE_ROOT_ID,
+			Caller: fuse.Caller{Owner: fuse.Owner{Uid: 1000, Gid: 1000}},
+		},
+		Flags: uint32(syscall.O_RDWR),
+		Mode:  0o600,
+	}, &tmpOut))
+	nodeID := tmpOut.NodeId
+	fh := tmpOut.Fh
+
+	mustWriteAt(t, fs, nodeID, fh, 0, []byte("HEAD"))
+	mustWriteAt(t, fs, nodeID, fh, 8192, []byte("TAIL"))
+	requireStatus(t, "SetAttr mode+gid", fuse.OK, fs.SetAttr(nil, &fuse.SetAttrIn{
+		SetAttrInCommon: fuse.SetAttrInCommon{
+			InHeader: fuse.InHeader{NodeId: nodeID},
+			Valid:    fuse.FATTR_MODE | fuse.FATTR_GID,
+			Mode:     0o4755,
+			Owner:    fuse.Owner{Gid: 2500},
+		},
+	}, &fuse.AttrOut{}))
+	requireStatus(t, "SetXAttr user.z", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
+		InHeader: fuse.InHeader{NodeId: nodeID},
+	}, "user.z", []byte("vz")))
+	requireStatus(t, "SetXAttr user.a", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
+		InHeader: fuse.InHeader{NodeId: nodeID},
+	}, "user.a", []byte("va")))
+	requireStatus(t, "SetXAttr security.capability", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
+		InHeader: fuse.InHeader{NodeId: nodeID},
+	}, "security.capability", []byte("cap-sync")))
+	immBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(immBuf, uint64(fusefs.FS_IMMUTABLE_FL))
+	var ioOut fuse.IoctlOut
+	requireStatus(t, "Ioctl FS_IMMUTABLE_FL", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{
+		InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC_SETFLAGS,
+	}, immBuf, &ioOut, nil))
+
+	var linkOut fuse.EntryOut
+	requireStatus(t, "sync Link promote", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: nodeID,
+	}, "sync-promoted.bin", &linkOut))
+
+	traceMu.Lock()
+	gotEvents := slices.Clone(events)
+	traceMu.Unlock()
+
+	require.Len(t, gotEvents, 8, "all promotion RPCs must finish synchronously before Link returns: got=%v", gotEvents)
+	require.Equal(t, "Mknod(mode=100755,gid=2500)", gotEvents[0])
+	require.ElementsMatch(t, []string{"Write(off=0,len=4096)", "Write(off=8192,len=4)"}, gotEvents[1:3])
+	require.Equal(t, []string{
+		"SetAttr(size=8196,mode=104755,gid=2500)",
+		"SetXattr(security.capability)",
+		"SetXattr(user.a)",
+		"SetXattr(user.z)",
+		"SetAttr(flags=1)",
+	}, gotEvents[3:])
+	require.LessOrEqual(t, maxParallelism.Load(), int32(fusefs.StageWorkers))
+
+	snap := fs.Snapshot()
+	require.Equal(t, uint64(1), snap.TmpFile.Promotes)
+	require.Zero(t, snap.TmpFile.ActiveFiles)
+	require.Zero(t, snap.TmpFile.ResidentBytes)
+	require.Zero(t, snap.Stage.UsedBytes)
+	require.Zero(t, snap.Stage.PendingChunks)
+
+	requireStatus(t, "Unlink immutable immediately after Link", fuse.EPERM, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "sync-promoted.bin"))
+
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: fh})
+	fs.Forget(nodeID, 2)
+}
+
+func TestStagedTmpfile_SyncLinkPromotion_MidLinkatENOSPCRollsBackAndRemainsRetryable(t *testing.T) {
+	t.Run("WriteExtentFailureCancelsSiblingsUnlinksAndRetriesCleanly", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(2.0, 2.0))
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o644,
+		}, &tmpOut))
+		nodeID := tmpOut.NodeId
+		fh := tmpOut.Fh
+
+		mustWriteAt(t, fs, nodeID, fh, 0, []byte("EXTENT-0"))
+		mustWriteAt(t, fs, nodeID, fh, 8192, []byte("EXTENT-1"))
+		requireStatus(t, "SetXAttr user.meta", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
+			InHeader: fuse.InHeader{NodeId: nodeID},
+		}, "user.meta", []byte("keep-me")))
+
+		siblingEntered := make(chan struct{})
+		siblingCanceled := make(chan struct{})
+		var enteredOnce sync.Once
+		var canceledOnce sync.Once
+		srv.writeHook = func(ctx context.Context, req *storagev1.WriteRequest) (uint32, error) {
+			if req.GetOffset() == 0 {
+				enteredOnce.Do(func() { close(siblingEntered) })
+				<-ctx.Done()
+				canceledOnce.Do(func() { close(siblingCanceled) })
+				return 0, ctx.Err()
+			}
+			select {
+			case <-siblingEntered:
+			case <-time.After(2 * time.Second):
+			}
+			return 0, errnoError(connect.CodeResourceExhausted, "ENOSPC")
+		}
+
+		var linkOut fuse.EntryOut
+		st := fs.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: nodeID,
+		}, "rollback-enospc.bin", &linkOut)
+
+		requireStatus(t, "mid-linkat Write ENOSPC", fuse.Status(syscall.ENOSPC), st)
+		require.Zero(t, linkOut.NodeId)
+		select {
+		case <-siblingCanceled:
+		case <-time.After(2 * time.Second):
+			t.Fatal("sibling extent upload goroutine was not canceled after ENOSPC")
+		}
+		require.Equal(t, int64(1), srv.unlinkCalls.Load(), "rollback must issue best-effort Unlink")
+
+		var lookupOut fuse.EntryOut
+		requireStatus(t, "rolled back name absent on server", fuse.ENOENT, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "rollback-enospc.bin", &lookupOut))
+
+		snap := fs.Snapshot()
+		require.Zero(t, snap.TmpFile.Promotes)
+		require.Equal(t, 1, snap.TmpFile.ActiveFiles)
+		require.Positive(t, snap.TmpFile.ResidentBytes)
+
+		serverInoBeforeRetry, toSrvSt := fs.ToServerIno(nodeID)
+		requireStatus(t, "ToServerIno after rollback", fuse.OK, toSrvSt)
+		require.Equal(t, nodeID, serverInoBeforeRetry, "rolled back tmpfile must remain un-aliased")
+		requireBytesMatch(t, "extent 0 readable after rollback", []byte("EXTENT-0"), mustReadAt(t, fs, nodeID, fh, 0, 8))
+		requireBytesMatch(t, "extent 1 readable after rollback", []byte("EXTENT-1"), mustReadAt(t, fs, nodeID, fh, 8192, 8))
+
+		srv.writeHook = nil
+		var retryOut fuse.EntryOut
+		requireStatus(t, "retry Link succeeds", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: nodeID,
+		}, "rollback-enospc.bin", &retryOut))
+		require.Equal(t, nodeID, retryOut.NodeId)
+		require.Equal(t, uint64(1), fs.Snapshot().TmpFile.Promotes)
+		require.Zero(t, fs.Snapshot().TmpFile.ActiveFiles)
+		require.Zero(t, fs.Snapshot().TmpFile.ResidentBytes)
+		requireBytesMatch(t, "extent 0 readable after retry", []byte("EXTENT-0"), mustReadAt(t, fs, nodeID, fh, 0, 8))
+		requireBytesMatch(t, "extent 1 readable after retry", []byte("EXTENT-1"), mustReadAt(t, fs, nodeID, fh, 8192, 8))
+		xBuf := make([]byte, 16)
+		xSz, xSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "user.meta", xBuf)
+		requireStatus(t, "xattr preserved after retry", fuse.OK, xSt)
+		require.Equal(t, "keep-me", string(xBuf[:xSz]))
+
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: fh})
+		fs.Forget(nodeID, 2)
+	})
+
+	t.Run("SetXattrFailureRollsBackUnlinkAndKeepsTmpfileRetryable", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(2.0, 2.0))
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o644,
+		}, &tmpOut))
+		nodeID := tmpOut.NodeId
+		fh := tmpOut.Fh
+
+		mustWriteAt(t, fs, nodeID, fh, 0, []byte("xattr-rollback-payload"))
+		requireStatus(t, "SetXAttr user.k", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
+			InHeader: fuse.InHeader{NodeId: nodeID},
+		}, "user.k", []byte("v")))
+
+		srv.setXattrHook = func(_ context.Context, _ *storagev1.SetXattrRequest) error {
+			return errnoError(connect.CodeResourceExhausted, "ENOSPC")
+		}
+
+		var linkOut fuse.EntryOut
+		st := fs.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: nodeID,
+		}, "rollback-xattr.bin", &linkOut)
+
+		requireStatus(t, "SetXattr ENOSPC", fuse.Status(syscall.ENOSPC), st)
+		require.Equal(t, int64(1), srv.unlinkCalls.Load())
+		require.Zero(t, fs.Snapshot().TmpFile.Promotes)
+		require.Equal(t, 1, fs.Snapshot().TmpFile.ActiveFiles)
+		requireBytesMatch(t, "local data intact after SetXattr failure", []byte("xattr-rollback-payload"), mustReadAt(t, fs, nodeID, fh, 0, 22))
+
+		srv.setXattrHook = nil
+		var retryOut fuse.EntryOut
+		requireStatus(t, "retry after SetXattr rollback", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: nodeID,
+		}, "rollback-xattr.bin", &retryOut))
+		require.Equal(t, uint64(1), fs.Snapshot().TmpFile.Promotes)
+
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: fh})
+		fs.Forget(nodeID, 2)
+	})
+}
+
+func TestStagedTmpfile_SyncLinkPromotion_FencedMidLinkatSkipsUnlinkAndKeepsLocalTmpfileIntact(t *testing.T) {
+	srv := newFakeStorage(t, withTTL(2.0, 2.0))
+	fs := newTestRawFS(t, srv, withDirectIO(false))
+
+	var tmpOut fuse.CreateOut
+	requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+		Flags:    uint32(syscall.O_RDWR),
+		Mode:     0o644,
+	}, &tmpOut))
+	nodeID := tmpOut.NodeId
+	fh := tmpOut.Fh
+	mustWriteAt(t, fs, nodeID, fh, 0, []byte("fenced-mid-linkat-payload"))
+
+	srv.writeHook = func(_ context.Context, _ *storagev1.WriteRequest) (uint32, error) {
+		return 0, errnoError(connect.CodeFailedPrecondition, "EBUSY")
+	}
+
+	var linkOut fuse.EntryOut
+	st := fs.Link(nil, &fuse.LinkIn{
+		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+		Oldnodeid: nodeID,
+	}, "fenced-mid.bin", &linkOut)
+
+	requireStatus(t, "fenced mid-linkat", fuse.EBUSY, st)
+	require.True(t, fs.IsFenced())
+	require.Zero(t, srv.unlinkCalls.Load(), "fenced mid-linkat must skip best-effort Unlink")
+	require.Zero(t, linkOut.NodeId)
+	snap := fs.Snapshot()
+	require.Zero(t, snap.TmpFile.Promotes)
+	require.Equal(t, 1, snap.TmpFile.ActiveFiles)
+	require.Positive(t, snap.TmpFile.ResidentBytes)
+	requireBytesMatch(t, "local tmpfile remains readable after fenced mid-linkat", []byte("fenced-mid-linkat-payload"), mustReadAt(t, fs, nodeID, fh, 0, 25))
+
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: fh})
+	fs.Forget(nodeID, 1)
+	require.Zero(t, fs.Snapshot().TmpFile.ActiveFiles)
+	require.Zero(t, fs.Snapshot().TmpFile.ResidentBytes)
 }

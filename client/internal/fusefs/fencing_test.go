@@ -353,7 +353,7 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 		}
 	}
 
-	coord := fusefs.NewStageCoordinator(stageDir, stageSize, writer, nil, fusefs.StageHooks{})
+	coord := fusefs.NewStageCoordinator(stageDir, stageSize, writer, fusefs.StageHooks{})
 	t.Cleanup(func() {
 		close(cleanupDone)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -371,7 +371,7 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 	coord.RegisterHandle(fhA)
 	coord.RegisterHandle(fhB)
 
-	w1, handled1, err1 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 0, buildRepeatingBytes(chunkSz, '1'), 1)
+	w1, handled1, err1 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 0, buildRepeatingBytes(chunkSz, '1'))
 	require.NoError(t, err1)
 	require.True(t, handled1)
 	require.Equal(t, uint32(chunkSz), w1)
@@ -382,13 +382,13 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 		t.Fatal("first chunk did not enter upload worker")
 	}
 
-	w2, handled2, err2 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, chunkSz, buildRepeatingBytes(2<<20, '2'), 1)
+	w2, handled2, err2 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, chunkSz, buildRepeatingBytes(2<<20, '2'))
 	require.NoError(t, err2)
 	require.True(t, handled2)
 	require.Equal(t, uint32(2<<20), w2)
 	coord.SealInode(inoA)
 
-	w3, handled3, err3 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 8<<20, buildRepeatingBytes(2<<20, '3'), 1)
+	w3, handled3, err3 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 8<<20, buildRepeatingBytes(2<<20, '3'))
 	require.NoError(t, err3)
 	require.True(t, handled3)
 	require.Equal(t, uint32(2<<20), w3)
@@ -409,7 +409,7 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 
 	bpErrCh := make(chan error, 1)
 	go func() {
-		_, _, bpErr := coord.WriteForHandle(context.Background(), nil, fhB, inoB, inoB, 0, buildRepeatingBytes(1<<20, '4'), 1)
+		_, _, bpErr := coord.WriteForHandle(context.Background(), nil, fhB, inoB, inoB, 0, buildRepeatingBytes(1<<20, '4'))
 		bpErrCh <- bpErr
 	}()
 
@@ -434,7 +434,7 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 		t.Fatal("backpressure WriteForHandle did not wake after AbortAll")
 	}
 
-	_, newHandled, newErr := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 0, []byte("rejected"), 1)
+	_, newHandled, newErr := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 0, []byte("rejected"))
 	require.True(t, newHandled)
 	require.ErrorIs(t, newErr, syscall.EBUSY)
 
@@ -773,7 +773,7 @@ func TestRawFS_FencedReleaseOfUnlinkedOrphan_SkipsReclaimOrphanRPC(t *testing.T)
 	require.Equal(t, reclaimsBefore, srv.reclaimOrphanCalls.Load(), "fenced Release must skip ReclaimOrphan RPC")
 }
 
-func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightPromotedExtent(t *testing.T) {
+func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightChunkUpload(t *testing.T) {
 
 	payload := buildRepeatingBytes(fusefs.StageChunkSize, 'P')
 
@@ -788,29 +788,18 @@ func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightPromo
 	require.NoError(t, err)
 	fs := newTestRawFS(t, srv, withStageSession(session), withStageSize(16*1024*1024))
 
-	var tmpOut fuse.CreateOut
-	requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
-		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
-		Flags:    syscall.O_RDWR,
-		Mode:     0o600,
-	}, &tmpOut))
-	mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, payload)
-
-	var linkOut fuse.EntryOut
-	requireStatus(t, "Link promote", fuse.OK, fs.Link(nil, &fuse.LinkIn{
-		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
-		Oldnodeid: tmpOut.NodeId,
-	}, "promoted-orphan", &linkOut))
-	requireStatus(t, "Unlink promoted open orphan", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "promoted-orphan"))
+	f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "staged-orphan", syscall.O_RDWR, 0o600)
+	mustWriteAt(t, fs, f.NodeId, f.Fh, 0, payload)
+	requireStatus(t, "Unlink staged open orphan", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "staged-orphan"))
 
 	require.Eventually(t, func() bool {
 		return fs.Snapshot().Stage.Inflight >= 1
-	}, 2*time.Second, time.Millisecond, "promoted extent upload did not become inflight")
+	}, 2*time.Second, time.Millisecond, "staged chunk upload did not become inflight")
 
-	fs.Fence(fuse.EBUSY, "preempted during promoted upload")
+	fs.Fence(fuse.EBUSY, "preempted during staged chunk upload")
 	fs.Release(nil, &fuse.ReleaseIn{
-		InHeader: fuse.InHeader{NodeId: linkOut.NodeId},
-		Fh:       tmpOut.Fh,
+		InHeader: fuse.InHeader{NodeId: f.NodeId},
+		Fh:       f.Fh,
 	})
 	close(releaseWrites)
 

@@ -1004,7 +1004,7 @@ func TestHostTmpfile_超过StageSize写入与打洞_本地独立落盘零RPC且�
 	require.Zero(t, fs.Snapshot().TmpFile.ActiveFiles, "双清零后 TmpFile.ActiveFiles: want=0")
 }
 
-func TestHostTmpfile_Link具名化触发跳过空洞后台上传_在线读写不阻塞且Promotes计数准确(t *testing.T) {
+func TestHostTmpfile_Link具名化触发跳过空洞同步上传_边界读一致且Promotes计数准确(t *testing.T) {
 
 	stageRoot := filepath.Join(t.TempDir(), "tmp-promote-stage")
 	sess, err := fusefs.OpenStageDirSession(stageRoot)
@@ -1012,18 +1012,12 @@ func TestHostTmpfile_Link具名化触发跳过空洞后台上传_在线读写不
 	t.Cleanup(func() { _ = sess.Close() })
 
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
-	uploadStarted := make(chan struct{})
-	uploadGate, releaseUploadGate := newTestGate()
-	defer releaseUploadGate()
-	var gateOnce sync.Once
 	var uploadedExtents [][2]uint64
 	var extMu sync.Mutex
 	srv.writeHook = func(_ context.Context, req *storagev1.WriteRequest) (uint32, error) {
 		extMu.Lock()
 		uploadedExtents = append(uploadedExtents, [2]uint64{req.GetOffset(), uint64(len(req.GetData()))})
 		extMu.Unlock()
-		gateOnce.Do(func() { close(uploadStarted) })
-		<-uploadGate
 		return 0, nil
 	}
 
@@ -1048,21 +1042,15 @@ func TestHostTmpfile_Link具名化触发跳过空洞后台上传_在线读写不
 	requireStatus(t, "Link 具名化", fuse.OK, fs.Link(nil, &fuse.LinkIn{
 		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: tmpOut.NodeId,
 	}, "promoted-large.bin", &entry))
-	<-uploadStarted
 
-	attrDuringUpload := mustGetAttr(t, fs, tmpOut.NodeId)
+	attrAfterLink := mustGetAttr(t, fs, tmpOut.NodeId)
 	boundaryRead := mustReadAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 1048568, 16)
-
-	releaseUploadGate()
-	requireStatus(t, "Fsync 等待转正上传完毕", fuse.OK, fs.Fsync(nil, &fuse.FsyncIn{
-		InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh,
-	}))
 
 	require.Equal(t, int64(1), srv.mknodCalls.Load(), "Link 具名化 Mknod 调用数: want=1, got=%d", srv.mknodCalls.Load())
 	require.Equal(t, uint64(6291456), entry.Size, "EntryOut Size: want=6291456, got=%d", entry.Size)
 	require.Equal(t, uint32(1), entry.Nlink, "EntryOut Nlink: want=1, got=%d", entry.Nlink)
-	require.Equal(t, uint64(6291456), attrDuringUpload.Size, "上传期间 GetAttr Size: want=6291456, got=%d", attrDuringUpload.Size)
-	requireBytesMatch(t, "上传挂起期间跨洞边界读取", []byte("TTTTTTTT\x00\x00\x00\x00\x00\x00\x00\x00"), boundaryRead)
+	require.Equal(t, uint64(6291456), attrAfterLink.Size, "同步转正后 GetAttr Size: want=6291456, got=%d", attrAfterLink.Size)
+	requireBytesMatch(t, "同步转正后跨洞边界读取", []byte("TTTTTTTT\x00\x00\x00\x00\x00\x00\x00\x00"), boundaryRead)
 
 	uploadedTotal := sumUploadedRanges(uploadedExtents, &extMu)
 	require.Equal(t, uint64(2097152), uploadedTotal, "跳过 4 MiB 空洞后实际上传字节: want=2097152, got=%d", uploadedTotal)

@@ -351,88 +351,17 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 				fs.markMetaDirty()
 				return resp.Msg.GetSize(), resp.Msg.GetInode(), nil
 			},
-			func(ctx context.Context, ino uint64, meta StagePromotedMeta) (*storagev1.Inode, error) {
-				if fs.client == nil {
-					return nil, syscall.EIO
-				}
-				size := meta.Size
-				mode := meta.Mode
-				gid := meta.Gid
-				reqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
-				resp, err := fs.client.SetAttr(reqCtx, connect.NewRequest(&storagev1.SetAttrRequest{
-					Ino:    ino,
-					Size:   &size,
-					Atime:  meta.Atime,
-					Mtime:  meta.Mtime,
-					Mode:   &mode,
-					Gid:    &gid,
-					DiskId: fs.cfg.DiskID,
-					Branch: fs.cfg.Branch,
-					Epoch:  fs.cfg.Epoch,
-				}))
-				if err != nil {
-					fs.fenceIfStaleEpoch(err)
-					return nil, err
-				}
-				fs.markMetaDirty()
-				finalInode := resp.Msg.GetInode()
-
-				for _, xa := range meta.Xattrs {
-					xReqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
-					if _, xErr := fs.client.SetXattr(xReqCtx, connect.NewRequest(&storagev1.SetXattrRequest{
-						Ino:    ino,
-						Name:   []byte(xa.Name),
-						Value:  xa.Value,
-						Flags:  0,
-						DiskId: fs.cfg.DiskID,
-						Branch: fs.cfg.Branch,
-						Epoch:  fs.cfg.Epoch,
-					})); xErr != nil {
-						fs.fenceIfStaleEpoch(xErr)
-						return nil, xErr
-					}
-					fs.markMetaDirty()
-				}
-
-				if meta.Flags != 0 {
-					flags := meta.Flags
-					fReqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
-					fResp, fErr := fs.client.SetAttr(fReqCtx, connect.NewRequest(&storagev1.SetAttrRequest{
-						Ino:    ino,
-						Flags:  &flags,
-						DiskId: fs.cfg.DiskID,
-						Branch: fs.cfg.Branch,
-						Epoch:  fs.cfg.Epoch,
-					}))
-					if fErr != nil {
-						fs.fenceIfStaleEpoch(fErr)
-						return nil, fErr
-					}
-					fs.markMetaDirty()
-					if fResp.Msg.GetInode() != nil {
-						finalInode = fResp.Msg.GetInode()
-					}
-				}
-				return finalInode, nil
-			},
 			StageHooks{
-				OnCommit: func(nodeID, ino, _ uint64, inode *storagev1.Inode, _ uint64, _, preserveMeta, capPresent bool) {
+				OnCommit: func(nodeID, ino uint64, inode *storagev1.Inode) {
 					if fs.IsFenced() {
 						return
 					}
 					fs.readAhead.InvalidateInode(ino)
 					fs.markMetaDirty()
-					if preserveMeta {
-						return
-					}
 					if inode != nil {
 						fs.recordKnownInode(nodeID, inode)
 					}
-					if capPresent {
-						fs.caps.markPresent(nodeID)
-					} else {
-						fs.caps.markAbsent(nodeID)
-					}
+					fs.caps.markAbsent(nodeID)
 				},
 			},
 		)
@@ -1360,11 +1289,11 @@ func (fs *RawFS) stopAndDrainReleaseQueue(parentCtx context.Context) {
 	fs.drainReleaseQueueOnce(ctx, true)
 }
 
-func (fs *RawFS) FillAttr(out *fuse.Attr, ino *storagev1.Inode) {
+func fillFuseAttr(out *fuse.Attr, ino *storagev1.Inode, kernelIno uint64) {
 	if out == nil || ino == nil {
 		return
 	}
-	out.Ino = fs.ToKernelIno(ino.GetIno())
+	out.Ino = kernelIno
 
 	attr := ino.GetAttr()
 	if attr == nil {
@@ -1394,15 +1323,29 @@ func (fs *RawFS) FillAttr(out *fuse.Attr, ino *storagev1.Inode) {
 	}
 }
 
+func fillFuseEntryOut(out *fuse.EntryOut, ino *storagev1.Inode, entryTimeoutSec, attrTimeoutSec float64, kernelIno uint64) {
+	if out == nil || ino == nil {
+		return
+	}
+	out.NodeId = kernelIno
+	out.Generation = ino.GetGeneration()
+	out.SetEntryTimeout(time.Duration(entryTimeoutSec * float64(time.Second)))
+	out.SetAttrTimeout(time.Duration(attrTimeoutSec * float64(time.Second)))
+	fillFuseAttr(&out.Attr, ino, kernelIno)
+}
+
+func (fs *RawFS) FillAttr(out *fuse.Attr, ino *storagev1.Inode) {
+	if out == nil || ino == nil {
+		return
+	}
+	fillFuseAttr(out, ino, fs.ToKernelIno(ino.GetIno()))
+}
+
 func (fs *RawFS) FillEntryOut(out *fuse.EntryOut, ino *storagev1.Inode, entryTimeoutSec, attrTimeoutSec float64) {
 	if out == nil || ino == nil {
 		return
 	}
-	out.NodeId = fs.ToKernelIno(ino.GetIno())
-	out.Generation = ino.GetGeneration()
-	out.SetEntryTimeout(time.Duration(entryTimeoutSec * float64(time.Second)))
-	out.SetAttrTimeout(time.Duration(attrTimeoutSec * float64(time.Second)))
-	fs.FillAttr(&out.Attr, ino)
+	fillFuseEntryOut(out, ino, entryTimeoutSec, attrTimeoutSec, fs.ToKernelIno(ino.GetIno()))
 }
 
 func (fs *RawFS) FillAttrOut(out *fuse.AttrOut, ino *storagev1.Inode, attrTimeoutSec float64) {

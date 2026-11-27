@@ -60,14 +60,14 @@ func fallocateHostFile(f *os.File, mode uint32, offset, length int64, curSize ui
 	return err
 }
 
-func findHostDataExtents(f *os.File, size uint64) ([]stageExtent, error) {
+func findHostDataExtents(f *os.File, size uint64) ([]tmpExtent, error) {
 	if size == 0 {
 		return nil, nil
 	}
 	fd := int(f.Fd())
 	defer runtime.KeepAlive(f)
 
-	var extents []stageExtent
+	var extents []tmpExtent
 	var pos uint64
 	for pos < size {
 		dataOff, err := unix.Seek(fd, int64(pos), unix.SEEK_DATA)

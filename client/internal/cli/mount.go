@@ -530,11 +530,11 @@ func (rt *cliRuntime) runMount(ctx context.Context, opts *mountOptions, baseCfg 
 
 	rpcMetrics := rpc.NewMetrics()
 	client, err := rpc.NewClientFromConfig(rpc.ClientConfig{
-		Endpoint:   opts.endpoint,
-		HTTPClient: rt.mountHTTPClient,
-		Logger:     logger,
-		Metrics:    rpcMetrics,
-		Sharded:    true,
+		Endpoint:       opts.endpoint,
+		HTTPClient:     rt.mountHTTPClient,
+		Logger:         logger,
+		Metrics:        rpcMetrics,
+		IsolateControl: true,
 	})
 	if err != nil {
 		return fmt.Errorf("create RPC client: %w", err)

@@ -233,7 +233,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 		}
 	default:
 		fs.readAhead.InvalidateInode(ino)
-		if stWritten, handled, stErr := fs.stage.WriteForHandle(opCtx, cancel, input.Fh, ino, input.NodeId, input.Offset, data, 0); handled {
+		if stWritten, handled, stErr := fs.stage.WriteForHandle(opCtx, cancel, input.Fh, ino, input.NodeId, input.Offset, data); handled {
 			if stErr != nil {
 				return 0, fs.stageErrToStatus(stErr)
 			}

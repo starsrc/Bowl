@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -32,11 +31,7 @@ const (
 
 	HTTP2ControlMaxReceiveBufferPerConnection = 8 << 20
 
-	HTTP2MetaMaxReceiveBufferPerConnection = 32 << 20
-
 	HTTP2DataMaxReceiveBufferPerConnection = 64 << 20
-
-	HTTP2DataConnectionShards = 8
 
 	HTTP2SendPingTimeout = 3 * time.Second
 
@@ -60,7 +55,7 @@ type ClientConfig struct {
 
 	Metrics *Metrics
 
-	Sharded bool
+	IsolateControl bool
 }
 
 func ResolveEndpoint(endpoint string) (string, error) {
@@ -182,15 +177,6 @@ func isControlProcedure(urlPath string) bool {
 	)
 }
 
-func isBulkDataProcedure(urlPath string) bool {
-	return matchesProcedure(
-		urlPath,
-		storagev1connect.StorageServiceReadProcedure,
-		storagev1connect.StorageServiceWriteProcedure,
-		storagev1connect.StorageServiceReadCommitNodeProcedure,
-	)
-}
-
 type idleConnCloser interface {
 	CloseIdleConnections()
 }
@@ -215,68 +201,45 @@ func CloseIdleConnections(client storagev1connect.StorageServiceClient) {
 	}
 }
 
-type shardedRoundTripper struct {
-	controlTransport http.RoundTripper
-	metaTransport    http.RoundTripper
-	dataTransports   [HTTP2DataConnectionShards]http.RoundTripper
-	nextDataShard    atomic.Uint64
+type controlIsolatedRoundTripper struct {
+	controlTransport  http.RoundTripper
+	businessTransport http.RoundTripper
 }
 
-func newShardedRoundTripper(endpoint string, tlsConfig *tls.Config) (*shardedRoundTripper, error) {
-	rt := &shardedRoundTripper{}
+func newControlIsolatedRoundTripper(endpoint string, tlsConfig *tls.Config) (*controlIsolatedRoundTripper, error) {
+	rt := &controlIsolatedRoundTripper{}
 	controlTr, err := newHTTPTransport(endpoint, tlsConfig, HTTP2ControlMaxReceiveBufferPerConnection)
 	if err != nil {
 		return nil, err
 	}
 	rt.controlTransport = controlTr
 
-	metaTr, err := newHTTPTransport(endpoint, tlsConfig, HTTP2MetaMaxReceiveBufferPerConnection)
+	businessTr, err := newHTTPTransport(endpoint, tlsConfig, HTTP2DataMaxReceiveBufferPerConnection)
 	if err != nil {
 		rt.CloseIdleConnections()
 		return nil, err
 	}
-	rt.metaTransport = metaTr
-
-	for i := range HTTP2DataConnectionShards {
-		dataTr, trErr := newHTTPTransport(endpoint, tlsConfig, HTTP2DataMaxReceiveBufferPerConnection)
-		if trErr != nil {
-			rt.CloseIdleConnections()
-			return nil, trErr
-		}
-		rt.dataTransports[i] = dataTr
-	}
+	rt.businessTransport = businessTr
 	return rt, nil
 }
 
-func (rt *shardedRoundTripper) selectTransport(req *http.Request) http.RoundTripper {
-	if req != nil && req.URL != nil {
-		urlPath := req.URL.Path
-		if isControlProcedure(urlPath) {
-			return rt.controlTransport
-		}
-		if isBulkDataProcedure(urlPath) {
-			idx := (rt.nextDataShard.Add(1) - 1) % HTTP2DataConnectionShards
-			return rt.dataTransports[idx]
-		}
+func (rt *controlIsolatedRoundTripper) selectTransport(req *http.Request) http.RoundTripper {
+	if req != nil && req.URL != nil && isControlProcedure(req.URL.Path) {
+		return rt.controlTransport
 	}
-	return rt.metaTransport
+	return rt.businessTransport
 }
 
-func (rt *shardedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+func (rt *controlIsolatedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return rt.selectTransport(req).RoundTrip(req)
 }
 
-func (rt *shardedRoundTripper) CloseIdleConnections() {
+func (rt *controlIsolatedRoundTripper) CloseIdleConnections() {
 	if closer, ok := rt.controlTransport.(idleConnCloser); ok {
 		closer.CloseIdleConnections()
 	}
-	if closer, ok := rt.metaTransport.(idleConnCloser); ok {
+	if closer, ok := rt.businessTransport.(idleConnCloser); ok {
 		closer.CloseIdleConnections()
-	}
-	for _, tr := range rt.dataTransports {
-		if closer, ok := tr.(idleConnCloser); ok {
-			closer.CloseIdleConnections()
-		}
 	}
 }
 
@@ -297,8 +260,8 @@ func newClientWithClock(cfg ClientConfig, clk rpcClock, opts ...connect.ClientOp
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		var rt http.RoundTripper
-		if cfg.Sharded {
-			tr, trErr := newShardedRoundTripper(endpoint, cfg.TLSConfig)
+		if cfg.IsolateControl {
+			tr, trErr := newControlIsolatedRoundTripper(endpoint, cfg.TLSConfig)
 			if trErr != nil {
 				return nil, trErr
 			}

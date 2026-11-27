@@ -24,16 +24,39 @@ const (
 
 	tmpDefaultBlksize = 4 * 1024
 
-	xattrCreateFlag    uint32 = 0x1
-	xattrReplaceFlag   uint32 = 0x2
-	maxXattrNameBytes         = 255
-	maxXattrValueBytes        = 65536
-	maxXattrListBytes         = 65536
+	xattrCreateFlag       uint32 = 0x1
+	xattrReplaceFlag      uint32 = 0x2
+	maxXattrNameBytes            = 255
+	maxXattrValueBytes           = 65536
+	maxXattrListBytes            = 65536
+	tmpExtentScanPageSize        = 4096
 )
+
+type tmpExtent struct {
+	offset uint64
+	length uint64
+}
+
+type TmpXattr struct {
+	Name  string
+	Value []byte
+}
+
+type TmpPromotedMeta struct {
+	Size   uint64
+	Atime  *timestamppb.Timestamp
+	Mtime  *timestamppb.Timestamp
+	Mode   uint32
+	Gid    uint32
+	Flags  uint32
+	Xattrs []TmpXattr
+}
 
 type TmpMaterializer interface {
 	CreateTmpInode(ctx context.Context, parentIno uint64, name string, mode, uid, gid uint32) (inode *storagev1.Inode, entryTimeout, attrTimeout float64, status fuse.Status)
-	PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent) fuse.Status
+	WriteTmpExtent(ctx context.Context, serverIno, offset uint64, data []byte) fuse.Status
+	CommitTmpMeta(ctx context.Context, serverIno uint64, meta TmpPromotedMeta) (*storagev1.Inode, fuse.Status)
+	RollbackTmpInode(ctx context.Context, parentIno uint64, name string)
 }
 
 type managedTmpFile struct {
@@ -56,6 +79,8 @@ type TmpFileManager struct {
 	mu            sync.RWMutex
 	files         map[uint64]*managedTmpFile
 	serverToLocal map[uint64]uint64
+	activeCount   atomic.Int64
+	aliasCount    atomic.Int64
 	nextTmp       atomic.Uint64
 	metrics       atomic.Pointer[Metrics]
 }
@@ -84,6 +109,9 @@ func hostErrToStatus(err error) fuse.Status {
 }
 
 func (m *TmpFileManager) activeLocalFiles() int {
+	if m.activeCount.Load() == 0 {
+		return 0
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var count int
@@ -101,9 +129,13 @@ func (m *TmpFileManager) IsUnpromoted(ino uint64) bool {
 }
 
 func (m *TmpFileManager) getFile(ino uint64) *managedTmpFile {
+	if ino&tmpLocalInoBit == 0 || m.activeCount.Load() == 0 {
+		return nil
+	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.files[ino]
+	tmp := m.files[ino]
+	m.mu.RUnlock()
+	return tmp
 }
 
 func (m *TmpFileManager) refreshResidentBytesLocked(tmp *managedTmpFile) {
@@ -124,48 +156,6 @@ func (m *TmpFileManager) releaseResidentBytesLocked(tmp *managedTmpFile) {
 	}
 	m.metrics.Load().addTmpResidentBytes(-int64(tmp.residentBytes))
 	tmp.residentBytes = 0
-}
-
-func (m *TmpFileManager) fillAttr(out *fuse.Attr, ino *storagev1.Inode) {
-	if out == nil || ino == nil {
-		return
-	}
-	out.Ino = m.ToKernelIno(ino.GetIno())
-	attr := ino.GetAttr()
-	if attr == nil {
-		return
-	}
-	out.Size = attr.GetSize()
-	out.Blocks = attr.GetBlocks()
-	out.Mode = attr.GetMode()
-	out.Nlink = attr.GetNlink()
-	out.Uid = attr.GetUid()
-	out.Gid = attr.GetGid()
-	out.Rdev = attr.GetRdev()
-	out.Blksize = attr.GetBlksize()
-	if atime := attr.GetAtime(); atime != nil {
-		out.Atime = uint64(atime.GetSeconds())
-		out.Atimensec = uint32(atime.GetNanos())
-	}
-	if mtime := attr.GetMtime(); mtime != nil {
-		out.Mtime = uint64(mtime.GetSeconds())
-		out.Mtimensec = uint32(mtime.GetNanos())
-	}
-	if ctime := attr.GetCtime(); ctime != nil {
-		out.Ctime = uint64(ctime.GetSeconds())
-		out.Ctimensec = uint32(ctime.GetNanos())
-	}
-}
-
-func (m *TmpFileManager) fillEntryOut(out *fuse.EntryOut, ino *storagev1.Inode, entryTimeoutSec, attrTimeoutSec float64) {
-	if out == nil || ino == nil {
-		return
-	}
-	out.NodeId = m.ToKernelIno(ino.GetIno())
-	out.Generation = ino.GetGeneration()
-	out.SetEntryTimeout(time.Duration(entryTimeoutSec * float64(time.Second)))
-	out.SetAttrTimeout(time.Duration(attrTimeoutSec * float64(time.Second)))
-	m.fillAttr(&out.Attr, ino)
 }
 
 func (m *TmpFileManager) Create(parent uint64, uid, gid, mode, flags uint32) (uint64, *storagev1.Inode, fuse.Status) {
@@ -197,13 +187,17 @@ func (m *TmpFileManager) Create(parent uint64, uid, gid, mode, flags uint32) (ui
 	}
 	m.mu.Lock()
 	m.files[ino] = file
+	m.activeCount.Store(int64(len(m.files)))
 	m.mu.Unlock()
 	return ino, proto.CloneOf(inode), fuse.OK
 }
 
 func (m *TmpFileManager) ToServerIno(kernelIno uint64) (uint64, fuse.Status) {
-	tmp := m.getFile(kernelIno)
-	if tmp != nil {
+	if kernelIno&tmpLocalInoBit != 0 {
+		tmp := m.getFile(kernelIno)
+		if tmp == nil {
+			return 0, fuse.ENOENT
+		}
 		tmp.mu.Lock()
 		serverIno := tmp.serverIno
 		tmp.mu.Unlock()
@@ -211,9 +205,6 @@ func (m *TmpFileManager) ToServerIno(kernelIno uint64) (uint64, fuse.Status) {
 			return serverIno, fuse.OK
 		}
 		return kernelIno, fuse.OK
-	}
-	if kernelIno&tmpLocalInoBit != 0 {
-		return 0, fuse.ENOENT
 	}
 	if kernelIno == fuse.FUSE_ROOT_ID {
 		return m.rootIno, fuse.OK
@@ -225,11 +216,13 @@ func (m *TmpFileManager) ToServerIno(kernelIno uint64) (uint64, fuse.Status) {
 }
 
 func (m *TmpFileManager) ToKernelIno(serverIno uint64) uint64 {
-	m.mu.RLock()
-	localIno := m.serverToLocal[serverIno]
-	m.mu.RUnlock()
-	if localIno != 0 {
-		return localIno
+	if m.aliasCount.Load() != 0 {
+		m.mu.RLock()
+		localIno := m.serverToLocal[serverIno]
+		m.mu.RUnlock()
+		if localIno != 0 {
+			return localIno
+		}
 	}
 	if m.rootIno != 0 && serverIno == m.rootIno {
 		return fuse.FUSE_ROOT_ID
@@ -271,7 +264,7 @@ func (m *TmpFileManager) GetAttr(ino uint64, out *fuse.Attr) (bool, fuse.Status)
 	if !ok {
 		return false, fuse.OK
 	}
-	m.fillAttr(out, inode)
+	fillFuseAttr(out, inode, m.ToKernelIno(inode.GetIno()))
 	return true, fuse.OK
 }
 
@@ -409,7 +402,7 @@ func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle 
 		a.Ctime = timestamppb.Now()
 	}
 	cloned := proto.CloneOf(tmp.inode)
-	m.fillAttr(out, cloned)
+	fillFuseAttr(out, cloned, m.ToKernelIno(cloned.GetIno()))
 	return cloned, true, fuse.OK
 }
 
@@ -636,6 +629,7 @@ func (m *TmpFileManager) installAliasLocked(localIno uint64, tmp *managedTmpFile
 	tmp.uploaded.Store(true)
 	m.mu.Lock()
 	m.serverToLocal[serverIno] = localIno
+	m.aliasCount.Store(int64(len(m.serverToLocal)))
 	m.mu.Unlock()
 }
 
@@ -647,6 +641,60 @@ type TmpLinkResult struct {
 	HasSecurityCap bool
 }
 
+func uploadTmpExtents(ctx context.Context, file *os.File, serverIno uint64, extents []tmpExtent, mat TmpMaterializer) fuse.Status {
+	if len(extents) == 0 {
+		return fuse.OK
+	}
+	uploadOne := func(uploadCtx context.Context, ext tmpExtent) fuse.Status {
+		buf := acquireStageBuf()
+		defer releaseStageBuf(buf)
+		n, err := readAtFull(file, buf[:ext.length], int64(ext.offset))
+		if err != nil {
+			return hostErrToStatus(err)
+		}
+		if uint64(n) < ext.length {
+			return fuse.EIO
+		}
+		return mat.WriteTmpExtent(uploadCtx, serverIno, ext.offset, buf[:ext.length:ext.length])
+	}
+	if len(extents) == 1 {
+		return uploadOne(ctx, extents[0])
+	}
+
+	uploadCtx, cancelUpload := context.WithCancel(ctx)
+	defer cancelUpload()
+
+	workers := min(len(extents), StageWorkers)
+	var (
+		nextIdx     atomic.Int64
+		firstStatus atomic.Uint32
+		wg          sync.WaitGroup
+	)
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for {
+				if uploadCtx.Err() != nil {
+					return
+				}
+				idx := int(nextIdx.Add(1) - 1)
+				if idx >= len(extents) {
+					return
+				}
+				if st := uploadOne(uploadCtx, extents[idx]); st != fuse.OK {
+					if firstStatus.CompareAndSwap(0, uint32(st)) {
+						cancelUpload()
+					}
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return fuse.Status(firstStatus.Load())
+}
+
 func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint64, name string, isOpen bool, mat TmpMaterializer, out *fuse.EntryOut) (res TmpLinkResult, handled bool, status fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -656,6 +704,14 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 	if st != fuse.OK {
 		return TmpLinkResult{}, true, st
 	}
+
+	var fileToClose *os.File
+	defer func() {
+		if fileToClose != nil {
+			_ = fileToClose.Close()
+		}
+	}()
+
 	tmp.mu.Lock()
 	defer tmp.mu.Unlock()
 	if tmp.exclusive || tmp.named || !isOpen || tmp.serverIno != 0 {
@@ -680,7 +736,13 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 		return TmpLinkResult{}, true, fuse.EIO
 	}
 
-	var stagedXattrs []StagedXattr
+	serverIno := inode.GetIno()
+	if extStatus := uploadTmpExtents(ctx, tmp.file, serverIno, extents, mat); extStatus != fuse.OK {
+		mat.RollbackTmpInode(ctx, parentServerIno, name)
+		return TmpLinkResult{}, true, extStatus
+	}
+
+	var stagedXattrs []TmpXattr
 	hasSecurityCap := false
 	if len(tmp.xattrs) > 0 {
 		keys := make([]string, 0, len(tmp.xattrs))
@@ -688,39 +750,19 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 			keys = append(keys, k)
 		}
 		slices.Sort(keys)
-		stagedXattrs = make([]StagedXattr, 0, len(keys))
+		stagedXattrs = make([]TmpXattr, 0, len(keys))
 		for _, k := range keys {
 			if k == securityCapabilityXattr {
 				hasSecurityCap = true
 			}
-			stagedXattrs = append(stagedXattrs, StagedXattr{
+			stagedXattrs = append(stagedXattrs, TmpXattr{
 				Name:  k,
 				Value: slices.Clone(tmp.xattrs[k]),
 			})
 		}
 	}
 
-	serverIno := inode.GetIno()
-	mergedInode := proto.CloneOf(inode)
-	mergedInode.Attr.Size = attr.Size
-	mergedInode.Attr.Blocks = max(mergedInode.Attr.Blocks, (attr.Size+511)/512)
-	mergedInode.Attr.Mode = attr.Mode
-	mergedInode.Attr.Uid = attr.Uid
-	mergedInode.Attr.Gid = attr.Gid
-	mergedInode.Attr.Flags = attr.Flags
-	if attr.Atime != nil {
-		mergedInode.Attr.Atime = proto.CloneOf(attr.Atime)
-	}
-	if attr.Mtime != nil {
-		mergedInode.Attr.Mtime = proto.CloneOf(attr.Mtime)
-	}
-	if attr.Ctime != nil {
-		mergedInode.Attr.Ctime = proto.CloneOf(attr.Ctime)
-	}
-	mergedInode.Attr.Nlink = 1
-
-	hostFile := tmp.file
-	meta := StagePromotedMeta{
+	meta := TmpPromotedMeta{
 		Size:   attr.Size,
 		Atime:  proto.CloneOf(attr.Atime),
 		Mtime:  proto.CloneOf(attr.Mtime),
@@ -729,15 +771,42 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 		Flags:  attr.Flags,
 		Xattrs: stagedXattrs,
 	}
-	m.installAliasLocked(ino, tmp, serverIno)
-	if pSt := mat.PromoteTmpfile(ctx, serverIno, ino, hostFile, meta, extents); pSt != fuse.OK {
-		return TmpLinkResult{}, true, pSt
+	committedInode, commitStatus := mat.CommitTmpMeta(ctx, serverIno, meta)
+	if commitStatus != fuse.OK {
+		mat.RollbackTmpInode(ctx, parentServerIno, name)
+		return TmpLinkResult{}, true, commitStatus
 	}
+
+	var mergedInode *storagev1.Inode
+	if committedInode != nil && committedInode.GetAttr() != nil {
+		mergedInode = proto.CloneOf(committedInode)
+	} else {
+		mergedInode = proto.CloneOf(inode)
+		mergedInode.Attr.Size = attr.Size
+		mergedInode.Attr.Blocks = max(mergedInode.Attr.Blocks, (attr.Size+511)/512)
+		mergedInode.Attr.Mode = attr.Mode
+		mergedInode.Attr.Uid = attr.Uid
+		mergedInode.Attr.Gid = attr.Gid
+		mergedInode.Attr.Flags = attr.Flags
+		if attr.Atime != nil {
+			mergedInode.Attr.Atime = proto.CloneOf(attr.Atime)
+		}
+		if attr.Mtime != nil {
+			mergedInode.Attr.Mtime = proto.CloneOf(attr.Mtime)
+		}
+		if attr.Ctime != nil {
+			mergedInode.Attr.Ctime = proto.CloneOf(attr.Ctime)
+		}
+		mergedInode.Attr.Nlink = 1
+	}
+
+	fileToClose = tmp.file
+	m.installAliasLocked(ino, tmp, serverIno)
 	tmp.named = true
 	tmp.lookups++
 	m.metrics.Load().incTmpPromote()
 
-	m.fillEntryOut(out, mergedInode, entryTimeout, attrTimeout)
+	fillFuseEntryOut(out, mergedInode, entryTimeout, attrTimeout, ino)
 	return TmpLinkResult{
 		ServerIno:      serverIno,
 		Inode:          mergedInode,
@@ -765,9 +834,11 @@ func (m *TmpFileManager) dropIfUnused(ino uint64, orphan bool, hasOpenHandles fu
 	_, existed := m.files[ino]
 	if existed {
 		delete(m.files, ino)
+		m.activeCount.Store(int64(len(m.files)))
 	}
 	if serverIno != 0 && m.serverToLocal[serverIno] == ino {
 		delete(m.serverToLocal, serverIno)
+		m.aliasCount.Store(int64(len(m.serverToLocal)))
 	}
 	m.mu.Unlock()
 
@@ -811,6 +882,8 @@ func (m *TmpFileManager) Clear() {
 	}
 	clear(m.files)
 	clear(m.serverToLocal)
+	m.activeCount.Store(0)
+	m.aliasCount.Store(0)
 	m.mu.Unlock()
 
 	var filesToClose []*os.File
@@ -826,4 +899,121 @@ func (m *TmpFileManager) Clear() {
 	for _, f := range filesToClose {
 		_ = f.Close()
 	}
+}
+
+func createAndUnlinkTempFile(dir string) (*os.File, error) {
+	f, err := os.CreateTemp(dir, "tmpfile-*")
+	if err != nil {
+		return nil, err
+	}
+	if rmErr := os.Remove(f.Name()); rmErr != nil {
+		_ = f.Close()
+		return nil, rmErr
+	}
+	return f, nil
+}
+
+func fallocateHostFileFallback(f *os.File, mode uint32, offset, length int64, curSize uint64) error {
+	switch mode {
+	case 0:
+		end := uint64(offset + length)
+		if end > curSize {
+			return f.Truncate(int64(end))
+		}
+		return nil
+	case fallocFlKeepSize:
+		return nil
+	case fallocFlPunchHole | fallocFlKeepSize:
+		if uint64(offset) >= curSize {
+			return nil
+		}
+		punchEnd := min(uint64(offset+length), curSize)
+		return writeZerosAt(f, offset, int64(punchEnd-uint64(offset)))
+	default:
+		return syscall.EOPNOTSUPP
+	}
+}
+
+func writeZerosAt(f *os.File, offset, length int64) error {
+	if length <= 0 {
+		return nil
+	}
+	var zeroBuf [32 * 1024]byte
+	pos := offset
+	rem := length
+	for rem > 0 {
+		n := min(rem, int64(len(zeroBuf)))
+		if err := writeAtFull(f, zeroBuf[:n], pos); err != nil {
+			return err
+		}
+		pos += n
+		rem -= n
+	}
+	return nil
+}
+
+func appendSplitExtents(extents []tmpExtent, start, end uint64) []tmpExtent {
+	for pos := start; pos < end; {
+		n := min(end-pos, StageChunkSize)
+		extents = append(extents, tmpExtent{offset: pos, length: n})
+		pos += n
+	}
+	return extents
+}
+
+func isAllZeroBytes(buf []byte) bool {
+	for _, b := range buf {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func scanNonZeroExtents(f *os.File, startOff, size uint64) ([]tmpExtent, error) {
+	if startOff >= size {
+		return nil, nil
+	}
+	var extents []tmpExtent
+	var page [tmpExtentScanPageSize]byte
+	hasCur := false
+	var curStart, curEnd uint64
+
+	flushExtent := func() {
+		if hasCur && curEnd > curStart {
+			extents = appendSplitExtents(extents, curStart, curEnd)
+		}
+		hasCur = false
+	}
+
+	for pos := startOff; pos < size; {
+		want := int(min(uint64(len(page)), size-pos))
+		n, err := readAtFull(f, page[:want], int64(pos))
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+		if !isAllZeroBytes(page[:n]) {
+			switch {
+			case !hasCur:
+				curStart = pos
+				curEnd = pos + uint64(n)
+				hasCur = true
+			case pos == curEnd && curEnd-curStart+uint64(n) <= StageChunkSize:
+				curEnd += uint64(n)
+			default:
+				flushExtent()
+				curStart = pos
+				curEnd = pos + uint64(n)
+				hasCur = true
+			}
+		} else if hasCur {
+			flushExtent()
+		}
+		pos += uint64(n)
+	}
+	flushExtent()
+	return extents, nil
 }

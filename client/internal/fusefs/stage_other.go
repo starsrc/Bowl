@@ -21,7 +21,7 @@ func fallocateHostFile(f *os.File, mode uint32, offset, length int64, curSize ui
 	return fallocateHostFileFallback(f, mode, offset, length, curSize)
 }
 
-func findHostDataExtents(f *os.File, size uint64) ([]stageExtent, error) {
+func findHostDataExtents(f *os.File, size uint64) ([]tmpExtent, error) {
 	return scanNonZeroExtents(f, 0, size)
 }
 

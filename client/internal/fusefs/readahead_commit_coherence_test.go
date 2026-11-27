@@ -3,7 +3,6 @@ package fusefs
 import (
 	"bytes"
 	"context"
-	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,17 +21,69 @@ import (
 
 type step69StubClient struct {
 	storagev1connect.StorageServiceClient
-	mu          sync.Mutex
-	files       map[uint64][]byte
-	writeHook   func(context.Context, *storagev1.WriteRequest) error
-	setAttrHook func(context.Context, *storagev1.SetAttrRequest) error
-	readCalls   atomic.Int64
+	mu           sync.Mutex
+	files        map[uint64][]byte
+	mknodNextIno uint64
+	writeHook    func(context.Context, *storagev1.WriteRequest) error
+	setAttrHook  func(context.Context, *storagev1.SetAttrRequest) error
+	readCalls    atomic.Int64
 }
 
 func newStep69StubClient() *step69StubClient {
 	return &step69StubClient{
 		files: make(map[uint64][]byte),
 	}
+}
+
+func (c *step69StubClient) GetAttr(_ context.Context, req *connect.Request[storagev1.GetAttrRequest]) (*connect.Response[storagev1.GetAttrResponse], error) {
+	now := timestamppb.Now()
+	mode := uint32(syscall.S_IFREG | 0o644)
+	nlink := uint32(1)
+	if req.Msg.GetIno() == 1 {
+		mode = syscall.S_IFDIR | 0o755
+		nlink = 2
+	}
+	return connect.NewResponse(&storagev1.GetAttrResponse{
+		Inode: &storagev1.Inode{
+			Ino:        req.Msg.GetIno(),
+			Generation: 1,
+			Attr: &storagev1.InodeAttribute{
+				Mode:  mode,
+				Nlink: nlink,
+				Atime: now,
+				Mtime: now,
+				Ctime: now,
+			},
+		},
+		AttrTimeoutSeconds: 1.0,
+	}), nil
+}
+
+func (c *step69StubClient) Mknod(_ context.Context, req *connect.Request[storagev1.MknodRequest]) (*connect.Response[storagev1.MknodResponse], error) {
+	c.mu.Lock()
+	ino := c.mknodNextIno
+	if ino == 0 {
+		ino = 600
+	}
+	c.mu.Unlock()
+	now := timestamppb.Now()
+	return connect.NewResponse(&storagev1.MknodResponse{
+		Inode: &storagev1.Inode{
+			Ino:        ino,
+			Generation: 1,
+			Attr: &storagev1.InodeAttribute{
+				Mode:  req.Msg.GetMode(),
+				Nlink: 1,
+				Uid:   req.Msg.GetUid(),
+				Gid:   req.Msg.GetGid(),
+				Atime: now,
+				Mtime: now,
+				Ctime: now,
+			},
+		},
+		EntryTimeoutSeconds: 1.0,
+		AttrTimeoutSeconds:  1.0,
+	}), nil
 }
 
 func (c *step69StubClient) setFile(ino uint64, data []byte) {
@@ -182,7 +233,7 @@ func TestStep69_StageOnCommit_InvalidatesReadAheadWindowAndPrefetchSlots(t *test
 		wrFh, st := fs.openHandle(ino, syscall.O_RDWR, false)
 		require.Equal(t, fuse.OK, st)
 
-		_, handled, err := fs.stage.WriteForHandle(context.Background(), nil, wrFh, ino, ino, 0, newData, 0)
+		_, handled, err := fs.stage.WriteForHandle(context.Background(), nil, wrFh, ino, ino, 0, newData)
 		require.NoError(t, err)
 		require.True(t, handled)
 		fs.stage.SealInode(ino)
@@ -251,29 +302,15 @@ func TestStep69_StageOnCommit_InvalidatesReadAheadWindowAndPrefetchSlots(t *test
 		require.Equal(t, newData, got, "scene=step69_regular_commit_evicts_readahead want='B' got=%q", got[:8])
 	})
 
-	t.Run("PromotedTmpfileExtentCommit_PreserveMetaTrue_StillEvictsReadAheadWindow", func(t *testing.T) {
+	t.Run("SyncTmpfileLinkPromotion_EvictsReadAheadWindowForPromotedServerInode", func(t *testing.T) {
 		client := newStep69StubClient()
-		const ino uint64 = 502
+		const serverIno uint64 = 502
 		const chunkLen = 128 << 10
 		const fileLen = 4 * chunkLen
 		oldData := bytes.Repeat([]byte{'A'}, fileLen)
 		newData := bytes.Repeat([]byte{'P'}, fileLen)
-		client.setFile(ino, oldData)
-
-		extentWritten := make(chan struct{})
-		var writeOnce sync.Once
-		client.writeHook = func(_ context.Context, _ *storagev1.WriteRequest) error {
-			writeOnce.Do(func() { close(extentWritten) })
-			return nil
-		}
-		commitEntered := make(chan struct{})
-		commitGate := make(chan struct{})
-		var commitOnce sync.Once
-		client.setAttrHook = func(_ context.Context, _ *storagev1.SetAttrRequest) error {
-			commitOnce.Do(func() { close(commitEntered) })
-			<-commitGate
-			return nil
-		}
+		client.setFile(serverIno, oldData)
+		client.mknodNextIno = serverIno
 
 		fs := NewRawFS(client, Config{
 			DiskID:              "disk-step69-promo",
@@ -284,21 +321,14 @@ func TestStep69_StageOnCommit_InvalidatesReadAheadWindowAndPrefetchSlots(t *test
 			EntryTimeoutSeconds: 1.0,
 			AttrTimeoutSeconds:  1.0,
 		})
-		t.Cleanup(func() {
-			select {
-			case <-commitGate:
-			default:
-				close(commitGate)
-			}
-			fs.OnUnmount()
-		})
+		t.Cleanup(fs.OnUnmount)
 
-		rdFh, st := fs.openHandle(ino, syscall.O_RDONLY, false)
+		rdFh, st := fs.openHandle(serverIno, syscall.O_RDONLY, false)
 		require.Equal(t, fuse.OK, st)
 
 		fetch := func(ctx context.Context, offset uint64, length uint32) (rpc.ReadPayload, error) {
 			resp, rErr := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
-				Ino:    ino,
+				Ino:    serverIno,
 				Offset: offset,
 				Size:   length,
 				DiskId: "disk-step69-promo",
@@ -310,63 +340,41 @@ func TestStep69_StageOnCommit_InvalidatesReadAheadWindowAndPrefetchSlots(t *test
 		}
 		warmBuf := make([]byte, chunkLen)
 		for seqOff := uint64(0); seqOff < 2*chunkLen; seqOff += chunkLen {
-			n, err := fs.readAhead.Read(context.Background(), rdFh, ino, seqOff, warmBuf, fetch)
+			n, err := fs.readAhead.Read(context.Background(), rdFh, serverIno, seqOff, warmBuf, fetch)
 			require.NoError(t, err)
 			require.Equal(t, chunkLen, n)
 			require.Equal(t, byte('A'), warmBuf[0])
 		}
 
-		tmpFile, err := os.CreateTemp(t.TempDir(), "promo-*")
-		require.NoError(t, err)
-		_, err = tmpFile.Write(newData)
-		require.NoError(t, err)
+		var tmpOut fuse.CreateOut
+		require.Equal(t, fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o644,
+		}, &tmpOut))
+		written, wrSt := fs.Write(nil, &fuse.WriteIn{
+			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+			Fh:       tmpOut.Fh,
+			Offset:   0,
+			Size:     uint32(len(newData)),
+		}, newData)
+		require.Equal(t, fuse.OK, wrSt)
+		require.Equal(t, uint32(len(newData)), written)
 
-		err = fs.stage.PromoteTmpfile(
-			context.Background(),
-			ino,
-			ino,
-			0,
-			tmpFile,
-			StagePromotedMeta{Size: fileLen, Mode: syscall.S_IFREG | 0o644},
-			[]stageExtent{{offset: 0, length: fileLen}},
-		)
-		require.NoError(t, err)
+		var linkOut fuse.EntryOut
+		require.Equal(t, fuse.OK, fs.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: tmpOut.NodeId,
+		}, "promoted-ra.bin", &linkOut))
 
-		select {
-		case <-extentWritten:
-		case <-time.After(2 * time.Second):
-			t.Fatal("promoted tmpfile extent did not upload")
-		}
-		select {
-		case <-commitEntered:
-		case <-time.After(2 * time.Second):
-			t.Fatal("promoted tmpfile SetAttr commit did not start")
-		}
-
-		afterExtentBuf := make([]byte, chunkLen)
-		n, err := fs.readAhead.Read(context.Background(), rdFh, ino, 2*chunkLen, afterExtentBuf, fetch)
+		afterPromoteBuf := make([]byte, chunkLen)
+		n, err := fs.readAhead.Read(context.Background(), rdFh, serverIno, 2*chunkLen, afterPromoteBuf, fetch)
 		require.NoError(t, err)
 		require.Equal(t, chunkLen, n)
-		require.Equal(t, byte('P'), afterExtentBuf[0], "scene=step69_promoted_extent_preserve_meta_evicts_readahead want='P' got=%q", afterExtentBuf[:8])
+		require.Equal(t, byte('P'), afterPromoteBuf[0], "scene=step69_sync_tmpfile_promote_evicts_readahead want='P' got=%q", afterPromoteBuf[:8])
 
-		client.setFile(ino, oldData)
-		fs.readAhead.InvalidateInode(ino)
-		for seqOff := uint64(0); seqOff < 2*chunkLen; seqOff += chunkLen {
-			n, err = fs.readAhead.Read(context.Background(), rdFh, ino, seqOff, warmBuf, fetch)
-			require.NoError(t, err)
-			require.Equal(t, chunkLen, n)
-			require.Equal(t, byte('A'), warmBuf[0])
-		}
-		client.setFile(ino, newData)
-
-		close(commitGate)
-		require.NoError(t, fs.stage.BarrierInode(context.Background(), ino))
-
-		afterCommitBuf := make([]byte, chunkLen)
-		n, err = fs.readAhead.Read(context.Background(), rdFh, ino, 2*chunkLen, afterCommitBuf, fetch)
-		require.NoError(t, err)
-		require.Equal(t, chunkLen, n)
-		require.Equal(t, byte('P'), afterCommitBuf[0], "scene=step69_promoted_commit_evicts_readahead want='P' got=%q", afterCommitBuf[:8])
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+		fs.Forget(tmpOut.NodeId, 2)
 	})
 
 	t.Run("RawFSRead_RemainsLockFreeUnderExclusiveInodeLock", func(t *testing.T) {

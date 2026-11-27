@@ -20,24 +20,18 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
-func buildTestShardedRoundTripper() (
-	rt *shardedRoundTripper,
+func buildTestControlIsolatedRoundTripper() (
+	rt *controlIsolatedRoundTripper,
 	controlRT *recordingRoundTripper,
-	metaRT *recordingRoundTripper,
-	dataRTs *[HTTP2DataConnectionShards]*recordingRoundTripper,
+	businessRT *recordingRoundTripper,
 ) {
 	controlRT = &recordingRoundTripper{}
-	metaRT = &recordingRoundTripper{}
-	var shards [HTTP2DataConnectionShards]*recordingRoundTripper
-	rt = &shardedRoundTripper{
-		controlTransport: controlRT,
-		metaTransport:    metaRT,
+	businessRT = &recordingRoundTripper{}
+	rt = &controlIsolatedRoundTripper{
+		controlTransport:  controlRT,
+		businessTransport: businessRT,
 	}
-	for i := range HTTP2DataConnectionShards {
-		shards[i] = &recordingRoundTripper{}
-		rt.dataTransports[i] = shards[i]
-	}
-	return rt, controlRT, metaRT, &shards
+	return rt, controlRT, businessRT
 }
 
 func dispatchRoundTrip(t *testing.T, rt http.RoundTripper, path string) {
@@ -49,71 +43,37 @@ func dispatchRoundTrip(t *testing.T, rt http.RoundTripper, path string) {
 	_ = resp.Body.Close()
 }
 
-func requireAllDataShardCalls(t *testing.T, dataRTs *[HTTP2DataConnectionShards]*recordingRoundTripper, want int64) {
+func requireDialWrapsH2CoalesceConn(t *testing.T, name string, tr *http.Transport) {
 	t.Helper()
-	for i := range HTTP2DataConnectionShards {
-		require.Equal(t, want, dataRTs[i].calls.Load(), "data shard %d call count mismatch", i)
-	}
-}
-
-func requireAllDataShardIdleClosed(t *testing.T, dataRTs *[HTTP2DataConnectionShards]*recordingRoundTripper, want int64) {
-	t.Helper()
-	for i := range HTTP2DataConnectionShards {
-		require.Equal(t, want, dataRTs[i].idleClosed.Load(), "data shard %d idle close count mismatch", i)
-	}
-}
-
-func requireAllDataTransportsConfig(t *testing.T, rt *shardedRoundTripper, wantBuf int, wantHTTPS bool, wantTLS *tls.Config) {
-	t.Helper()
-	seenTLS := make(map[*tls.Config]struct{})
-	for i := range HTTP2DataConnectionShards {
-		tr, ok := rt.dataTransports[i].(*http.Transport)
-		require.True(t, ok, "data shard %d must be *http.Transport", i)
-		require.NotNil(t, tr.HTTP2, "data shard %d must set HTTP2Config", i)
-		require.Equal(t, wantBuf, tr.HTTP2.MaxReceiveBufferPerConnection, "data shard %d buffer mismatch", i)
-		require.Equal(t, HTTP2IdleConnTimeout, tr.IdleConnTimeout, "data shard %d IdleConnTimeout mismatch", i)
-		if wantHTTPS {
-			require.True(t, tr.ForceAttemptHTTP2, "data shard %d must enable ForceAttemptHTTP2", i)
-			require.Equal(t, HTTP2TLSHandshakeTimeout, tr.TLSHandshakeTimeout, "data shard %d TLSHandshakeTimeout mismatch", i)
-			require.NotNil(t, tr.TLSClientConfig, "data shard %d TLSClientConfig must not be nil", i)
-			require.NotSame(t, wantTLS, tr.TLSClientConfig, "data shard %d must clone caller TLSConfig", i)
-			require.Equal(t, wantTLS.MinVersion, tr.TLSClientConfig.MinVersion, "data shard %d MinVersion mismatch", i)
-			_, dup := seenTLS[tr.TLSClientConfig]
-			require.False(t, dup, "data shard %d must not share TLSClientConfig with another shard", i)
-			seenTLS[tr.TLSClientConfig] = struct{}{}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		if c, accErr := ln.Accept(); accErr == nil {
+			_ = c.Close()
 		}
-	}
+	}()
+	dialedConn, dialErr := tr.DialContext(context.Background(), "tcp", ln.Addr().String())
+	require.NoError(t, dialErr, "%s dial must succeed", name)
+	_, isCoalesce := dialedConn.(*h2CoalesceConn)
+	require.True(t, isCoalesce, "%s http:// transport must wrap connections in *h2CoalesceConn, got %T", name, dialedConn)
+	_ = dialedConn.Close()
+	<-acceptDone
 }
 
-func TestShardedRoundTripper_GivenReadWriteAndReadCommitNodeTraffic_DistributesRoundRobinAcross8DataShards(t *testing.T) {
-
-	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
-
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
-	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceReadCommitNodeProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
-
-	require.Zero(t, controlRT.calls.Load(), "bulk data traffic must not use controlTransport")
-	require.Zero(t, metaRT.calls.Load(), "bulk data traffic must not use metaTransport")
-	requireAllDataShardCalls(t, dataRTs, 2)
+func requireTransportPingTimeouts(t *testing.T, name string, rt http.RoundTripper, wantSendPing, wantPingTimeout time.Duration) {
+	t.Helper()
+	tr, ok := rt.(*http.Transport)
+	require.True(t, ok, "%s must be *http.Transport", name)
+	require.NotNil(t, tr.HTTP2, "%s must set HTTP2Config", name)
+	require.Equal(t, wantSendPing, tr.HTTP2.SendPingTimeout, "%s SendPingTimeout mismatch", name)
+	require.Equal(t, wantPingTimeout, tr.HTTP2.PingTimeout, "%s PingTimeout mismatch", name)
 }
 
-func TestShardedRoundTripper_GivenControlProcedures_RoutesToDedicatedControlTransport(t *testing.T) {
-
-	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
+func TestControlIsolatedRoundTripper_GivenControlProcedures_RoutesToDedicatedControlTransport(t *testing.T) {
+	rt, controlRT, businessRT := buildTestControlIsolatedRoundTripper()
 
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceMountBranchProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceRenewMountProcedure)
@@ -123,46 +83,50 @@ func TestShardedRoundTripper_GivenControlProcedures_RoutesToDedicatedControlTran
 	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceUnmountBranchProcedure)
 
 	require.Equal(t, int64(6), controlRT.calls.Load())
-	require.Zero(t, metaRT.calls.Load())
-	requireAllDataShardCalls(t, dataRTs, 0)
+	require.Zero(t, businessRT.calls.Load())
 }
 
-func TestShardedRoundTripper_GivenMetadataAndRemainingDiskTraffic_RoutesToDedicatedMetaTransport(t *testing.T) {
+func TestControlIsolatedRoundTripper_GivenDataAndMetadataProcedures_RoutesToSharedBusinessTransport(t *testing.T) {
+	rt, controlRT, businessRT := buildTestControlIsolatedRoundTripper()
 
-	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
-
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceLookupProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceGetAttrProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceCreateProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceUnlinkProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceFsyncProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadDirPlusProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceStatFSProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceCreateDiskProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceGetDiskProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceListDisksProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceUpdateDiskProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceDeleteDiskProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceForkBranchProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReclaimOrphanProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceDiffBranchesProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceMergeBranchProcedure)
+	procedures := []string{
+		storagev1connect.StorageServiceReadProcedure,
+		"/prefix" + storagev1connect.StorageServiceWriteProcedure,
+		storagev1connect.StorageServiceReadCommitNodeProcedure,
+		"/prefix" + storagev1connect.StorageServiceReadCommitNodeProcedure,
+		storagev1connect.StorageServiceLookupProcedure,
+		storagev1connect.StorageServiceGetAttrProcedure,
+		storagev1connect.StorageServiceCreateProcedure,
+		storagev1connect.StorageServiceUnlinkProcedure,
+		storagev1connect.StorageServiceFsyncProcedure,
+		storagev1connect.StorageServiceReadDirPlusProcedure,
+		storagev1connect.StorageServiceStatFSProcedure,
+		storagev1connect.StorageServiceCreateDiskProcedure,
+		storagev1connect.StorageServiceGetDiskProcedure,
+		storagev1connect.StorageServiceListDisksProcedure,
+		storagev1connect.StorageServiceUpdateDiskProcedure,
+		storagev1connect.StorageServiceDeleteDiskProcedure,
+		storagev1connect.StorageServiceForkBranchProcedure,
+		storagev1connect.StorageServiceReclaimOrphanProcedure,
+		storagev1connect.StorageServiceDiffBranchesProcedure,
+		storagev1connect.StorageServiceMergeBranchProcedure,
+	}
+	for _, proc := range procedures {
+		dispatchRoundTrip(t, rt, proc)
+	}
 
 	require.Zero(t, controlRT.calls.Load())
-	require.Equal(t, int64(16), metaRT.calls.Load())
-	requireAllDataShardCalls(t, dataRTs, 0)
+	require.Equal(t, int64(len(procedures)), businessRT.calls.Load())
 }
 
-func TestShardedRoundTripper_WhenCloseIdleConnectionsCalled_ForwardsToControlMetaAndAll8DataShards(t *testing.T) {
-
-	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
+func TestControlIsolatedRoundTripper_WhenCloseIdleConnectionsCalled_ForwardsToControlAndBusinessTransports(t *testing.T) {
+	rt, controlRT, businessRT := buildTestControlIsolatedRoundTripper()
 	httpCli := &http.Client{Transport: rt}
 
 	httpCli.CloseIdleConnections()
 
 	require.Equal(t, int64(1), controlRT.idleClosed.Load())
-	require.Equal(t, int64(1), metaRT.idleClosed.Load())
-	requireAllDataShardIdleClosed(t, dataRTs, 1)
+	require.Equal(t, int64(1), businessRT.idleClosed.Load())
 }
 
 func TestNewClientFromConfig_GivenEndpointAndBowlTokenEnv_ResolvesEndpointAndOmitsAuthorizationHeader(t *testing.T) {
@@ -190,29 +154,38 @@ func TestNewClientFromConfig_GivenEndpointAndBowlTokenEnv_ResolvesEndpointAndOmi
 	require.Equal(t, "identity", handler.lastAcceptEnc)
 }
 
-func TestNewShardedRoundTripper_GivenHTTPAndHTTPS_ConfiguresIsolatedH2Buffers(t *testing.T) {
-
-	h2cRT, err := newShardedRoundTripper("http://127.0.0.1:9000", nil)
+func TestNewControlIsolatedRoundTripper_GivenHTTPAndHTTPS_ConfiguresIsolatedH2BuffersPingTimeoutsAndH2Coalesce(t *testing.T) {
+	h2cRT, err := newControlIsolatedRoundTripper("http://127.0.0.1:9000", nil)
 	require.NoError(t, err)
 	defer h2cRT.CloseIdleConnections()
 
+	require.Equal(t, 8<<20, HTTP2ControlMaxReceiveBufferPerConnection)
+	require.Equal(t, 64<<20, HTTP2DataMaxReceiveBufferPerConnection)
+	require.Equal(t, 3*time.Second, HTTP2SendPingTimeout)
+	require.Equal(t, 2*time.Second, HTTP2PingTimeout)
 	require.Equal(t, 90*time.Second, HTTP2IdleConnTimeout)
 	require.Equal(t, 10*time.Second, HTTP2TLSHandshakeTimeout)
+
 	controlH2C, ok := h2cRT.controlTransport.(*http.Transport)
 	require.True(t, ok)
-	require.Equal(t, 8<<20, HTTP2ControlMaxReceiveBufferPerConnection)
 	require.Equal(t, HTTP2ControlMaxReceiveBufferPerConnection, controlH2C.HTTP2.MaxReceiveBufferPerConnection)
 	require.Equal(t, HTTP2IdleConnTimeout, controlH2C.IdleConnTimeout)
+	require.NotNil(t, controlH2C.Protocols)
+	require.True(t, controlH2C.Protocols.UnencryptedHTTP2())
+	requireTransportPingTimeouts(t, "controlTransport", controlH2C, HTTP2SendPingTimeout, HTTP2PingTimeout)
+	requireDialWrapsH2CoalesceConn(t, "controlTransport", controlH2C)
 
-	metaH2C, ok := h2cRT.metaTransport.(*http.Transport)
+	businessH2C, ok := h2cRT.businessTransport.(*http.Transport)
 	require.True(t, ok)
-	require.Equal(t, 32<<20, HTTP2MetaMaxReceiveBufferPerConnection)
-	require.Equal(t, HTTP2MetaMaxReceiveBufferPerConnection, metaH2C.HTTP2.MaxReceiveBufferPerConnection)
-	require.Equal(t, HTTP2IdleConnTimeout, metaH2C.IdleConnTimeout)
-	requireAllDataTransportsConfig(t, h2cRT, HTTP2DataMaxReceiveBufferPerConnection, false, nil)
+	require.Equal(t, HTTP2DataMaxReceiveBufferPerConnection, businessH2C.HTTP2.MaxReceiveBufferPerConnection)
+	require.Equal(t, HTTP2IdleConnTimeout, businessH2C.IdleConnTimeout)
+	require.NotNil(t, businessH2C.Protocols)
+	require.True(t, businessH2C.Protocols.UnencryptedHTTP2())
+	requireTransportPingTimeouts(t, "businessTransport", businessH2C, HTTP2SendPingTimeout, HTTP2PingTimeout)
+	requireDialWrapsH2CoalesceConn(t, "businessTransport", businessH2C)
 
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
-	tlsRT, err := newShardedRoundTripper("https://storage.bowl.local:9443", tlsCfg)
+	tlsRT, err := newControlIsolatedRoundTripper("https://storage.bowl.local:9443", tlsCfg)
 	require.NoError(t, err)
 	defer tlsRT.CloseIdleConnections()
 
@@ -225,24 +198,19 @@ func TestNewShardedRoundTripper_GivenHTTPAndHTTPS_ConfiguresIsolatedH2Buffers(t 
 	require.NotSame(t, tlsCfg, controlTLS.TLSClientConfig)
 	require.Equal(t, uint16(tls.VersionTLS13), controlTLS.TLSClientConfig.MinVersion)
 	require.Equal(t, HTTP2ControlMaxReceiveBufferPerConnection, controlTLS.HTTP2.MaxReceiveBufferPerConnection)
+	requireTransportPingTimeouts(t, "controlTransportTLS", controlTLS, HTTP2SendPingTimeout, HTTP2PingTimeout)
 
-	metaTLS, ok := tlsRT.metaTransport.(*http.Transport)
+	businessTLS, ok := tlsRT.businessTransport.(*http.Transport)
 	require.True(t, ok)
-	require.True(t, metaTLS.ForceAttemptHTTP2)
-	require.Equal(t, HTTP2TLSHandshakeTimeout, metaTLS.TLSHandshakeTimeout)
-	require.Equal(t, HTTP2IdleConnTimeout, metaTLS.IdleConnTimeout)
-	require.NotNil(t, metaTLS.TLSClientConfig)
-	require.NotSame(t, tlsCfg, metaTLS.TLSClientConfig)
-	require.NotSame(t, controlTLS.TLSClientConfig, metaTLS.TLSClientConfig)
-	require.Equal(t, uint16(tls.VersionTLS13), metaTLS.TLSClientConfig.MinVersion)
-	require.Equal(t, HTTP2MetaMaxReceiveBufferPerConnection, metaTLS.HTTP2.MaxReceiveBufferPerConnection)
-	requireAllDataTransportsConfig(t, tlsRT, HTTP2DataMaxReceiveBufferPerConnection, true, tlsCfg)
-	for i := range HTTP2DataConnectionShards {
-		dataTr, dataOK := tlsRT.dataTransports[i].(*http.Transport)
-		require.True(t, dataOK)
-		require.NotSame(t, controlTLS.TLSClientConfig, dataTr.TLSClientConfig)
-		require.NotSame(t, metaTLS.TLSClientConfig, dataTr.TLSClientConfig)
-	}
+	require.True(t, businessTLS.ForceAttemptHTTP2)
+	require.Equal(t, HTTP2TLSHandshakeTimeout, businessTLS.TLSHandshakeTimeout)
+	require.Equal(t, HTTP2IdleConnTimeout, businessTLS.IdleConnTimeout)
+	require.NotNil(t, businessTLS.TLSClientConfig)
+	require.NotSame(t, tlsCfg, businessTLS.TLSClientConfig)
+	require.NotSame(t, controlTLS.TLSClientConfig, businessTLS.TLSClientConfig)
+	require.Equal(t, uint16(tls.VersionTLS13), businessTLS.TLSClientConfig.MinVersion)
+	require.Equal(t, HTTP2DataMaxReceiveBufferPerConnection, businessTLS.HTTP2.MaxReceiveBufferPerConnection)
+	requireTransportPingTimeouts(t, "businessTransportTLS", businessTLS, HTTP2SendPingTimeout, HTTP2PingTimeout)
 }
 
 type tierTestStorageHandler struct {
@@ -360,18 +328,18 @@ func runRepeatedBulkCalls(t *testing.T, ctx context.Context, client storagev1con
 	}
 }
 
-func TestNewClient_GivenControlMetaAndBulkTraffic_IsolatesThreeTransportTiers(t *testing.T) {
-
+func TestNewClient_GivenControlMetaAndBulkTraffic_IsolatesControlFromSharedBusinessTransport(t *testing.T) {
 	recorder := newRecordedProcedureAddrs()
 	endpoint := startH2CStorageServer(t, &tierTestStorageHandler{}, func(r *http.Request) {
 		recorder.Record(r.URL.Path, r.RemoteAddr)
 	})
 	client, err := NewClientFromConfig(ClientConfig{
-		Endpoint:    endpoint,
-		RetryConfig: &RetryConfig{Disable: true},
-		Sharded:     true,
+		Endpoint:       endpoint,
+		RetryConfig:    &RetryConfig{Disable: true},
+		IsolateControl: true,
 	})
 	require.NoError(t, err)
+	defer CloseIdleConnections(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -391,68 +359,26 @@ func TestNewClient_GivenControlMetaAndBulkTraffic_IsolatesThreeTransportTiers(t 
 	_, err = client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{Ino: 1}))
 	require.NoError(t, err)
 
-	runRepeatedBulkCalls(t, ctx, client, HTTP2DataConnectionShards)
+	runRepeatedBulkCalls(t, ctx, client, 8)
 
 	controlAddrs := recorder.AddrSet(
 		storagev1connect.StorageServiceMountBranchProcedure,
 		storagev1connect.StorageServiceRenewMountProcedure,
 		storagev1connect.StorageServiceUnmountBranchProcedure,
 	)
-	metaAddrs := recorder.AddrSet(
+	businessAddrs := recorder.AddrSet(
 		storagev1connect.StorageServiceLookupProcedure,
 		storagev1connect.StorageServiceGetAttrProcedure,
 		storagev1connect.StorageServiceCreateDiskProcedure,
 		storagev1connect.StorageServiceStatFSProcedure,
-	)
-	dataAddrs := recorder.AddrSet(
 		storagev1connect.StorageServiceReadProcedure,
 		storagev1connect.StorageServiceWriteProcedure,
 		storagev1connect.StorageServiceReadCommitNodeProcedure,
 	)
-	commitNodeAddrs := recorder.AddrSet(storagev1connect.StorageServiceReadCommitNodeProcedure)
 
 	require.Len(t, controlAddrs, 1, "control RPCs must share one dedicated TCP connection")
-	require.Len(t, metaAddrs, 1, "metadata and disk RPCs must share one dedicated TCP connection")
-	require.Len(t, dataAddrs, HTTP2DataConnectionShards, "bulk data RPCs must span 8 TCP connections")
-	require.Len(t, commitNodeAddrs, HTTP2DataConnectionShards, "ReadCommitNode must span all 8 data TCP connections")
-	requireDisjointAddrSets(t, "control", controlAddrs, "meta", metaAddrs)
-	requireDisjointAddrSets(t, "control", controlAddrs, "data", dataAddrs)
-	requireDisjointAddrSets(t, "meta", metaAddrs, "data", dataAddrs)
-}
-
-func requireTransportPingTimeouts(t *testing.T, name string, rt http.RoundTripper, wantSendPing, wantPingTimeout time.Duration) {
-	t.Helper()
-	tr, ok := rt.(*http.Transport)
-	require.True(t, ok, "%s must be *http.Transport", name)
-	require.NotNil(t, tr.HTTP2, "%s must set HTTP2Config", name)
-	require.Equal(t, wantSendPing, tr.HTTP2.SendPingTimeout, "%s SendPingTimeout mismatch", name)
-	require.Equal(t, wantPingTimeout, tr.HTTP2.PingTimeout, "%s PingTimeout mismatch", name)
-}
-
-func requireShardedRoundTripperPingTimeouts(t *testing.T, rt *shardedRoundTripper, wantSendPing, wantPingTimeout time.Duration) {
-	t.Helper()
-	requireTransportPingTimeouts(t, "controlTransport", rt.controlTransport, wantSendPing, wantPingTimeout)
-	requireTransportPingTimeouts(t, "metaTransport", rt.metaTransport, wantSendPing, wantPingTimeout)
-	for i := range HTTP2DataConnectionShards {
-		requireTransportPingTimeouts(t, "dataTransport", rt.dataTransports[i], wantSendPing, wantPingTimeout)
-	}
-}
-
-func TestNewShardedRoundTripper_GivenHTTPAndHTTPS_ConfiguresPingTimeoutsAcrossAllThreeTiers(t *testing.T) {
-
-	h2cRT, err := newShardedRoundTripper("http://127.0.0.1:9000", nil)
-	require.NoError(t, err)
-	defer h2cRT.CloseIdleConnections()
-
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
-	tlsRT, err := newShardedRoundTripper("https://storage.bowl.local:9443", tlsCfg)
-	require.NoError(t, err)
-	defer tlsRT.CloseIdleConnections()
-
-	require.Equal(t, 3*time.Second, HTTP2SendPingTimeout)
-	require.Equal(t, 2*time.Second, HTTP2PingTimeout)
-	requireShardedRoundTripperPingTimeouts(t, h2cRT, HTTP2SendPingTimeout, HTTP2PingTimeout)
-	requireShardedRoundTripperPingTimeouts(t, tlsRT, HTTP2SendPingTimeout, HTTP2PingTimeout)
+	require.Len(t, businessAddrs, 1, "all data and metadata RPCs must share one business TCP connection")
+	requireDisjointAddrSets(t, "control", controlAddrs, "business", businessAddrs)
 }
 
 type tcpBlackholeProxy struct {
@@ -609,7 +535,6 @@ func (p *tcpBlackholeProxy) Close() {
 }
 
 func TestNewClient_GivenBlackholedTCPConnectionAfterWarmup_EvictsViaPingWithin5sAndRedials(t *testing.T) {
-
 	backendURL := startH2CStorageServer(t, &tierTestStorageHandler{}, nil)
 	proxy := startTCPBlackholeProxy(t, strings.TrimPrefix(backendURL, "http://"))
 	client, err := NewClientFromConfig(ClientConfig{
@@ -689,18 +614,19 @@ func TestNewClient_GivenSharedTLSConfigAndConcurrentHTTPSRequests_ClonesTLSConfi
 	}
 
 	client, err := NewClientFromConfig(ClientConfig{
-		Endpoint:    srv.URL,
-		TLSConfig:   callerTLS,
-		RetryConfig: &RetryConfig{Disable: true},
-		Sharded:     true,
+		Endpoint:       srv.URL,
+		TLSConfig:      callerTLS,
+		RetryConfig:    &RetryConfig{Disable: true},
+		IsolateControl: true,
 	})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	const concurrentReads = 8
 	var wg sync.WaitGroup
-	errCh := make(chan error, 2+HTTP2DataConnectionShards*2)
+	errCh := make(chan error, 2+concurrentReads)
 
 	wg.Go(func() {
 		_, callErr := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{DiskId: "disk-1", MountId: "mount-1"}))
@@ -712,7 +638,7 @@ func TestNewClient_GivenSharedTLSConfigAndConcurrentHTTPSRequests_ClonesTLSConfi
 		errCh <- callErr
 	})
 
-	for range HTTP2DataConnectionShards * 2 {
+	for range concurrentReads {
 		wg.Go(func() {
 			_, callErr := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 			errCh <- callErr
@@ -725,9 +651,18 @@ func TestNewClient_GivenSharedTLSConfigAndConcurrentHTTPSRequests_ClonesTLSConfi
 		require.NoError(t, callErr)
 	}
 
-	require.Empty(t, callerTLS.NextProtos, "caller TLSConfig must never be mutated by sharded transports")
-	require.GreaterOrEqual(t, h2Count.Load(), int64(2+HTTP2DataConnectionShards*2))
-	require.GreaterOrEqual(t, openedTotal.Load(), int64(2+HTTP2DataConnectionShards))
+	require.Empty(t, callerTLS.NextProtos, "caller TLSConfig must never be mutated by control-isolated transports")
+	require.Equal(t, int64(2+concurrentReads), h2Count.Load())
+	require.GreaterOrEqual(t, openedTotal.Load(), int64(2), "control-isolated HTTPS client must open at least 2 TCP connections")
+
+	openedAfterWarmup := openedTotal.Load()
+	_, err = client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{DiskId: "disk-1", MountId: "mount-1"}))
+	require.NoError(t, err)
+	_, err = client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{ParentIno: 1, Name: []byte("tls-reuse")}))
+	require.NoError(t, err)
+	_, err = client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+	require.NoError(t, err)
+	require.Equal(t, openedAfterWarmup, openedTotal.Load(), "steady-state HTTPS control and business RPCs must reuse established H2 connections")
 
 	connMu.Lock()
 	expectClose.Store(true)
@@ -760,7 +695,7 @@ func TestNewClient_GivenSharedTLSConfigAndConcurrentHTTPSRequests_ClonesTLSConfi
 	require.Zero(t, customRT.idleClosed.Load(), "CloseIdleConnections must be a no-op for caller-owned HTTPClient")
 }
 
-func TestNewClient_GivenDefaultUnshardedConfig_UsesSingleTransportWithControlBufferAndH2Coalesce(t *testing.T) {
+func TestNewClient_GivenDefaultSingleTransportConfig_UsesSingleTransportWithControlBufferAndH2Coalesce(t *testing.T) {
 	t.Run("HTTP_SingleConnectionControlBufferAndH2Coalesce", func(t *testing.T) {
 		recorder := newRecordedProcedureAddrs()
 		endpoint := startH2CStorageServer(t, &tierTestStorageHandler{}, func(r *http.Request) {
@@ -777,7 +712,7 @@ func TestNewClient_GivenDefaultUnshardedConfig_UsesSingleTransportWithControlBuf
 		owned, ok := client.(*ownedTransportClient)
 		require.True(t, ok, "default client must be wrapped in *ownedTransportClient")
 		tr, ok := owned.closer.(*http.Transport)
-		require.True(t, ok, "default unsharded client must use single *http.Transport, got %T", owned.closer)
+		require.True(t, ok, "default single-transport client must use single *http.Transport, got %T", owned.closer)
 		require.NotNil(t, tr.HTTP2)
 		require.Equal(t, HTTP2ControlMaxReceiveBufferPerConnection, tr.HTTP2.MaxReceiveBufferPerConnection)
 		require.Equal(t, HTTP2SendPingTimeout, tr.HTTP2.SendPingTimeout)
@@ -785,23 +720,7 @@ func TestNewClient_GivenDefaultUnshardedConfig_UsesSingleTransportWithControlBuf
 		require.Equal(t, HTTP2IdleConnTimeout, tr.IdleConnTimeout)
 		require.NotNil(t, tr.Protocols)
 		require.True(t, tr.Protocols.UnencryptedHTTP2())
-
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		require.NoError(t, err)
-		defer func() { _ = ln.Close() }()
-		acceptDone := make(chan struct{})
-		go func() {
-			defer close(acceptDone)
-			if c, accErr := ln.Accept(); accErr == nil {
-				_ = c.Close()
-			}
-		}()
-		dialedConn, dialErr := tr.DialContext(context.Background(), "tcp", ln.Addr().String())
-		require.NoError(t, dialErr)
-		_, isCoalesce := dialedConn.(*h2CoalesceConn)
-		require.True(t, isCoalesce, "http:// default transport must wrap connections in *h2CoalesceConn, got %T", dialedConn)
-		_ = dialedConn.Close()
-		<-acceptDone
+		requireDialWrapsH2CoalesceConn(t, "singleTransport", tr)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -809,7 +728,7 @@ func TestNewClient_GivenDefaultUnshardedConfig_UsesSingleTransportWithControlBuf
 		require.NoError(t, err)
 		_, err = client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{ParentIno: 1, Name: []byte("a")}))
 		require.NoError(t, err)
-		runRepeatedBulkCalls(t, ctx, client, HTTP2DataConnectionShards)
+		runRepeatedBulkCalls(t, ctx, client, 8)
 
 		allAddrs := recorder.AddrSet(
 			storagev1connect.StorageServiceMountBranchProcedure,
@@ -818,7 +737,7 @@ func TestNewClient_GivenDefaultUnshardedConfig_UsesSingleTransportWithControlBuf
 			storagev1connect.StorageServiceWriteProcedure,
 			storagev1connect.StorageServiceReadCommitNodeProcedure,
 		)
-		require.Len(t, allAddrs, 1, "default unsharded client must multiplex all RPCs over a single TCP connection")
+		require.Len(t, allAddrs, 1, "default single-transport client must multiplex all RPCs over a single TCP connection")
 	})
 
 	t.Run("HTTPS_SingleConnectionClonedTLSAndCloseIdleConnections", func(t *testing.T) {
@@ -881,7 +800,7 @@ func TestNewClient_GivenDefaultUnshardedConfig_UsesSingleTransportWithControlBuf
 		owned, ok := client.(*ownedTransportClient)
 		require.True(t, ok)
 		tr, ok := owned.closer.(*http.Transport)
-		require.True(t, ok, "default unsharded HTTPS client must use single *http.Transport, got %T", owned.closer)
+		require.True(t, ok, "default single-transport HTTPS client must use single *http.Transport, got %T", owned.closer)
 		require.True(t, tr.ForceAttemptHTTP2)
 		require.Equal(t, HTTP2TLSHandshakeTimeout, tr.TLSHandshakeTimeout)
 		require.Equal(t, HTTP2IdleConnTimeout, tr.IdleConnTimeout)
@@ -903,7 +822,7 @@ func TestNewClient_GivenDefaultUnshardedConfig_UsesSingleTransportWithControlBuf
 
 		require.Empty(t, callerTLS.NextProtos, "caller TLSConfig must never be mutated")
 		require.Equal(t, int64(3), h2Count.Load())
-		require.Equal(t, int64(1), openedTotal.Load(), "default unsharded HTTPS client must open only one TCP connection")
+		require.Equal(t, int64(1), openedTotal.Load(), "default single-transport HTTPS client must open only one TCP connection")
 
 		connMu.Lock()
 		expectClose.Store(true)

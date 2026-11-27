@@ -2,30 +2,31 @@ package fusefs
 
 import (
 	"context"
-	"os"
 	"syscall"
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 type rawFSTmpMaterializer struct {
-	fs    *RawFS
-	epoch uint64
+	fs *RawFS
 }
 
-func (fs *RawFS) newTmpMaterializer(epoch uint64) *rawFSTmpMaterializer {
-	return &rawFSTmpMaterializer{
-		fs:    fs,
-		epoch: epoch,
-	}
+func (fs *RawFS) newTmpMaterializer() *rawFSTmpMaterializer {
+	return &rawFSTmpMaterializer{fs: fs}
 }
 
 func (m *rawFSTmpMaterializer) CreateTmpInode(ctx context.Context, parentIno uint64, name string, mode, uid, gid uint32) (inode *storagev1.Inode, entryTimeout, attrTimeout float64, status fuse.Status) {
-	reqCtx := rpc.WithRequestID(ctx, m.fs.NextRequestID())
+	if st := m.fs.FenceStatus(); st != fuse.OK {
+		return nil, 0, 0, st
+	}
+	if m.fs.client == nil {
+		return nil, 0, 0, fuse.EIO
+	}
+	reqCtx, cancel := m.fs.RPCContextFrom(ctx, nil)
+	defer cancel()
 	resp, err := m.fs.client.Mknod(reqCtx, connect.NewRequest(&storagev1.MknodRequest{
 		ParentIno: parentIno,
 		Name:      []byte(name),
@@ -43,8 +44,129 @@ func (m *rawFSTmpMaterializer) CreateTmpInode(ctx context.Context, parentIno uin
 	return resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
-func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent) fuse.Status {
-	return m.fs.stageErrToStatus(m.fs.stage.PromoteTmpfile(ctx, serverIno, nodeID, m.epoch, file, meta, extents))
+func (m *rawFSTmpMaterializer) WriteTmpExtent(ctx context.Context, serverIno, offset uint64, data []byte) fuse.Status {
+	if st := m.fs.FenceStatus(); st != fuse.OK {
+		return st
+	}
+	if m.fs.client == nil {
+		return fuse.EIO
+	}
+	reqCtx, cancel := m.fs.RPCContextFrom(ctx, nil)
+	defer cancel()
+	resp, err := m.fs.client.Write(reqCtx, connect.NewRequest(&storagev1.WriteRequest{
+		Ino:    serverIno,
+		Fh:     0,
+		Offset: offset,
+		Data:   data,
+		DiskId: m.fs.cfg.DiskID,
+		Branch: m.fs.cfg.Branch,
+		Epoch:  m.fs.cfg.Epoch,
+	}))
+	if err != nil {
+		return m.fs.ToStatus(err)
+	}
+	m.fs.markMetaDirty()
+	if resp.Msg.GetSize() < uint32(len(data)) {
+		return fuse.EIO
+	}
+	return fuse.OK
+}
+
+func (m *rawFSTmpMaterializer) CommitTmpMeta(ctx context.Context, serverIno uint64, meta TmpPromotedMeta) (*storagev1.Inode, fuse.Status) {
+	if st := m.fs.FenceStatus(); st != fuse.OK {
+		return nil, st
+	}
+	if m.fs.client == nil {
+		return nil, fuse.EIO
+	}
+	size := meta.Size
+	mode := meta.Mode
+	gid := meta.Gid
+	reqCtx, cancel := m.fs.RPCContextFrom(ctx, nil)
+	resp, err := m.fs.client.SetAttr(reqCtx, connect.NewRequest(&storagev1.SetAttrRequest{
+		Ino:    serverIno,
+		Size:   &size,
+		Atime:  meta.Atime,
+		Mtime:  meta.Mtime,
+		Mode:   &mode,
+		Gid:    &gid,
+		DiskId: m.fs.cfg.DiskID,
+		Branch: m.fs.cfg.Branch,
+		Epoch:  m.fs.cfg.Epoch,
+	}))
+	cancel()
+	if err != nil {
+		return nil, m.fs.ToStatus(err)
+	}
+	m.fs.markMetaDirty()
+	finalInode := resp.Msg.GetInode()
+
+	for _, xa := range meta.Xattrs {
+		if st := m.fs.FenceStatus(); st != fuse.OK {
+			return nil, st
+		}
+		xReqCtx, xCancel := m.fs.RPCContextFrom(ctx, nil)
+		_, xErr := m.fs.client.SetXattr(xReqCtx, connect.NewRequest(&storagev1.SetXattrRequest{
+			Ino:    serverIno,
+			Name:   []byte(xa.Name),
+			Value:  xa.Value,
+			Flags:  0,
+			DiskId: m.fs.cfg.DiskID,
+			Branch: m.fs.cfg.Branch,
+			Epoch:  m.fs.cfg.Epoch,
+		}))
+		xCancel()
+		if xErr != nil {
+			return nil, m.fs.ToStatus(xErr)
+		}
+		m.fs.markMetaDirty()
+	}
+
+	if meta.Flags != 0 {
+		if st := m.fs.FenceStatus(); st != fuse.OK {
+			return nil, st
+		}
+		flags := meta.Flags
+		fReqCtx, fCancel := m.fs.RPCContextFrom(ctx, nil)
+		fResp, fErr := m.fs.client.SetAttr(fReqCtx, connect.NewRequest(&storagev1.SetAttrRequest{
+			Ino:    serverIno,
+			Flags:  &flags,
+			DiskId: m.fs.cfg.DiskID,
+			Branch: m.fs.cfg.Branch,
+			Epoch:  m.fs.cfg.Epoch,
+		}))
+		fCancel()
+		if fErr != nil {
+			return nil, m.fs.ToStatus(fErr)
+		}
+		m.fs.markMetaDirty()
+		if fResp.Msg.GetInode() != nil {
+			finalInode = fResp.Msg.GetInode()
+		}
+	}
+	return finalInode, fuse.OK
+}
+
+func (m *rawFSTmpMaterializer) RollbackTmpInode(ctx context.Context, parentIno uint64, name string) {
+	if m.fs.client == nil || m.fs.IsFenced() {
+		return
+	}
+	rbCtx, cancel := m.fs.RPCContextFrom(context.WithoutCancel(ctx), nil)
+	defer cancel()
+	open := false
+	_, err := m.fs.client.Unlink(rbCtx, connect.NewRequest(&storagev1.UnlinkRequest{
+		ParentIno:    parentIno,
+		Name:         []byte(name),
+		OpenInClient: &open,
+		DiskId:       m.fs.cfg.DiskID,
+		Branch:       m.fs.cfg.Branch,
+		Epoch:        m.fs.cfg.Epoch,
+	}))
+	if err != nil {
+		m.fs.fenceIfStaleEpoch(err)
+		return
+	}
+	m.fs.markMetaDirty()
 }
 
 func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
@@ -179,11 +301,9 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, input *fuse.LinkIn, filename
 	unlock := fs.inodeLocks.lock(input.Oldnodeid)
 	defer unlock()
 	detachedCtx := context.WithoutCancel(parentCtx)
-	ctx, done := fs.RPCContextFrom(detachedCtx, nil)
-	defer done()
-	mat := fs.newTmpMaterializer(0)
+	mat := fs.newTmpMaterializer()
 	res, handled, status := fs.tmpMgr.Link(
-		ctx, input.Oldnodeid, input.NodeId, filename, fs.handles.IsOpen(input.Oldnodeid), mat, out,
+		detachedCtx, input.Oldnodeid, input.NodeId, filename, fs.handles.IsOpen(input.Oldnodeid), mat, out,
 	)
 	if !handled {
 		return fuse.OK, false
@@ -191,6 +311,8 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, input *fuse.LinkIn, filename
 	if status != fuse.OK {
 		return status, true
 	}
+	fs.readAhead.InvalidateInode(res.ServerIno)
+	fs.stage.ObserveServerInode(res.ServerIno, res.Inode, false)
 	fs.markMetaDirty()
 	if res.HasSecurityCap {
 		fs.caps.markPresent(input.Oldnodeid)
